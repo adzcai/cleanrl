@@ -1,6 +1,6 @@
 import argparse
 from collections.abc import Callable
-from typing import NamedTuple
+from typing import NamedTuple, Optional
 import jax
 import jax.random as rand
 import jax.numpy as jnp
@@ -9,22 +9,9 @@ from jaxtyping import Float, Bool, Integer, PyTree, UInt, Array
 NULL = -1
 
 StateEmbedding = Float[Array, "..."]
-
-
-class WorldModelOutput(NamedTuple):
-    prior_logits: Float[Array, " a"]
-    value: Float[Array, ""]
-    reward: Float[Array, ""]
-    embedding: StateEmbedding
-
-
 Params = PyTree
 StateIndex = Integer[Array, ""]
 Action = UInt[Array, ""]
-WorldModel = Callable[
-    [Params, rand.PRNGKey, StateEmbedding, Action],
-    WorldModelOutput,
-]
 
 
 class Config(argparse.Namespace):
@@ -33,16 +20,32 @@ class Config(argparse.Namespace):
 
 
 class Tree(NamedTuple):
-    state_visits: UInt[Array, " s"]
-    state_parent: UInt[Array, " s"]
-    state_value: Float[Array, " s"]
-    state_parent_action: UInt[Array, " s"]
-    state_embedding: Float[Array, "s ..."]
+    state_visits: UInt[Array, "*batch state"]
+    state_parent: UInt[Array, "*batch state"]
+    state_value: Float[Array, "*batch state"]
+    state_parent_action: UInt[Array, "*batch state"]
+    state_embedding: Float[Array, "*batch state ..."]
 
-    edge_visits: UInt[Array, "s a"]
-    edge_prior: Float[Array, "s a"]
-    edge_reward: Float[Array, "s a"]
-    edge_transition: UInt[Array, "s a"]
+    edge_visits: UInt[Array, "*batch state action"]
+    edge_prior: Float[Array, "*batch state action"]
+    edge_reward: Float[Array, "*batch state action"]
+    edge_transition: UInt[Array, "*batch state action"]
+
+
+class RecurrentActorCriticOutput(NamedTuple):
+    prior_logits: Float[Array, " a"]
+    value: Float[Array, ""]
+    embedding: StateEmbedding
+
+
+class WorldModelOutput(RecurrentActorCriticOutput):
+    reward: Float[Array, ""]
+
+
+WorldModel = Callable[
+    [Params, rand.PRNGKey, StateEmbedding, Action],
+    WorldModelOutput,
+]
 
 
 ActionChooser = Callable[[rand.PRNGKey, Tree, StateIndex, UInt[Array, ""]], Action]
@@ -54,8 +57,14 @@ def mcts(
     world_model: WorldModel,
     choose_action: ActionChooser,
     n_simulations: int,
-    max_depth: int,
+    root: WorldModelOutput,
+    max_depth: Optional[int] = None,
 ):
+    root_state = jnp.array(0, dtype=jnp.uint32)
+
+    if max_depth is None:
+        max_depth = n_simulations
+
     def mcts_fn(i, carry: tuple[rand.PRNGKey, Tree]):
         rng, tree = carry
         rng, key_select, key_expand = rand.split(rng, 3)
@@ -64,7 +73,7 @@ def mcts(
             rng=key_select,
             tree=tree,
             choose_action=choose_action,
-            root_state=jnp.array(0, dtype=jnp.uint32),
+            root_state=root_state,
             max_depth=max_depth,
         )
 
@@ -80,10 +89,26 @@ def mcts(
             action=action,
             leaf_state=leaf,
         )
-        tree = backward(tree, leaf)
+        tree = backward(tree, root_state, leaf)
         return rng, tree
 
-    tree = Tree()
+    tree_size = min(max_depth, n_simulations) + 1
+    n_actions = root.prior_logits.size
+    f_dtype = jnp.float32
+    tree = Tree(
+        state_visits=jnp.zeros(tree_size, dtype=jnp.uint32),
+        state_parent=jnp.full(tree_size, NULL, dtype=jnp.int32),
+        state_value=jnp.zeros(tree_size, dtype=f_dtype),
+        state_parent_action=jnp.full(tree_size, NULL, dtype=jnp.int32),
+        state_embedding=jnp.zeros_like(root.embedding),
+        edge_visits=jnp.zeros((tree_size, n_actions), dtype=jnp.uint32),
+        edge_prior=jnp.zeros((tree_size, n_actions), dtype=root.prior_logits.dtype),
+        edge_reward=jnp.zeros(tree_size, dtype=f_dtype),
+        edge_transition=jnp.full((tree_size, n_actions), NULL, dtype=jnp.int32),
+    )
+
+    tree = initialize_state(tree, root, root_state)
+
     _, tree = jax.lax.fori_loop(0, n_simulations, mcts_fn, (rng, tree))
     return tree
 
@@ -145,14 +170,11 @@ def expand(
     out = world_model(params, rng, tree.state_embedding[parent_state], action)
 
     # assumes leaf_state has not yet been visited
+    tree = initialize_state(tree, out, leaf_state)
     return tree._replace(
-        edge_prior=tree.edge_prior.at[leaf_state].set(out.prior_logits),
-        state_value=tree.state_value.at[parent_state, action].set(out.value),
         edge_reward=tree.edge_reward.at[parent_state, action].set(out.reward),
-        state_embedding=tree.state_embedding.at[leaf_state].set(out.embedding),
         state_parent=tree.state_parent.at[leaf_state].set(parent_state),
         state_parent_action=tree.state_parent_action.at[leaf_state].set(action),
-        state_visits=tree.state_visits.at[leaf_state].add(1.0),
     )
 
 
@@ -187,3 +209,22 @@ def backward(
         lambda carry: carry.state != root_state, backward_fn, init_carry
     )
     return carry.tree
+
+
+def initialize_state(tree: Tree, update: RecurrentActorCriticOutput, state: StateIndex):
+    return tree._replace(
+        edge_prior=tree.edge_prior.at[state].set(update.prior_logits),
+        state_value=tree.state_value.at[state].set(update.value),
+        state_embedding=tree.state_embedding.at[state].set(update.embedding),
+        state_visits=tree.state_visits.at[state].add(1.0),
+    )
+
+
+def make_train():
+    ...
+
+
+
+
+if __name__ == "__main__":
+    ...
