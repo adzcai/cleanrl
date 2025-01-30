@@ -12,5 +12,7 @@ dependencies = [
     "ipykernel>=6.29.5",
     "jaxtyping>=0.2.36",
     "mctx>=0.0.5",
+    "pygraphviz>=1.14",
+    "pytest>=8.3.4",
     "wandb>=0.19.4",
 ]
