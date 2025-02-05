@@ -28,99 +28,146 @@ from gymnax.visualize import Visualizer
 matplotlib.use("agg")
 
 
-class ObsWithDone(NamedTuple):
-    obs: Float[Array, "*batch obs_size"]
-    env_state: EnvState
-    done: Bool[Array, "*batch"]
-
-
-class ActorCriticRNN(eqx.Module):
+class WorldModelRNN(eqx.Module):
     """Parameterizes the actor-critic network."""
 
     cell: eqx.nn.GRUCell
+    reward_head: eqx.nn.MLP
+
+    def __init__(
+        self,
+        num_actions: int,
+        rnn_size: int,
+        mlp_size: int,
+        mlp_depth: int,
+        *,
+        key: rand.PRNGKey,
+    ):
+        key_cell, key_reward = rand.split(key)
+        self.cell = eqx.nn.GRUCell(num_actions, rnn_size, key=key_cell)
+        self.reward_head = eqx.nn.MLP(
+            rnn_size, "scalar", mlp_size, mlp_depth, key=key_reward
+        )
+
+    def __call__(
+        self, hidden: Float[Array, "rnn_size"], actions: Integer[Array, "horizon"]
+    ):
+        return jax.lax.scan(
+            lambda carry, x: self.step(carry, x),
+            hidden,
+            actions,
+        )
+
+    def step(self, hidden: Float[Array, "rnn_size"], action: Integer[Array, ""]):
+        """Reset to initial hidden state if done."""
+        # TODO handle terminal states
+        action = jax.nn.one_hot(action, self.cell.input_size)
+        hidden = self.cell(action, hidden)
+        return hidden, self.reward_head(hidden)
+
+    def init_hidden(self):
+        return jnp.zeros(self.cell.hidden_size)
+
+
+class ActorCritic(eqx.Module):
+    """Parameterizes the actor-critic network."""
+
     policy_head: eqx.nn.MLP
     value_head: eqx.nn.MLP
 
     def __init__(
         self,
         in_size: int,
-        rnn_size: int,
         num_actions: int,
         mlp_size: int,
         mlp_depth: int,
         *,
         key: rand.PRNGKey,
     ):
-        key_policy, key_value, key_cell = rand.split(key, 3)
-        self.cell = eqx.nn.GRUCell(in_size, rnn_size, key=key_cell)
+        key_policy, key_value = rand.split(key)
         self.policy_head = eqx.nn.MLP(
-            rnn_size, num_actions, mlp_size, mlp_depth, key=key_policy
+            in_size, num_actions, mlp_size, mlp_depth, key=key_policy
         )
         self.value_head = eqx.nn.MLP(
-            rnn_size, "scalar", mlp_size, mlp_depth, key=key_value
+            in_size, "scalar", mlp_size, mlp_depth, key=key_value
         )
 
-    def __call__(self, hidden: Float[Array, "rnn_size"], inputs: ObsWithDone):
-        hidden, outputs = jax.lax.scan(
-            lambda carry, x: self.step(carry, x),
-            hidden,
-            inputs,
-        )
-        return hidden, outputs
+    def __call__(self, hidden: Float[Array, "rnn_size"]):
+        return self.policy_head(hidden), self.value_head(hidden)
 
-    def step(self, hidden: Float[Array, "rnn_size"], input: ObsWithDone):
-        """Reset to initial hidden state if done."""
-        hidden = jnp.where(input.done, self.init_hidden(), hidden)
-        hidden = self.cell(input.obs, hidden)
-        return hidden, (
-            self.policy_head(hidden),
-            self.value_head(hidden),
+
+class Networks(eqx.Module):
+    """Network parameters."""
+
+    projection: eqx.nn.Linear
+    world_model: WorldModelRNN
+    actor_critic: ActorCritic
+
+    def __init__(self, obs_size: int, num_actions: int, *, key: rand.PRNGKey):
+        key_projector, key_world_model, key_actor_critic = rand.split(key, 3)
+
+        self.projection = eqx.nn.Linear(
+            in_features=obs_size,
+            out_features=config.rnn_size,
+            key=key_projector,
+        )
+        self.world_model = WorldModelRNN(
+            rnn_size=config.rnn_size,
+            num_actions=num_actions,
+            mlp_size=config.mlp_size,
+            mlp_depth=config.mlp_depth,
+            key=key_world_model,
+        )
+        self.actor_critic = ActorCritic(
+            in_size=config.rnn_size,
+            num_actions=num_actions,
+            mlp_size=config.mlp_size,
+            mlp_depth=config.mlp_depth,
+            key=key_actor_critic,
         )
 
-    def init_hidden(self):
-        return jnp.zeros(self.cell.hidden_size)
+    def __call__(
+        self, obs: Float[Array, "obs_size"], actions: Integer[Array, "horizon"]
+    ):
+        @partial(
+            jax.lax.scan,
+            init=self.projection(obs),
+            xs=actions,
+        )
+        def rollout(hidden: Float[Array, "rnn_size"], action: Integer[Array, ""]):
+            logits, value = self.actor_critic(hidden)
+            hidden, reward = self.world_model.step(hidden, action)
+            return hidden, (reward, logits, value)
+
+        _, outputs = rollout
+        return outputs
+
+
+class ObsWithDone(NamedTuple):
+    obs: Float[Array, "*batch obs_size"]
+    env_state: EnvState
+    done: Bool[Array, "*batch"]
 
 
 class Transition(NamedTuple):
     """A single transition. May be batched into a trajectory."""
 
-    obs: Float[Array, "*batch obs_size"]
-    env_state: EnvState
+    obs_with_done: ObsWithDone
     action: Integer[Array, "*batch"]
     reward: Float[Array, "*batch"]
     logits: Float[Array, "*batch num_actions"]
-    value: Float[Array, "*batch"]
-    done: Bool[Array, "*batch"]
-
-
-class RolloutState(NamedTuple):
-    """Carried when rolling out the environment."""
-
-    obs_with_done: ObsWithDone
-    hidden: Float[Array, "rnn_size"]
 
 
 class ParamState(NamedTuple):
     """Each outer update iteration."""
 
-    params: ActorCriticRNN
+    params: Networks
     opt_state: optax.OptState
 
 
 class UpdateState(NamedTuple):
     param_state: ParamState
-    rollout_state: RolloutState
-
-
-class Minibatch(NamedTuple):
-    hidden: Float[Array, "batch rnn_size"]
-    trajectories: Transition
-    advantages: Float[Array, "batch horizon"]
-
-
-class WorldState(NamedTuple):
-    env_state: EnvState
-    hidden: Float[Array, "*batch rnn_size"]
+    rollout_state: ObsWithDone
 
 
 class Config(NamedTuple):
@@ -129,8 +176,8 @@ class Config(NamedTuple):
     seed: int = 184
 
     # environment collecting
-    num_total_transitions: int = 20_000
-    max_horizon: int = 100
+    num_total_transitions: int = 40_000
+    max_horizon: int = 40
     num_parallel_envs: int = 8
 
     # network architecture
@@ -139,35 +186,43 @@ class Config(NamedTuple):
     mlp_depth: int = 2
 
     # mcts
-    num_mcts_simulations: int = 24
+    num_mcts_simulations: int = 36
 
     # optimization
     num_minibatches: int = 4
-    num_epochs: int = 8
+    num_epochs: int = 4
     max_gradient_norm: float = 0.5
     learning_rate: float = 5e-3
-    end_learning_rate: float = 1e-6
+    end_learning_rate: float = 1e-5
 
     # loss function
     discount: float = 0.99
-    gae_lambda: float = 0.95
-    clip_epsilon: float = 0.2
     value_coefficient: float = 0.5
-    entropy_coefficient: float = 0.001
+    reward_coefficient: float = 0.5
+    num_steps: int = 100
 
 
-def bc_loss(params: ActorCriticRNN, minibatch: Minibatch, static: ActorCriticRNN):
-    """Behavior cloning loss for the policy."""
-    hidden, trajectory, _ = minibatch
+def muzero_loss(
+    params: Networks,
+    trajectory: Transition,
+    static: Networks,
+):
+    """MuZero loss."""
+    networks = eqx.combine(params, static)
 
-    model = eqx.combine(params, static)
-    _, (logits, value) = model(
-        hidden,
-        ObsWithDone(trajectory.obs, trajectory.env_state, trajectory.done),
+    rewards, logits, values = networks(
+        trajectory.obs_with_done.obs[0], trajectory.action
+    )
+    # discard final transition
+    target_values = rlax.n_step_bootstrapped_returns(
+        trajectory.reward[:-1],
+        jnp.where(trajectory.obs_with_done.done[1:], 0.0, config.discount),
+        values[1:],
+        config.num_steps,
     )
 
     # value loss
-    value_losses = optax.l2_loss(value, trajectory.value)
+    value_losses = optax.l2_loss(values[:-1], target_values)
     value_loss = jnp.mean(value_losses)
 
     # policy loss
@@ -175,65 +230,21 @@ def bc_loss(params: ActorCriticRNN, minibatch: Minibatch, static: ActorCriticRNN
     policy_losses = optax.softmax_cross_entropy(logits, policy_targets)
     policy_loss = jnp.mean(policy_losses)
 
-    # total
-    loss = policy_loss + config.value_coefficient * value_loss
-    return loss, {
-        "train/loss": loss,
-        "train/policy_loss": policy_loss,
-        "train/value_loss": value_loss,
-    }
-
-
-def ppo_clip_loss(params: ActorCriticRNN, minibatch: Minibatch, static: ActorCriticRNN):
-    """Compute the loss for a given trajectory."""
-    hidden, trajectory, advantages = minibatch
-
-    model = eqx.combine(params, static)
-    _, (logits, value) = model(
-        hidden,
-        ObsWithDone(trajectory.obs, trajectory.env_state, trajectory.done),
-    )
-
-    # value loss
-    clipped_values = trajectory.value + jnp.clip(
-        value - trajectory.value,
-        -config.clip_epsilon,
-        config.clip_epsilon,
-    )
-    target_values = trajectory.value + advantages
-    value_losses = jnp.maximum(
-        rlax.l2_loss(value, target_values),
-        rlax.l2_loss(clipped_values, target_values),
-    )
-    value_loss = jnp.mean(value_losses)
-    mean_initial_value_target = jnp.mean(target_values, where=trajectory.done)
-
-    # policy loss
-    action_idx = (jnp.arange(advantages.size), trajectory.action)
-    ratios = jnp.exp(logits[action_idx] - trajectory.logits[action_idx])
-    normalized_advantages = (advantages - jnp.mean(advantages)) / (
-        jnp.std(advantages) + 1e-8
-    )
-    policy_loss = rlax.clipped_surrogate_pg_loss(
-        ratios, normalized_advantages, config.clip_epsilon
-    )
-
-    # entropy loss
-    entropy_loss = rlax.entropy_loss(logits, jnp.ones_like(advantages))
+    # reward model loss
+    reward_losses = optax.l2_loss(rewards, trajectory.reward)
+    reward_loss = jnp.mean(reward_losses)
 
     # total
-
     loss = (
         policy_loss
         + config.value_coefficient * value_loss
-        + config.entropy_coefficient * entropy_loss
+        + config.reward_coefficient * reward_loss
     )
     return loss, {
         "train/loss": loss,
         "train/policy_loss": policy_loss,
         "train/value_loss": value_loss,
-        "train/target_values": jnp.mean(mean_initial_value_target),
-        "train/entropy_loss": entropy_loss,
+        "train/reward_loss": reward_loss,
     }
 
 
@@ -267,136 +278,84 @@ def make_train(config: Config):
     )
 
     def train(key):
-        key_reset, key_network = rand.split(key)
+        key_reset, key_networks = rand.split(key)
 
         obs, env_state = jax.vmap(env.reset, in_axes=(0, None))(
             rand.split(key_reset, config.num_parallel_envs), env_params
         )
-
-        network = ActorCriticRNN(
-            in_size=obs.shape[-1],
-            rnn_size=config.rnn_size,
-            num_actions=num_actions,
-            mlp_size=config.mlp_size,
-            mlp_depth=config.mlp_depth,
-            key=key_network,
+        rollout_state = ObsWithDone(
+            obs,
+            env_state,
+            jnp.zeros(config.num_parallel_envs, dtype=bool),
         )
 
-        params, network_static = eqx.partition(network, eqx.is_inexact_array)
-
-        hidden = network.init_hidden()
-        rollout_state = RolloutState(
-            ObsWithDone(
-                obs,
-                env_state,
-                jnp.zeros(config.num_parallel_envs, dtype=bool),
-            ),
-            jnp.broadcast_to(hidden, (config.num_parallel_envs, *hidden.shape)),
+        networks = Networks(
+            obs_size=obs.shape[-1], num_actions=num_actions, key=key_networks
         )
+        params, network_static = eqx.partition(networks, eqx.is_inexact_array)
 
         def mcts_recurrent_fn(
-            model: ActorCriticRNN,
+            networks: Networks,
             rng: Float[Key, "batch"],
             action: Integer[Array, "batch"],
-            world_state: WorldState,
+            world_state: Float[Array, "batch rnn_size"],
         ):
-            obs, env_state, reward, done, info = jax.vmap(
-                env.step, in_axes=(0, 0, 0, None)
-            )(rand.split(rng, action.size), world_state.env_state, action, env_params)
-            hidden, (logits, value) = jax.vmap(model.step)(
-                world_state.hidden, ObsWithDone(obs, env_state, done)
-            )
+            hidden, reward = jax.vmap(networks.world_model.step)(world_state, action)
+            logits, value = jax.vmap(networks.actor_critic)(hidden)
             return mctx.RecurrentFnOutput(
                 reward=reward,
-                discount=jnp.where(done, 0.0, config.discount),
+                discount=jnp.full_like(value, config.discount),
                 prior_logits=logits,
                 value=value,
-            ), WorldState(env_state, hidden)
+            ), hidden
 
         # collect rollouts
-        def rollout(
-            params: ActorCriticRNN, init_rollout_state: RolloutState, key: rand.PRNGKey
-        ):
+        def rollout(params: Networks, obs_state: ObsWithDone, key: rand.PRNGKey):
             """Collect a rollout from the environment and estimate the policy's advantage at each transition."""
-            model = eqx.combine(params, network_static)
+            networks = eqx.combine(params, network_static)
 
             @partial(
                 jax.lax.scan,
-                init=init_rollout_state,
+                init=obs_state,
                 xs=rand.split(key, config.max_horizon),
             )
-            def rollout_step(rollout_state: RolloutState, key: rand.PRNGKey):
+            def rollout_step(obs_state: ObsWithDone, key: rand.PRNGKey):
                 """A single environment interaction."""
                 key_action, key_step = rand.split(key)
 
                 # choose action
-                hidden, (logits, value) = model.step(
-                    rollout_state.hidden, rollout_state.obs_with_done
+                hidden = networks.projection(obs_state.obs)
+                logits, value = networks.actor_critic(hidden)
+                root = mctx.RootFnOutput(
+                    prior_logits=logits,
+                    value=value,
+                    embedding=hidden,
                 )
-                if True:
-                    root = jax.tree.map(
-                        lambda x: x[jnp.newaxis, ...],
-                        mctx.RootFnOutput(
-                            prior_logits=logits,
-                            value=value,
-                            embedding=WorldState(
-                                rollout_state.obs_with_done.env_state, hidden
-                            ),
-                        ),
-                    )
-                    output = mctx.muzero_policy(
-                        model,
-                        key_action,
-                        root,
-                        mcts_recurrent_fn,
-                        config.num_mcts_simulations,
-                        max_depth=config.max_horizon,
-                    )
+                output = mctx.muzero_policy(
+                    networks,
+                    key_action,
+                    jax.tree.map(lambda x: x[jnp.newaxis, ...], root),
+                    mcts_recurrent_fn,
+                    config.num_mcts_simulations,
+                    max_depth=config.max_horizon,
+                )
 
-                    logits = output.action_weights[0]
-                    action = output.action[0]
-                else:
-                    action = rand.categorical(key_action, logits)
+                logits = output.action_weights[0]
+                action = output.action[0]
 
                 # step environment
                 obs, env_state, reward, done, info = env.step(
-                    key_step, rollout_state.obs_with_done.env_state, action, env_params
+                    key_step, obs_state.env_state, action, env_params
                 )
 
-                return RolloutState(
-                    ObsWithDone(obs, env_state, done),
-                    hidden,
-                ), Transition(
-                    obs=rollout_state.obs_with_done.obs,
-                    env_state=rollout_state.obs_with_done.env_state,
+                return ObsWithDone(obs, env_state, done), Transition(
+                    obs_with_done=obs_state,
                     action=action,
                     reward=reward,
                     logits=logits,
-                    value=value,
-                    done=rollout_state.obs_with_done.done,
                 )
 
-            rollout_state, trajectory = rollout_step
-
-            # rlax convention
-            done_offset = jnp.append(
-                trajectory.done[1:], rollout_state.obs_with_done.done
-            )
-            _, (_, value_offset) = model.step(
-                rollout_state.hidden, rollout_state.obs_with_done
-            )
-            value_offset = jnp.append(
-                trajectory.value,
-                value_offset,
-            )
-            advantages = rlax.truncated_generalized_advantage_estimation(
-                trajectory.reward,
-                jnp.where(done_offset, 0.0, config.discount),
-                config.gae_lambda,
-                value_offset,
-            )
-
-            return rollout_state, trajectory, advantages
+            return rollout_step
 
         @partial(
             jax.lax.scan,
@@ -417,7 +376,7 @@ def make_train(config: Config):
             )
 
             # leading dimension num_parallel_envs
-            rollout_state, trajectories, advantages = jax.vmap(rollout, (None, 0, 0))(
+            rollout_state, trajectories = jax.vmap(rollout, (None, 0, 0))(
                 update_state.param_state.params,
                 update_state.rollout_state,
                 rand.split(key_rollout, config.num_parallel_envs),
@@ -435,12 +394,7 @@ def make_train(config: Config):
                     lambda x: jnp.reshape(
                         x[permutation], (config.num_minibatches, -1, *x.shape[1:])
                     ),
-                    Minibatch(
-                        # start at the initial hidden states
-                        update_state.rollout_state.hidden,
-                        trajectories,
-                        advantages,
-                    ),
+                    trajectories,
                 )
 
                 @partial(
@@ -450,15 +404,15 @@ def make_train(config: Config):
                 )
                 def gradient_step(
                     update_state: ParamState,
-                    minibatch: Minibatch,
+                    trajectories: Transition,
                 ) -> tuple[ParamState, Float[Array, ""]]:
                     @partial(jax.value_and_grad, has_aux=True)
-                    def loss_fn(params: ActorCriticRNN):
+                    def loss_fn(params: Networks):
                         """Average the loss across a batch of trjaectories."""
-                        loss, aux = jax.vmap(bc_loss, in_axes=(None, 0, None))(
-                            params, minibatch, network_static
+                        loss, aux = jax.vmap(muzero_loss, in_axes=(None, 0, None))(
+                            params, trajectories, network_static
                         )
-                        aux = jax.tree.map(jnp.mean, aux)
+                        aux = jax.tree.map(partial(jnp.mean, axis=0), aux)
                         return jnp.mean(loss), aux
 
                     (loss, aux), grad = loss_fn(update_state.params)
@@ -481,8 +435,8 @@ def make_train(config: Config):
             param_state, losses = epoch_step
 
             def eval_model(
-                params: ActorCriticRNN,
-                rollout_state: RolloutState,
+                params: Networks,
+                rollout_state: ObsWithDone,
                 train_trajectory: Transition,
                 key: rand.PRNGKey,
             ):
@@ -497,8 +451,10 @@ def make_train(config: Config):
                         env,
                         env_params,
                         [
-                            jax.tree.map(lambda x: x[i], trajectory.env_state)
-                            for i in range(trajectory.obs.shape[0])
+                            jax.tree.map(
+                                lambda x: x[i], trajectory.obs_with_done.env_state
+                            )
+                            for i in range(trajectory.obs_with_done.obs.shape[0])
                         ],
                         jnp.cumsum(trajectory.reward),
                     )
@@ -508,7 +464,9 @@ def make_train(config: Config):
                     return path
 
                 key_eval, key_train, key_rollout = rand.split(key, 3)
-                _, eval_trajectory, _ = rollout(params, rollout_state, key_rollout)
+                _obs_state, eval_trajectory = rollout(
+                    params, rollout_state, key_rollout
+                )
                 eval_path = visualize_trajectory(eval_trajectory, key_eval)
                 train_path = visualize_trajectory(train_trajectory, key_train)
 
@@ -522,6 +480,7 @@ def make_train(config: Config):
 
             idx = rand.randint(key_select_trajectory, (), 0, config.num_parallel_envs)
 
+            # sometimes plot model performance
             jax.lax.cond(
                 rand.bernoulli(key_eval, 0.2),
                 partial(jax.debug.callback, eval_model),
