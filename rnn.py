@@ -22,6 +22,8 @@ from gymnax.environments.environment import Environment, EnvState
 from gymnax.wrappers import FlattenObservationWrapper
 from gymnax.visualize import Visualizer
 
+
+# jax.config.update("jax_enable_x64", True)
 matplotlib.use("agg")
 
 
@@ -117,26 +119,28 @@ class Minibatch(NamedTuple):
 
 class Config(NamedTuple):
     env: str = "Catch-bsuite"
+    visualizations_dir: str = tempfile.gettempdir()
+    seed: int = 184
 
     # environment collecting
-    num_total_transitions: int = 50_000
+    num_total_transitions: int = 100_000
     max_horizon: int = 120
-    num_parallel_envs: int = 16
+    num_parallel_envs: int = 8
 
     # network architecture
-    rnn_size: int = 128
-    mlp_size: int = 64
+    rnn_size: int = 32
+    mlp_size: int = 32
     mlp_depth: int = 2
 
     # optimization
     num_minibatches: int = 4
-    num_epochs: int = 2
+    num_epochs: int = 6
     max_gradient_norm: float = 0.5
-    learning_rate: float = 1e-4
+    learning_rate: float = 2e-4
 
     # loss function
-    discount: float = 0.99
-    gae_lambda: float = 0.95
+    discount: float = 1.0
+    gae_lambda: float = 1.0
     clip_epsilon: float = 0.2
     value_coefficient: float = 0.5
     entropy_coefficient: float = 0.001
@@ -149,7 +153,7 @@ def make_train(config: Config):
 
     lr = optax.linear_schedule(
         config.learning_rate,
-        0.0,
+        config.learning_rate / 100,
         num_gradient_steps,
     )
 
@@ -160,7 +164,7 @@ def make_train(config: Config):
     num_actions = env.action_space(env_params).n
 
     optim = optax.chain(
-        optax.clip_by_global_norm(config.max_gradient_norm), optax.adamw(lr)
+        optax.clip_by_global_norm(config.max_gradient_norm), optax.adam(lr, eps=1e-5)
     )
 
     def train(key):
@@ -195,6 +199,7 @@ def make_train(config: Config):
         def rollout(
             params: ActorCriticRNN, init_rollout_state: RolloutState, key: rand.PRNGKey
         ):
+            """Collect a rollout from the environment and estimate the policy's advantage at each transition."""
             model = eqx.combine(params, network_static)
 
             @partial(
@@ -203,7 +208,7 @@ def make_train(config: Config):
                 xs=rand.split(key, config.max_horizon),
             )
             def rollout_step(rollout_state: RolloutState, key: rand.PRNGKey):
-                """Rollout in a single environment."""
+                """A single environment interaction."""
                 key_action, key_step = rand.split(key)
 
                 # choose action
@@ -217,11 +222,10 @@ def make_train(config: Config):
                     key_step, rollout_state.obs_with_done.env_state, action, env_params
                 )
 
-                rollout_state = RolloutState(
+                return RolloutState(
                     ObsWithDone(obs, env_state, done),
                     hidden,
-                )
-                transition = Transition(
+                ), Transition(
                     obs=rollout_state.obs_with_done.obs,
                     env_state=rollout_state.obs_with_done.env_state,
                     action=action,
@@ -230,7 +234,6 @@ def make_train(config: Config):
                     value=value,
                     done=rollout_state.obs_with_done.done,
                 )
-                return rollout_state, transition
 
             rollout_state, trajectory = rollout_step
 
@@ -258,13 +261,16 @@ def make_train(config: Config):
             jax.lax.scan,
             init=UpdateState(
                 ParamState(params, optim.init(params)),
-                rollout_state=rollout_state,
+                rollout_state,
             ),
             xs=rand.split(key, num_iterations),
         )
         def iteration_step(update_state: UpdateState, key: rand.PRNGKey):
-            key_rollout, key_shuffle, key_eval, key_visualize = rand.split(key, 4)
+            key_rollout, key_shuffle, key_eval, key_visualize, key_select_trajectory = (
+                rand.split(key, 5)
+            )
 
+            # leading dimension num_parallel_envs
             rollout_state, trajectories, advantages = jax.vmap(rollout, (None, 0, 0))(
                 update_state.param_state.params,
                 update_state.rollout_state,
@@ -283,7 +289,12 @@ def make_train(config: Config):
                     lambda x: jnp.reshape(
                         x[permutation], (config.num_minibatches, -1, *x.shape[1:])
                     ),
-                    Minibatch(rollout_state.hidden, trajectories, advantages),
+                    Minibatch(
+                        # start at the initial hidden states
+                        update_state.rollout_state.hidden,
+                        trajectories,
+                        advantages,
+                    ),
                 )
 
                 @partial(
@@ -313,11 +324,13 @@ def make_train(config: Config):
                             config.clip_epsilon,
                         )
                         target_values = trajectory.value + advantages
-                        value_loss = jnp.mean(
-                            jnp.maximum(
-                                rlax.l2_loss(value, target_values),
-                                rlax.l2_loss(clipped_values, target_values),
-                            )
+                        value_losses = jnp.maximum(
+                            rlax.l2_loss(value, target_values),
+                            rlax.l2_loss(clipped_values, target_values),
+                        )
+                        value_loss = jnp.mean(value_losses)
+                        mean_initial_value_target = jnp.mean(
+                            target_values, where=trajectory.done
                         )
 
                         # policy loss
@@ -342,7 +355,12 @@ def make_train(config: Config):
                             pg_loss
                             + config.value_coefficient * value_loss
                             + config.entropy_coefficient * entropy_loss
-                        ), (pg_loss, value_loss, entropy_loss)
+                        ), (
+                            pg_loss,
+                            value_loss,
+                            mean_initial_value_target,
+                            entropy_loss,
+                        )
 
                     def loss_fn(params: ActorCriticRNN):
                         loss, aux = jax.vmap(trajectory_loss, in_axes=(None, 0))(
@@ -350,9 +368,18 @@ def make_train(config: Config):
                         )
                         return jnp.mean(loss), aux
 
-                    (loss, (pg_loss, value_loss, entropy_loss)), grad = (
-                        jax.value_and_grad(loss_fn, has_aux=True)(update_state.params)
-                    )
+                    (
+                        (
+                            loss,
+                            (
+                                pg_loss,
+                                value_loss,
+                                mean_initial_value_target,
+                                entropy_loss,
+                            ),
+                        ),
+                        grad,
+                    ) = jax.value_and_grad(loss_fn, has_aux=True)(update_state.params)
                     updates, opt_state = optim.update(
                         grad, update_state.opt_state, update_state.params
                     )
@@ -361,12 +388,10 @@ def make_train(config: Config):
                     jax.debug.callback(
                         wandb.log,
                         {
-                            "train/total_reward": jnp.sum(
-                                minibatch.trajectories.reward
-                            ),
                             "train/loss": loss,
                             "train/pg_loss": jnp.mean(pg_loss),
                             "train/value_loss": jnp.mean(value_loss),
+                            "train/target_values": jnp.mean(mean_initial_value_target),
                             "train/entropy_loss": jnp.mean(entropy_loss),
                         }
                         | {
@@ -385,12 +410,18 @@ def make_train(config: Config):
             param_state, losses = epoch_step
 
             def eval_model(
-                params: ActorCriticRNN, rollout_state: RolloutState, key: rand.PRNGKey
+                params: ActorCriticRNN,
+                rollout_state: RolloutState,
+                train_trajectory: Transition,
+                key: rand.PRNGKey,
             ):
-                with tempfile.NamedTemporaryFile(
-                    suffix=".gif", delete=False
-                ) as f_model:
-                    _, trajectory, _ = rollout(params, rollout_state, key)
+                def visualize_trajectory(
+                    trajectory: Transition,
+                    key: rand.PRNGKey,
+                ):
+                    name = rand.randint(key, (), 0, 1 << 28)
+                    path = f"{config.visualizations_dir}/{name:07X}.gif"
+
                     vis = Visualizer(
                         env,
                         env_params,
@@ -400,16 +431,25 @@ def make_train(config: Config):
                         ],
                         jnp.cumsum(trajectory.reward),
                     )
-                    vis.animate(f_model.name)
-
-                    wandb.log(
-                        {
-                            "eval/model/rollout": wandb.Image(f_model.name),
-                            "eval/model/rewards": jnp.sum(trajectory.reward),
-                        }
-                    )
-
+                    vis.animate(path)
                     plt.close(vis.fig)
+
+                    return path
+
+                key_eval, key_train, key_rollout = rand.split(key, 3)
+                _, eval_trajectory, _ = rollout(params, rollout_state, key_rollout)
+                eval_path = visualize_trajectory(eval_trajectory, key_eval)
+                train_path = visualize_trajectory(train_trajectory, key_train)
+
+                wandb.log(
+                    {
+                        "eval/rollout": wandb.Image(eval_path),
+                        "eval/rewards": jnp.sum(eval_trajectory.reward),
+                        "train/rollout": wandb.Image(train_path),
+                    }
+                )
+
+            idx = rand.randint(key_select_trajectory, (), 0, config.num_parallel_envs)
 
             jax.lax.cond(
                 rand.bernoulli(key_eval, 0.2),
@@ -417,7 +457,17 @@ def make_train(config: Config):
                 lambda *args: None,
                 param_state.params,
                 jax.tree.map(lambda x: x[0], update_state.rollout_state),
+                jax.tree.map(lambda x: x[idx], trajectories),
                 key_visualize,
+            )
+
+            jax.debug.callback(
+                wandb.log,
+                {
+                    "train/average_total_reward": jnp.mean(
+                        jnp.sum(trajectories.reward, axis=-1)
+                    ),
+                },
             )
 
             return UpdateState(param_state, rollout_state), losses
@@ -428,14 +478,15 @@ def make_train(config: Config):
 
 
 if __name__ == "__main__":
-    config = Config()
-    key = rand.PRNGKey(184)
-    train = jax.jit(make_train(config))
+    with tempfile.TemporaryDirectory() as tempdir:
+        config = Config(visualizations_dir=tempdir)
+        key = rand.PRNGKey(config.seed)
+        train = jax.jit(make_train(config))
 
-    with wandb.init(
-        project="jax-rl",
-        config=config._asdict(),
-    ) as run:
-        # with jax.disable_jit():
-        out = jax.block_until_ready(train(key))
-    print("Done training.")
+        with wandb.init(
+            project="jax-rl",
+            config=config._asdict(),
+        ) as run:
+            # with jax.disable_jit():
+            out = jax.block_until_ready(train(key))
+        print("Done training.")
