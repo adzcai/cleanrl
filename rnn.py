@@ -123,24 +123,25 @@ class Config(NamedTuple):
     seed: int = 184
 
     # environment collecting
-    num_total_transitions: int = 100_000
+    num_total_transitions: int = 50_000
     max_horizon: int = 120
     num_parallel_envs: int = 8
 
     # network architecture
     rnn_size: int = 32
-    mlp_size: int = 32
+    mlp_size: int = 16
     mlp_depth: int = 2
 
     # optimization
     num_minibatches: int = 4
-    num_epochs: int = 6
+    num_epochs: int = 4
     max_gradient_norm: float = 0.5
-    learning_rate: float = 2e-4
+    learning_rate: float = 2e-3
+    end_learning_rate: float = 1e-6
 
     # loss function
-    discount: float = 1.0
-    gae_lambda: float = 1.0
+    discount: float = 0.99
+    gae_lambda: float = 0.95
     clip_epsilon: float = 0.2
     value_coefficient: float = 0.5
     entropy_coefficient: float = 0.001
@@ -153,7 +154,7 @@ def make_train(config: Config):
 
     lr = optax.linear_schedule(
         config.learning_rate,
-        config.learning_rate / 100,
+        config.end_learning_rate,
         num_gradient_steps,
     )
 
