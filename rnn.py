@@ -156,13 +156,39 @@ class Config(NamedTuple):
     entropy_coefficient: float = 0.001
 
 
-def trajectory_loss(
-    params: ActorCriticRNN, minibatch: Minibatch, static: ActorCriticRNN
-):
-    """Compute the loss for a given trajectory."""
+def bc_loss(params: ActorCriticRNN, minibatch: Minibatch, static: ActorCriticRNN):
+    """Behavior cloning loss for the policy."""
+    hidden, trajectory, _ = minibatch
+
     model = eqx.combine(params, static)
+    _, (logits, value) = model(
+        hidden,
+        ObsWithDone(trajectory.obs, trajectory.env_state, trajectory.done),
+    )
+
+    # value loss
+    value_losses = optax.l2_loss(value, trajectory.value)
+    value_loss = jnp.mean(value_losses)
+
+    # policy loss
+    policy_targets = jax.nn.softmax(trajectory.logits, axis=-1)
+    policy_losses = optax.softmax_cross_entropy(logits, policy_targets)
+    policy_loss = jnp.mean(policy_losses)
+
+    # total
+    loss = policy_loss + config.value_coefficient * value_loss
+    return loss, {
+        "train/loss": loss,
+        "train/policy_loss": policy_loss,
+        "train/value_loss": value_loss,
+    }
+
+
+def ppo_clip_loss(params: ActorCriticRNN, minibatch: Minibatch, static: ActorCriticRNN):
+    """Compute the loss for a given trajectory."""
     hidden, trajectory, advantages = minibatch
 
+    model = eqx.combine(params, static)
     _, (logits, value) = model(
         hidden,
         ObsWithDone(trajectory.obs, trajectory.env_state, trajectory.done),
@@ -188,7 +214,7 @@ def trajectory_loss(
     normalized_advantages = (advantages - jnp.mean(advantages)) / (
         jnp.std(advantages) + 1e-8
     )
-    pg_loss = rlax.clipped_surrogate_pg_loss(
+    policy_loss = rlax.clipped_surrogate_pg_loss(
         ratios, normalized_advantages, config.clip_epsilon
     )
 
@@ -196,15 +222,26 @@ def trajectory_loss(
     entropy_loss = rlax.entropy_loss(logits, jnp.ones_like(advantages))
 
     # total
-    return (
-        pg_loss
+
+    loss = (
+        policy_loss
         + config.value_coefficient * value_loss
         + config.entropy_coefficient * entropy_loss
-    ), {
-        "train/pg_loss": jnp.mean(pg_loss),
-        "train/value_loss": jnp.mean(value_loss),
+    )
+    return loss, {
+        "train/loss": loss,
+        "train/policy_loss": policy_loss,
+        "train/value_loss": value_loss,
         "train/target_values": jnp.mean(mean_initial_value_target),
-        "train/entropy_loss": jnp.mean(entropy_loss),
+        "train/entropy_loss": entropy_loss,
+    }
+
+
+def get_norm_data(tree: PyTree, prefix: str):
+    return {
+        f"{prefix}{jax.tree_util.keystr(keys)}": jnp.linalg.norm(ary)
+        for keys, ary in jax.tree.leaves_with_path(tree)
+        if ary is not None
     }
 
 
@@ -418,7 +455,7 @@ def make_train(config: Config):
                     @partial(jax.value_and_grad, has_aux=True)
                     def loss_fn(params: ActorCriticRNN):
                         """Average the loss across a batch of trjaectories."""
-                        loss, aux = jax.vmap(trajectory_loss, in_axes=(None, 0, None))(
+                        loss, aux = jax.vmap(bc_loss, in_axes=(None, 0, None))(
                             params, minibatch, network_static
                         )
                         aux = jax.tree.map(jnp.mean, aux)
@@ -432,17 +469,9 @@ def make_train(config: Config):
 
                     jax.debug.callback(
                         wandb.log,
-                        {
-                            "train/loss": loss,
-                        }
-                        | aux
-                        | {
-                            f"train/gradient{jax.tree_util.keystr(keys)}": jnp.linalg.norm(
-                                update
-                            )
-                            for keys, update in jax.tree.leaves_with_path(updates)
-                            if update is not None
-                        },
+                        aux
+                        | get_norm_data(updates, "train/params/gradient")
+                        | get_norm_data(params, "train/params/norm"),
                     )
 
                     return ParamState(params, opt_state), loss
