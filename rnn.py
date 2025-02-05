@@ -1,6 +1,6 @@
 from functools import partial
 from typing import NamedTuple
-from jaxtyping import Bool, Integer, Float, Array
+from jaxtyping import Bool, Integer, Key, Float, Array, PyTree
 
 
 import jax
@@ -9,6 +9,7 @@ import jax.random as rand
 
 
 import tempfile
+import mctx
 import wandb
 import matplotlib
 import matplotlib.pyplot as plt
@@ -117,6 +118,11 @@ class Minibatch(NamedTuple):
     advantages: Float[Array, "batch horizon"]
 
 
+class WorldState(NamedTuple):
+    env_state: EnvState
+    hidden: Float[Array, "*batch rnn_size"]
+
+
 class Config(NamedTuple):
     env: str = "Catch-bsuite"
     visualizations_dir: str = tempfile.gettempdir()
@@ -131,6 +137,9 @@ class Config(NamedTuple):
     rnn_size: int = 32
     mlp_size: int = 16
     mlp_depth: int = 2
+
+    # mcts
+    num_mcts_simulations: int = 24
 
     # optimization
     num_minibatches: int = 4
@@ -248,6 +257,25 @@ def make_train(config: Config):
             jnp.broadcast_to(hidden, (config.num_parallel_envs, *hidden.shape)),
         )
 
+        def mcts_recurrent_fn(
+            model: ActorCriticRNN,
+            rng: Float[Key, "batch"],
+            action: Integer[Array, "batch"],
+            world_state: WorldState,
+        ):
+            obs, env_state, reward, done, info = jax.vmap(
+                env.step, in_axes=(0, 0, 0, None)
+            )(rand.split(rng, action.size), world_state.env_state, action, env_params)
+            hidden, (logits, value) = jax.vmap(model.step)(
+                world_state.hidden, ObsWithDone(obs, env_state, done)
+            )
+            return mctx.RecurrentFnOutput(
+                reward=reward,
+                discount=jnp.where(done, 0.0, config.discount),
+                prior_logits=logits,
+                value=value,
+            ), WorldState(env_state, hidden)
+
         # collect rollouts
         def rollout(
             params: ActorCriticRNN, init_rollout_state: RolloutState, key: rand.PRNGKey
@@ -268,7 +296,30 @@ def make_train(config: Config):
                 hidden, (logits, value) = model.step(
                     rollout_state.hidden, rollout_state.obs_with_done
                 )
-                action = rand.categorical(key_action, logits)
+                if True:
+                    root = jax.tree.map(
+                        lambda x: x[jnp.newaxis, ...],
+                        mctx.RootFnOutput(
+                            prior_logits=logits,
+                            value=value,
+                            embedding=WorldState(
+                                rollout_state.obs_with_done.env_state, hidden
+                            ),
+                        ),
+                    )
+                    output = mctx.muzero_policy(
+                        model,
+                        key_action,
+                        root,
+                        mcts_recurrent_fn,
+                        config.num_mcts_simulations,
+                        max_depth=config.max_horizon,
+                    )
+
+                    logits = output.action_weights[0]
+                    action = output.action[0]
+                else:
+                    action = rand.categorical(key_action, logits)
 
                 # step environment
                 obs, env_state, reward, done, info = env.step(
