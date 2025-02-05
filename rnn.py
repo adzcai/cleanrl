@@ -1,30 +1,26 @@
-from functools import partial
-from typing import NamedTuple
-from jaxtyping import Bool, Integer, Key, Float, Array, PyTree
-
-
 import jax
 import jax.numpy as jnp
 import jax.random as rand
 
-
-import tempfile
-import mctx
-import wandb
-import matplotlib
-import matplotlib.pyplot as plt
-
-
 import equinox as eqx
 import optax
 import rlax
+import mctx
+
 import gymnax
 from gymnax.environments.environment import Environment, EnvState
 from gymnax.wrappers import FlattenObservationWrapper
 from gymnax.visualize import Visualizer
 
+import tempfile
+import wandb
+import matplotlib
+import matplotlib.pyplot as plt
 
-# jax.config.update("jax_enable_x64", True)
+from functools import partial
+from typing import NamedTuple
+from jaxtyping import Bool, Integer, Key, Float, Array, PyTree
+
 matplotlib.use("agg")
 
 
@@ -97,7 +93,7 @@ class ActorCritic(eqx.Module):
 
 
 class Networks(eqx.Module):
-    """Network parameters."""
+    """The entire MuZero model."""
 
     projection: eqx.nn.Linear
     world_model: WorldModelRNN
@@ -143,7 +139,9 @@ class Networks(eqx.Module):
         return outputs
 
 
-class ObsWithDone(NamedTuple):
+class RolloutState(NamedTuple):
+    """The carry used to collect rollouts."""
+
     obs: Float[Array, "*batch obs_size"]
     env_state: EnvState
     done: Bool[Array, "*batch"]
@@ -152,22 +150,26 @@ class ObsWithDone(NamedTuple):
 class Transition(NamedTuple):
     """A single transition. May be batched into a trajectory."""
 
-    obs_with_done: ObsWithDone
+    obs_with_done: RolloutState
     action: Integer[Array, "*batch"]
     reward: Float[Array, "*batch"]
     logits: Float[Array, "*batch num_actions"]
 
 
 class ParamState(NamedTuple):
-    """Each outer update iteration."""
+    """Contains the parameters and optimization state."""
 
     params: Networks
     opt_state: optax.OptState
 
 
-class UpdateState(NamedTuple):
+class IterationState(NamedTuple):
+    """Carries state across iterations.
+
+    Each iteration consists of a rollout phase and an optimization phase."""
+
     param_state: ParamState
-    rollout_state: ObsWithDone
+    rollout_state: RolloutState
 
 
 class Config(NamedTuple):
@@ -177,16 +179,16 @@ class Config(NamedTuple):
 
     # environment collecting
     num_total_transitions: int = 40_000
-    max_horizon: int = 40
+    max_horizon: int = 60
     num_parallel_envs: int = 8
 
     # network architecture
-    rnn_size: int = 32
-    mlp_size: int = 16
+    rnn_size: int = 64
+    mlp_size: int = 32
     mlp_depth: int = 2
 
     # mcts
-    num_mcts_simulations: int = 36
+    num_mcts_simulations: int = 48
 
     # optimization
     num_minibatches: int = 4
@@ -283,7 +285,7 @@ def make_train(config: Config):
         obs, env_state = jax.vmap(env.reset, in_axes=(0, None))(
             rand.split(key_reset, config.num_parallel_envs), env_params
         )
-        rollout_state = ObsWithDone(
+        rollout_state = RolloutState(
             obs,
             env_state,
             jnp.zeros(config.num_parallel_envs, dtype=bool),
@@ -310,7 +312,7 @@ def make_train(config: Config):
             ), hidden
 
         # collect rollouts
-        def rollout(params: Networks, obs_state: ObsWithDone, key: rand.PRNGKey):
+        def rollout(params: Networks, obs_state: RolloutState, key: rand.PRNGKey):
             """Collect a rollout from the environment and estimate the policy's advantage at each transition."""
             networks = eqx.combine(params, network_static)
 
@@ -319,7 +321,7 @@ def make_train(config: Config):
                 init=obs_state,
                 xs=rand.split(key, config.max_horizon),
             )
-            def rollout_step(obs_state: ObsWithDone, key: rand.PRNGKey):
+            def rollout_step(obs_state: RolloutState, key: rand.PRNGKey):
                 """A single environment interaction."""
                 key_action, key_step = rand.split(key)
 
@@ -348,7 +350,7 @@ def make_train(config: Config):
                     key_step, obs_state.env_state, action, env_params
                 )
 
-                return ObsWithDone(obs, env_state, done), Transition(
+                return RolloutState(obs, env_state, done), Transition(
                     obs_with_done=obs_state,
                     action=action,
                     reward=reward,
@@ -359,13 +361,13 @@ def make_train(config: Config):
 
         @partial(
             jax.lax.scan,
-            init=UpdateState(
+            init=IterationState(
                 ParamState(params, optim.init(params)),
                 rollout_state,
             ),
             xs=rand.split(key, num_iterations),
         )
-        def iteration_step(update_state: UpdateState, key: rand.PRNGKey):
+        def iteration_step(update_state: IterationState, key: rand.PRNGKey):
             """A single iteration of optimization.
 
             1. Collect a batch of rollouts in parallel.
@@ -436,7 +438,7 @@ def make_train(config: Config):
 
             def eval_model(
                 params: Networks,
-                rollout_state: ObsWithDone,
+                rollout_state: RolloutState,
                 train_trajectory: Transition,
                 key: rand.PRNGKey,
             ):
@@ -500,7 +502,7 @@ def make_train(config: Config):
                 },
             )
 
-            return UpdateState(param_state, rollout_state), losses
+            return IterationState(param_state, rollout_state), losses
 
         return iteration_step
 
