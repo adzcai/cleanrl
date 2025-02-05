@@ -1,5 +1,5 @@
 [project]
-name = "muzero"
+name = "learned-preplay"
 version = "0.1.0"
 description = "An implementation of the MuZero algorithm"
 readme = "README.md"
