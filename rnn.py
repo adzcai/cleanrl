@@ -123,8 +123,8 @@ class Config(NamedTuple):
     seed: int = 184
 
     # environment collecting
-    num_total_transitions: int = 50_000
-    max_horizon: int = 120
+    num_total_transitions: int = 20_000
+    max_horizon: int = 100
     num_parallel_envs: int = 8
 
     # network architecture
@@ -134,9 +134,9 @@ class Config(NamedTuple):
 
     # optimization
     num_minibatches: int = 4
-    num_epochs: int = 4
+    num_epochs: int = 8
     max_gradient_norm: float = 0.5
-    learning_rate: float = 2e-3
+    learning_rate: float = 5e-3
     end_learning_rate: float = 1e-6
 
     # loss function
@@ -145,6 +145,58 @@ class Config(NamedTuple):
     clip_epsilon: float = 0.2
     value_coefficient: float = 0.5
     entropy_coefficient: float = 0.001
+
+
+def trajectory_loss(
+    params: ActorCriticRNN, minibatch: Minibatch, static: ActorCriticRNN
+):
+    """Compute the loss for a given trajectory."""
+    model = eqx.combine(params, static)
+    hidden, trajectory, advantages = minibatch
+
+    _, (logits, value) = model(
+        hidden,
+        ObsWithDone(trajectory.obs, trajectory.env_state, trajectory.done),
+    )
+
+    # value loss
+    clipped_values = trajectory.value + jnp.clip(
+        value - trajectory.value,
+        -config.clip_epsilon,
+        config.clip_epsilon,
+    )
+    target_values = trajectory.value + advantages
+    value_losses = jnp.maximum(
+        rlax.l2_loss(value, target_values),
+        rlax.l2_loss(clipped_values, target_values),
+    )
+    value_loss = jnp.mean(value_losses)
+    mean_initial_value_target = jnp.mean(target_values, where=trajectory.done)
+
+    # policy loss
+    action_idx = (jnp.arange(advantages.size), trajectory.action)
+    ratios = jnp.exp(logits[action_idx] - trajectory.logits[action_idx])
+    normalized_advantages = (advantages - jnp.mean(advantages)) / (
+        jnp.std(advantages) + 1e-8
+    )
+    pg_loss = rlax.clipped_surrogate_pg_loss(
+        ratios, normalized_advantages, config.clip_epsilon
+    )
+
+    # entropy loss
+    entropy_loss = rlax.entropy_loss(logits, jnp.ones_like(advantages))
+
+    # total
+    return (
+        pg_loss
+        + config.value_coefficient * value_loss
+        + config.entropy_coefficient * entropy_loss
+    ), {
+        "train/pg_loss": jnp.mean(pg_loss),
+        "train/value_loss": jnp.mean(value_loss),
+        "train/target_values": jnp.mean(mean_initial_value_target),
+        "train/entropy_loss": jnp.mean(entropy_loss),
+    }
 
 
 def make_train(config: Config):
@@ -267,6 +319,11 @@ def make_train(config: Config):
             xs=rand.split(key, num_iterations),
         )
         def iteration_step(update_state: UpdateState, key: rand.PRNGKey):
+            """A single iteration of optimization.
+
+            1. Collect a batch of rollouts in parallel.
+            2. Run a few epochs of SGD (or some optimization algorithm) on the batch.
+            """
             key_rollout, key_shuffle, key_eval, key_visualize, key_select_trajectory = (
                 rand.split(key, 5)
             )
@@ -307,80 +364,16 @@ def make_train(config: Config):
                     update_state: ParamState,
                     minibatch: Minibatch,
                 ) -> tuple[ParamState, Float[Array, ""]]:
-                    def trajectory_loss(params: ActorCriticRNN, minibatch: Minibatch):
-                        model = eqx.combine(params, network_static)
-                        hidden, trajectory, advantages = minibatch
-
-                        _, (logits, value) = model(
-                            hidden,
-                            ObsWithDone(
-                                trajectory.obs, trajectory.env_state, trajectory.done
-                            ),
-                        )
-
-                        # value loss
-                        clipped_values = trajectory.value + jnp.clip(
-                            value - trajectory.value,
-                            -config.clip_epsilon,
-                            config.clip_epsilon,
-                        )
-                        target_values = trajectory.value + advantages
-                        value_losses = jnp.maximum(
-                            rlax.l2_loss(value, target_values),
-                            rlax.l2_loss(clipped_values, target_values),
-                        )
-                        value_loss = jnp.mean(value_losses)
-                        mean_initial_value_target = jnp.mean(
-                            target_values, where=trajectory.done
-                        )
-
-                        # policy loss
-                        action_idx = (jnp.arange(advantages.size), trajectory.action)
-                        ratios = jnp.exp(
-                            logits[action_idx] - trajectory.logits[action_idx]
-                        )
-                        normalized_advantages = (advantages - jnp.mean(advantages)) / (
-                            jnp.std(advantages) + 1e-8
-                        )
-                        pg_loss = rlax.clipped_surrogate_pg_loss(
-                            ratios, normalized_advantages, config.clip_epsilon
-                        )
-
-                        # entropy loss
-                        entropy_loss = rlax.entropy_loss(
-                            logits, jnp.ones_like(advantages)
-                        )
-
-                        # total
-                        return (
-                            pg_loss
-                            + config.value_coefficient * value_loss
-                            + config.entropy_coefficient * entropy_loss
-                        ), (
-                            pg_loss,
-                            value_loss,
-                            mean_initial_value_target,
-                            entropy_loss,
-                        )
-
+                    @partial(jax.value_and_grad, has_aux=True)
                     def loss_fn(params: ActorCriticRNN):
-                        loss, aux = jax.vmap(trajectory_loss, in_axes=(None, 0))(
-                            params, minibatch
+                        """Average the loss across a batch of trjaectories."""
+                        loss, aux = jax.vmap(trajectory_loss, in_axes=(None, 0, None))(
+                            params, minibatch, network_static
                         )
+                        aux = jax.tree.map(jnp.mean, aux)
                         return jnp.mean(loss), aux
 
-                    (
-                        (
-                            loss,
-                            (
-                                pg_loss,
-                                value_loss,
-                                mean_initial_value_target,
-                                entropy_loss,
-                            ),
-                        ),
-                        grad,
-                    ) = jax.value_and_grad(loss_fn, has_aux=True)(update_state.params)
+                    (loss, aux), grad = loss_fn(update_state.params)
                     updates, opt_state = optim.update(
                         grad, update_state.opt_state, update_state.params
                     )
@@ -390,11 +383,8 @@ def make_train(config: Config):
                         wandb.log,
                         {
                             "train/loss": loss,
-                            "train/pg_loss": jnp.mean(pg_loss),
-                            "train/value_loss": jnp.mean(value_loss),
-                            "train/target_values": jnp.mean(mean_initial_value_target),
-                            "train/entropy_loss": jnp.mean(entropy_loss),
                         }
+                        | aux
                         | {
                             f"train/gradient{jax.tree_util.keystr(keys)}": jnp.linalg.norm(
                                 update
