@@ -337,7 +337,21 @@ def make_train(config: Config):
                     value,
                 )
 
-            return rollout_step
+            rollout_state, transitions = rollout_step
+            _, (_, final_value) = model.step(
+                rollout_state.unobs_state.hidden, rollout_state.obs_state
+            )
+            dones = jnp.append(
+                transitions.rollout_state.obs_state.done[1:],
+                rollout_state.obs_state.done,
+            )
+            bootstrapped_values = rlax.n_step_bootstrapped_returns(
+                transitions.reward,
+                jnp.where(dones, 0.0, config.discount),
+                jnp.append(transitions.value, final_value),
+                config.bootstrap_n,
+            )
+            return rollout_state, transitions._replace(value=bootstrapped_values)
 
         def mcts_recurrent_fn(
             model: ActorCriticRNN,
