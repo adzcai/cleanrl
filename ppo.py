@@ -218,9 +218,9 @@ def make_train(config: Config):
 
         final_rollout_state, trajectory = rollout_step
 
-        final_value = net(final_rollout_state.obs).value_logits
-        value_logits = jnp.vstack([trajectory.out.value_logits, final_value])
-        values = tx_pair.apply_inv(value_logits)
+        final_value_logits = net(final_rollout_state.obs).value_logits
+        value_logits = jnp.vstack([trajectory.out.value_logits, final_value_logits])
+        values = tx_pair.apply_inv(jax.nn.softmax(value_logits))
         advantages = rlax.truncated_generalized_advantage_estimation(
             trajectory.reward,
             jnp.where(trajectory.done, 0.0, config.discount),
@@ -253,7 +253,7 @@ def make_train(config: Config):
         )
         value_loss = jnp.mean(value_losses)
         td_error = tx_pair.apply_inv(value_target_probs) - tx_pair.apply_inv(
-            preds.value_logits
+            jax.nn.softmax(preds.value_logits)
         )
 
         # entropy
