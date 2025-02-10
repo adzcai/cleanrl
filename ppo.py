@@ -1,20 +1,23 @@
-import gymnax
-from gymnax.wrappers import FlattenObservationWrapper
-from jaxtyping import Float, Array
 import jax
 import jax.numpy as jnp
-import optax
-import functools as ft
-import rlax
 import jax.random as jr
-from typing import Literal, NamedTuple
+
+import gymnax
+from gymnax.wrappers import FlattenObservationWrapper
+
+import rlax
+import optax
 import equinox as eqx
+
 import wandb
+import functools as ft
+from jaxtyping import Float, Array
+from typing import Literal, NamedTuple
 
 
 class NetworkOutput(NamedTuple):
     logits: Float[Array, "num_actions"]
-    value: float
+    value_logits: float
 
 
 class Network(eqx.Module):
@@ -68,21 +71,33 @@ class IterState(NamedTuple):
 
 class Config(NamedTuple):
     env_name: str = "Catch-bsuite"
+
+    # data collection
     num_transitions: int = 500_000
-    num_envs: int = 4
-    num_updates: int = 4
-    batch_size: int = 4
-    horizon: int = 120
-    lr_init: float = 2.5e-4
-    lr_end: float = 0.0
-    num_value_bins: int | Literal["scalar"] = "scalar"
+    num_envs: int = 8
+    horizon: int = 100
+
+    # network architecture
     mlp_size: int = 64
     mlp_depth: int = 2
-    lambda_gae: float = 0.95
+
+    # optimization
+    lr_init: float = 2e-2
+    lr_end: float = 0.0
+    num_updates: int = 4
+    batch_size: int = 4
+
+    # loss function and bootstrapping
     discount: float = 0.99
     clip_eps: float = 0.2
     value_coef: float = 0.5
     entropy_coef: float = 0.01
+    lambda_gae: float = 0.95
+
+    # two-hot
+    num_value_bins: int | Literal["scalar"] = 10
+    min_value: float = -10
+    max_value: float = 10
 
 
 def make_train(config: Config):
@@ -95,6 +110,10 @@ def make_train(config: Config):
     optim = optax.chain(
         optax.clip_by_global_norm(0.5),
         optax.adamw(lr, eps=1e-5),
+    )
+
+    tx_pair = rlax.twohot_pair(
+        config.min_value, config.max_value, config.num_value_bins
     )
 
     def train(key: jr.PRNGKey):
@@ -126,7 +145,7 @@ def make_train(config: Config):
         )
         def iterate(iter_state: IterState, key: jr.PRNGKey):
             """One iteration of rollouts and optimization."""
-            rollout_states, (trajectories, advantages) = jax.vmap(
+            rollout_states, (trajectories, advantages, value_targets) = jax.vmap(
                 rollout, (None, 0, 0)
             )(
                 eqx.combine(iter_state.params_state.params, net_static),
@@ -144,12 +163,16 @@ def make_train(config: Config):
                 key: jr.PRNGKey,
             ):
                 idx = jr.randint(key, config.batch_size, 0, config.num_envs)
-                batch = jax.tree.map(lambda x: x[idx], (trajectories, advantages))
+                batch = jax.tree.map(
+                    lambda x: x[idx], (trajectories, advantages, value_targets)
+                )
 
                 @ft.partial(jax.value_and_grad, has_aux=True)
                 def loss_fn(params: Network):
                     net = eqx.combine(params, net_static)
-                    losses, aux = jax.vmap(loss_trajectory, (None, 0, 0))(net, *batch)
+                    losses, aux = jax.vmap(loss_trajectory, (None, 0, 0, 0))(
+                        net, *batch
+                    )
                     return jnp.mean(losses), aux
 
                 loss_aux, grads = loss_fn(params_state.params)
@@ -195,18 +218,24 @@ def make_train(config: Config):
 
         final_rollout_state, trajectory = rollout_step
 
-        final_value = net(final_rollout_state.obs).value
+        final_value = net(final_rollout_state.obs).value_logits
+        value_logits = jnp.vstack([trajectory.out.value_logits, final_value])
+        values = tx_pair.apply_inv(value_logits)
         advantages = rlax.truncated_generalized_advantage_estimation(
             trajectory.reward,
             jnp.where(trajectory.done, 0.0, config.discount),
             config.lambda_gae,
-            jnp.append(trajectory.out.value, final_value),
+            values,
         )
+        value_target_probs = tx_pair.apply(advantages + values[:-1])
 
-        return final_rollout_state, (trajectory, advantages)
+        return final_rollout_state, (trajectory, advantages, value_target_probs)
 
     def loss_trajectory(
-        net: Network, trajectory: Transition, advantages: Float[Array, "horizon"]
+        net: Network,
+        trajectory: Transition,
+        advantages: Float[Array, "horizon"],
+        value_target_probs: Float[Array, "horizon num_value_bins"],
     ):
         preds = jax.vmap(net)(trajectory.rollout_state.obs)
 
@@ -218,12 +247,14 @@ def make_train(config: Config):
         )
 
         # value
-        value_targets = trajectory.out.value + advantages
-        value_losses = rlax.l2_loss(
-            preds.value,
-            value_targets,
+        value_losses = rlax.categorical_cross_entropy(
+            value_target_probs,
+            preds.value_logits,
         )
         value_loss = jnp.mean(value_losses)
+        td_error = tx_pair.apply_inv(value_target_probs) - tx_pair.apply_inv(
+            preds.value_logits
+        )
 
         # entropy
         entropy_loss = rlax.entropy_loss(preds.logits, jnp.ones(config.horizon))
@@ -233,7 +264,7 @@ def make_train(config: Config):
             + config.value_coef * value_loss
             + config.entropy_coef * entropy_loss
         ), {
-            "train/td_error": value_targets - preds.value,
+            "train/td_error": td_error,
             "train/value_loss": value_loss,
             "train/policy_loss": policy_loss,
         }
@@ -245,6 +276,16 @@ if __name__ == "__main__":
     config = Config()
     train, _ = make_train(config)
     train_jit = jax.jit(train)
-    with wandb.init(project="jax-rl", config=config._asdict(), tags=["ppo"]):
-        out = train_jit(jr.PRNGKey(0))
-        jax.block_until_ready(out)
+
+    DEBUG = False
+
+    if DEBUG:
+        with jax.disable_jit():
+            out = train_jit(jr.PRNGKey(0))
+            jax.block_until_ready(out)
+    else:
+        with wandb.init(
+            project="jax-rl", config=config._asdict(), tags=["ppo", "categorical"]
+        ):
+            out = train_jit(jr.PRNGKey(0))
+            jax.block_until_ready(out)
