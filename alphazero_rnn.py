@@ -1,94 +1,139 @@
 import jax
 import jax.numpy as jnp
-import jax.random as rand
+import jax.random as jr
+import numpy as np
 
 import equinox as eqx
-import optax
+import flashbax as fbx
 import rlax
 import mctx
-import flashbax as fbx
-
+import optax
 import gymnax
-from gymnax.environments.environment import Environment
 from gymnax.wrappers import FlattenObservationWrapper
-from gymnax.visualize import Visualizer
 
-import tempfile
 import wandb
-import matplotlib
-import matplotlib.pyplot as plt
+import sys
+import yaml
+import functools as ft
 
-from functools import partial
-from typing import Literal, NamedTuple
-from jaxtyping import Bool, Integer, Key, Float, Array, PyTree, jaxtyped
-from typeguard import typechecked
-from batched import Batched
+from jaxtyping import Bool, Integer, Float, Key, Array, PyTree
+from typing import Callable, Literal, NamedTuple, TypeVar, Annotated as Batched
 
 
-matplotlib.use("agg")
+class Config(NamedTuple):
+    env_name: str = "Catch-bsuite"
+    # network architecture
+    rnn_size: int = 64
+    mlp_size: int = 64
+    mlp_depth: int = 2
+    activation: Literal["relu", "tanh"] = "tanh"
+    # collection
+    num_transitions: int = 500_000
+    num_envs: int = 8
+    horizon: int = 50
+    # two-hot value
+    num_value_bins: int | Literal["scalar"] = "scalar"
+    min_value: float = -2.0
+    max_value: float = 2.0
+    # search
+    num_mcts_simulations: int = 20
+    # bootstrapping
+    discount: float = 0.99
+    bootstrap_n: int = 10
+    lambda_gae: float = 0.95
+    # optimization
+    num_minibatches: int = 4
+    batch_size: int = 12
+    lr_init: float = 1e-3
+    max_grad_norm: float = 1.0
+    # target
+    target_update_freq: int = 4
+    target_update_size: float = 1.0
+    # loss
+    value_coef: float = 0.5
+    # evaluation
+    num_evals: int = 8
+    num_eval_envs: int = 8
 
 
 class ObsState(NamedTuple):
-    """An observation and whether the episode terminated."""
-
     obs: Float[Array, "obs_size"]
     is_initial: Bool[Array, ""]
 
 
-class ActorCriticOutput(NamedTuple):
+class Prediction(NamedTuple):
     policy_logits: Float[Array, "num_actions"]
     value_logits: Float[Array, "num_value_bins"]
 
 
 class ActorCriticRNN(eqx.Module):
-    """Parameterizes the actor-critic network."""
-
     cell: eqx.nn.GRUCell
     policy_head: eqx.nn.MLP
     value_head: eqx.nn.MLP
 
     def __init__(
         self,
-        in_size: int,
+        obs_size: int,
         rnn_size: int,
-        num_actions: int,
-        num_value_bins: int | Literal["scalar"],
         mlp_size: int,
         mlp_depth: int,
+        num_actions: int,
+        num_value_bins: int | Literal["scalar"],
+        activation: Literal["relu", "tanh"],
         *,
-        key: rand.PRNGKey,
+        key: Key[Array, ""],
     ):
-        key_policy, key_value, key_cell = rand.split(key, 3)
-        self.cell = eqx.nn.GRUCell(in_size, rnn_size, key=key_cell)
+        key_cell, key_policy, key_value = jr.split(key, 3)
+
+        activation = jax.nn.relu if activation == "relu" else jax.nn.tanh
+
+        self.cell = eqx.nn.GRUCell(obs_size, rnn_size, key=key_cell)
         self.policy_head = eqx.nn.MLP(
-            rnn_size, num_actions, mlp_size, mlp_depth, key=key_policy
+            rnn_size, num_actions, mlp_size, mlp_depth, activation, key=key_policy
         )
         self.value_head = eqx.nn.MLP(
-            rnn_size, num_value_bins, mlp_size, mlp_depth, key=key_value
+            rnn_size, num_value_bins, mlp_size, mlp_depth, activation, key=key_value
         )
 
-    def __call__(self, hidden: Float[Array, "rnn_size"], inputs: Batched[ObsState]):
+    def __call__(
+        self, hidden: Float[Array, "rnn_size"], obs_state: Batched[ObsState, "horizon"]
+    ):
         return jax.lax.scan(
-            jax.tree_util.Partial(self.step),
-            hidden,
-            inputs,
+            lambda hidden, obs: self.step(hidden, obs), hidden, obs_state
         )
 
-    def step(self, hidden: Float[Array, "rnn_size"], input: ObsState):
-        """Reset to initial hidden state if done."""
-        hidden = jnp.where(input.is_initial, self.init_hidden(), hidden)
-        hidden = self.cell(input.obs, hidden)
-        return hidden, ActorCriticOutput(
-            self.policy_head(hidden),
-            self.value_head(hidden),
-        )
+    def step(self, hidden: Float[Array, "rnn_size"], obs_state: ObsState):
+        """Returns the predicted policy and value for this observation."""
+        hidden = jnp.where(obs_state.is_initial, self.init_hidden(), hidden)
+        hidden = self.cell(obs_state.obs, hidden)
+        return hidden, Prediction(self.policy_head(hidden), self.value_head(hidden))
 
     def init_hidden(self):
         return jnp.zeros(self.cell.hidden_size)
 
 
-class UnobsState(NamedTuple):
-    """Used in MCTS. The unobserved state of the environment."""
+Carry = TypeVar("Carry")
+X = TypeVar("X")
+Y = TypeVar("Y")
+
+
+def exec_loop(init: Carry, length: int, key: Key[Array, ""]):
+    """Scan the decorated function for `length` steps.
+
+    The motivation is that loops are easier to read
+    when the target and iter are in front.
+    """
+
+    def decorator(
+        f: Callable[[Carry, X], tuple[Carry, Y]],
+    ) -> tuple[Carry, Batched[Y, "length"]]:
+        return jax.lax.scan(f, init, jr.split(key, length))
+
+    return decorator
+
+
+class Unobs(NamedTuple):
+    """`hidden` is the representation of `env_state`"""
 
     env_state: gymnax.EnvState
     hidden: Float[Array, "rnn_size"]
@@ -98,67 +143,47 @@ class RolloutState(NamedTuple):
     """Carried when rolling out the environment."""
 
     obs_state: ObsState
-    unobs_state: UnobsState
+    unobs: Unobs
 
 
 class Transition(NamedTuple):
     """A single transition. May be batched into a trajectory."""
 
     rollout_state: RolloutState
-    action: Integer[Array, ""]
     reward: Float[Array, ""]
-    logits: Float[Array, "num_actions"]
+    policy_logits: Float[Array, "num_actions"]
 
 
 class ParamState(NamedTuple):
-    """Each outer update iteration."""
+    """Carried during optimization."""
 
     params: ActorCriticRNN
     opt_state: optax.OptState
 
 
 class IterState(NamedTuple):
-    num_iterations: Integer[Array, ""]
+    """Carried across algorithm iterations."""
+
+    step: Integer[Array, ""]
+    rollout_state: Batched[RolloutState, "num_envs"]
     param_state: ParamState
     target_params: ActorCriticRNN
     buffer_state: fbx.trajectory_buffer.TrajectoryBufferState[Transition]
-    rollout_state: Batched[RolloutState]
 
 
-class Config(NamedTuple):
-    env: str = "Catch-bsuite"
-    visualizations_dir: str = tempfile.gettempdir()
-    seed: int = 184
-    num_evals: int = 4
+def tree_slice(tree: PyTree[Array], at: int):
+    return jax.tree.map(lambda x: x[at], tree)
 
-    # environment collecting
-    num_total_transitions: int = 50_000
-    max_horizon: int = 100
-    num_parallel_envs: int = 8
-    num_mcts_simulations: int = 48
 
-    # network architecture
-    rnn_size: int = 64
-    mlp_size: int = 32
-    mlp_depth: int = 3
+def log_values(data: dict[str, Float[Array, ""]]):
+    def log(data: dict[str, Float[Array, ""]]):
+        data = jax.tree.map(lambda x: x.item(), data)
+        if wandb.run:
+            wandb.log(data)
+        else:
+            yaml.safe_dump(data, sys.stdout)
 
-    # optimization
-    num_gradient_steps_per_iteration: int = 20
-    max_gradient_norm: float = 0.5
-    learning_rate: float = 1e-3
-    end_learning_rate: float = 1e-6
-    target_update_frequency: int = 4
-    target_step_size: float = 1.0
-
-    # two-hot encoding
-    min_value: float = -12.0
-    max_value: float = 12.0
-    num_value_bins: int = 10
-
-    # loss function
-    discount: float = 0.99
-    value_coefficient: float = 0.5
-    lambda_gae: float = 0.95
+    jax.debug.callback(log, data)
 
 
 def get_norm_data(tree: PyTree[Array], prefix: str):
@@ -170,408 +195,490 @@ def get_norm_data(tree: PyTree[Array], prefix: str):
     }
 
 
-def tree_slice(tree: PyTree, at: int):
-    """Utility function for slicing pytree leaves."""
-    return jax.tree.map(lambda x: x[at], tree)
-
-
 def make_train(config: Config):
-    num_transitions_per_iteration = config.max_horizon * config.num_parallel_envs
-    num_iterations = config.num_total_transitions // num_transitions_per_iteration
-    num_gradient_steps = num_iterations * config.num_gradient_steps_per_iteration
-    eval_frequency = num_iterations // config.num_evals
+    num_iters = config.num_transitions // (config.num_envs * config.horizon)
+    num_updates = num_iters * config.num_minibatches
+    eval_freq = num_iters // config.num_evals
 
-    env, env_params = gymnax.make(config.env)
-    env: Environment = FlattenObservationWrapper(env)
-    # env: Environment = LogWrapper(env)  # doesn't respect the envstate
-
+    env, env_params = gymnax.make(config.env_name)
+    obs_shape = env.observation_space(env_params).shape  # for visualization
     num_actions = env.action_space(env_params).n
+    env = FlattenObservationWrapper(env)
 
-    buffer = fbx.make_trajectory_buffer(
-        add_batch_size=config.num_parallel_envs,
-        sample_batch_size=config.num_parallel_envs,
-        sample_sequence_length=config.max_horizon,
-        period=1,
-        min_length_time_axis=num_transitions_per_iteration,
-        max_size=int(1e6),
-    )
+    env_reset_batch = jax.vmap(env.reset, (0, None))  # map over key
+    env_step_batch = jax.vmap(env.step, (0, 0, 0, None))  # map over key, state, action
 
-    lr = optax.linear_schedule(
-        config.learning_rate,
-        config.end_learning_rate,
-        num_gradient_steps,
-    )
-
+    lr = optax.linear_schedule(config.lr_init, 0.0, num_updates)
     optim = optax.chain(
-        optax.clip_by_global_norm(config.max_gradient_norm), optax.adamw(lr, eps=1e-5)
+        optax.clip_by_global_norm(config.max_grad_norm), optax.adamw(lr, eps=1e-5)
     )
 
-    tx = rlax.twohot_pair(config.min_value, config.max_value, config.num_value_bins)
+    # sample config.batch_size trajectories of config.horizon transitions
+    buffer = fbx.make_trajectory_buffer(
+        add_batch_size=config.num_envs,
+        sample_batch_size=config.batch_size,
+        sample_sequence_length=config.horizon,
+        period=config.horizon // 2,  # avoid some correlation
+        min_length_time_axis=config.horizon * config.batch_size,
+        max_length_time_axis=config.num_transitions // 2,  # keep recent transitions
+    )
 
-    @jaxtyped(typechecker=typechecked)
-    def train(key):
-        """Train the agent.
+    def logits_to_values(
+        value_logits: Float[Array, "horizon num_value_bins"],
+    ) -> Float[Array, "horizon"]:
+        """Convert from logits for two-hot encoding to scalar values."""
+        if config.num_value_bins == "scalar":
+            return value_logits
+        else:
+            return rlax.transform_from_2hot(
+                jax.nn.softmax(value_logits, axis=-1),
+                config.min_value,
+                config.max_value,
+                config.num_value_bins,
+            )
 
-        All randomness goes into this function."""
-        key_reset, key_network = rand.split(key)
+    def train(key: Key[Array, ""]):
+        key_net, key_iter, key_evaluate = jr.split(key, 3)
 
-        # initial states
-        obs, env_state = jax.vmap(env.reset, in_axes=(0, None))(
-            rand.split(key_reset, config.num_parallel_envs), env_params
+        obs, env_state = env_reset_batch(jr.split(key, config.num_envs), env_params)
+
+        # initialize all state
+        init_net = ActorCriticRNN(
+            obs.shape[-1],
+            config.rnn_size,
+            config.mlp_size,
+            config.mlp_depth,
+            num_actions,
+            config.num_value_bins,
+            config.activation,
+            key=key_net,
         )
-
-        # initialize network
-        network = ActorCriticRNN(
-            in_size=obs.shape[-1],
-            rnn_size=config.rnn_size,
-            num_actions=num_actions,
-            num_value_bins=config.num_value_bins,
-            mlp_size=config.mlp_size,
-            mlp_depth=config.mlp_depth,
-            key=key_network,
-        )
-        params, network_static = eqx.partition(network, eqx.is_inexact_array)
-
-        init_hidden = network.init_hidden()
+        init_params, net_static = eqx.partition(init_net, eqx.is_inexact_array)
         init_rollout_state = RolloutState(
-            ObsState(
-                obs,
-                jnp.zeros(config.num_parallel_envs, dtype=bool),
-            ),
-            UnobsState(
-                env_state,
-                jnp.broadcast_to(
-                    init_hidden, (config.num_parallel_envs, *init_hidden.shape)
-                ),
+            obs_state=ObsState(obs=obs, is_initial=jnp.ones(config.num_envs, bool)),
+            unobs=Unobs(
+                env_state=env_state,
+                # hidden reinitialized for initial states
+                hidden=jnp.empty((config.num_envs, config.rnn_size)),
             ),
         )
-
-        # init buffer
         init_buffer_state = buffer.init(
             Transition(
                 rollout_state=tree_slice(init_rollout_state, 0),
-                action=0,
                 reward=0.0,
-                logits=jnp.zeros(num_actions),
+                policy_logits=jnp.zeros(num_actions),
             )
         )
-        init_iter_state = IterState(
-            0,
-            ParamState(params, optim.init(params)),
-            params,
-            init_buffer_state,
-            init_rollout_state,
+
+        @exec_loop(
+            IterState(
+                step=0,
+                rollout_state=init_rollout_state,
+                param_state=ParamState(
+                    params=init_params, opt_state=optim.init(init_params)
+                ),
+                target_params=init_params,
+                buffer_state=init_buffer_state,
+            ),
+            num_iters,
+            key_iter,
         )
+        def iterate(iter_state: IterState, key: Key[Array, ""]):
+            key_rollout, key_optimize = jr.split(key)
 
-        # main loop
-        @partial(
-            jax.lax.scan,
-            init=init_iter_state,
-            xs=rand.split(key, num_iterations),
-        )
-        def iteration_step(iter_state: IterState, key: rand.PRNGKey):
-            """A single iteration of optimization.
-
-            1. Collect a batch of rollouts in parallel.
-            2. Run a few epochs of SGD (or some optimization algorithm) on the batch.
-            """
-            key_rollout, key_shuffle, key_visualize = rand.split(key, 3)
-
-            # collect rollouts and update buffer
-            # leading dimension num_parallel_envs
-            rollout_state, trajectories = jax.vmap(rollout, (None, 0, 0))(
-                eqx.combine(iter_state.param_state.params, network_static),
+            # collect data
+            rollout_state, trajectories = rollout(
+                eqx.combine(iter_state.param_state.params, net_static),
                 iter_state.rollout_state,
-                rand.split(key_rollout, config.num_parallel_envs),
+                key_rollout,
             )
             buffer_state = buffer.add(iter_state.buffer_state, trajectories)
 
-            # optimize
-            param_state, losses = jax.lax.scan(
-                partial(
-                    optimize_step,
-                    buffer_state,
-                    iter_state.target_params,
-                    network_static=network_static,
-                ),
+            # gradient updates
+            @exec_loop(
                 iter_state.param_state,
-                rand.split(key_shuffle, config.num_gradient_steps_per_iteration),
+                config.num_minibatches,
+                key_optimize,
             )
+            def optimize_step(param_state: ParamState, key: Key[Array, ""]):
+                trajectories = buffer.sample(buffer_state, key).experience
 
-            jax.debug.callback(
-                wandb.log,
-                {
-                    "train/metrics/mean_mcts_reward": jnp.sum(trajectories.reward)
-                    / config.num_parallel_envs,
-                },
-            )
+                @ft.partial(jax.value_and_grad, has_aux=True)
+                def loss_grad(params: ActorCriticRNN):
+                    losses, aux = jax.vmap(loss_trajectory, (None, None, 0))(
+                        eqx.combine(params, net_static),
+                        eqx.combine(iter_state.target_params, net_static),
+                        trajectories,
+                    )
 
-            # evaluate
-            jax.lax.cond(
-                iter_state.num_iterations % eval_frequency == 0,
-                partial(eval_model, network_static=network_static),
-                lambda *args: None,
-                param_state.params,
-                tree_slice(iter_state.rollout_state, 0),
-                key_visualize,
-            )
+                    return jnp.mean(losses), aux
 
-            target_params = jax.lax.cond(
-                iter_state.num_iterations % config.target_update_frequency == 0,
-                lambda new_params, old_params: optax.incremental_update(
-                    new_params,
-                    old_params,
-                    config.target_step_size,
+                (_, aux), grads = loss_grad(param_state.params)
+                updates, opt_state = optim.update(
+                    grads, param_state.opt_state, param_state.params
+                )
+                params = optax.apply_updates(param_state.params, updates)
+
+                log_values(
+                    jax.tree.map(jnp.mean, aux)
+                    | get_norm_data(updates, "train/updates/norm")
+                    | get_norm_data(params, "train/params/norm")
+                )
+
+                return ParamState(params, opt_state), None
+
+            param_state, _ = optimize_step
+
+            target_params = jax.tree.map(
+                lambda new, old: jnp.where(
+                    iter_state.step % config.target_update_freq == 0,
+                    optax.incremental_update(new, old, config.target_update_size),
+                    old,
                 ),
-                lambda _, old_params: old_params,
                 param_state.params,
                 iter_state.target_params,
             )
 
-            return IterState(
-                iter_state.num_iterations + 1,
-                param_state,
-                target_params,
-                buffer_state,
-                rollout_state,
-            ), losses
-
-        return iteration_step
-
-    def mcts_recurrent_fn(
-        model: ActorCriticRNN,
-        rng: Float[Key, "batch"],
-        action: Integer[Array, "batch"],
-        world_state: UnobsState,
-    ):
-        obs, env_state, reward, done, info = jax.vmap(
-            env.step, in_axes=(0, 0, 0, None)
-        )(rand.split(rng, action.size), world_state.env_state, action, env_params)
-        hidden, (logits, value) = jax.vmap(model.step)(
-            world_state.hidden, ObsState(obs, done)
-        )
-        return mctx.RecurrentFnOutput(
-            reward=reward,
-            discount=jnp.where(done, 0.0, config.discount),
-            prior_logits=logits,
-            value=tx.apply_inv(value),
-        ), UnobsState(env_state, hidden)
-
-    # collect rollouts
-    def rollout(
-        model: ActorCriticRNN,
-        init_rollout_state: RolloutState,
-        key: rand.PRNGKey,
-    ):
-        """Collect a rollout from the environment and estimate the policy's advantage at each transition."""
-
-        @partial(
-            jax.lax.scan,
-            init=init_rollout_state,
-            xs=rand.split(key, config.max_horizon),
-        )
-        def rollout_step(rollout_state: RolloutState, key: rand.PRNGKey):
-            """A single environment interaction."""
-            key_action, key_step = rand.split(key)
-
-            # choose action
-            hidden, (logits, value) = model.step(
-                rollout_state.unobs_state.hidden, rollout_state.obs_state
-            )
-            root = jax.tree.map(
-                lambda x: x[jnp.newaxis, ...],
-                mctx.RootFnOutput(
-                    prior_logits=logits,
-                    value=tx.apply_inv(value).reshape(()),
-                    embedding=UnobsState(rollout_state.unobs_state.env_state, hidden),
-                ),
-            )
-            output = mctx.muzero_policy(
-                model,
-                key_action,
-                root,
-                mcts_recurrent_fn,
-                config.num_mcts_simulations,
-                max_depth=config.max_horizon,
-            )
-
-            logits = output.action_weights[0]
-            action = output.action[0]
-
-            # step environment
-            obs, env_state, reward, done, info = env.step(
-                key_step, rollout_state.unobs_state.env_state, action, env_params
-            )
-
-            return RolloutState(
-                ObsState(obs, done),
-                UnobsState(env_state, hidden),
-            ), Transition(
-                rollout_state,
-                action,
-                reward,
-                logits,
-            )
-
-        return rollout_step
-
-    def optimize_step(
-        buffer_state: fbx.trajectory_buffer.TrajectoryBufferState[Transition],
-        target_params: ActorCriticRNN,
-        param_state: ParamState,
-        key: rand.PRNGKey,
-        *,
-        network_static: ActorCriticRNN,
-    ):
-        """For each epoch, reorder the minibatches"""
-        minibatch = buffer.sample(buffer_state, key).experience
-
-        @partial(jax.value_and_grad, has_aux=True)
-        def loss_fn(params: ActorCriticRNN):
-            """Average the loss across a batch of trjaectories."""
-            loss, aux = jax.vmap(
-                partial(bc_loss, network_static=network_static), (None, None, 0)
-            )(
-                params,
-                target_params,
-                minibatch,
-            )
-            return jnp.mean(loss), aux
-
-        (loss, aux), grad = loss_fn(param_state.params)
-        updates, opt_state = optim.update(
-            grad,
-            param_state.opt_state,
-            param_state.params,
-        )
-        params = optax.apply_updates(param_state.params, updates)
-
-        jax.debug.callback(
-            wandb.log,
-            jax.tree.map(jnp.mean, aux)
-            | get_norm_data(updates, "train/params/gradient")
-            | get_norm_data(params, "train/params/norm"),
-        )
-
-        return ParamState(params, opt_state), loss
-
-    def bc_loss(
-        params: ActorCriticRNN,
-        target_params: ActorCriticRNN,
-        trajectory: Transition,
-        *,
-        network_static: ActorCriticRNN,
-    ):
-        """Behavior cloning loss for the policy."""
-        model = eqx.combine(params, network_static)
-        init_hidden = trajectory.rollout_state.unobs_state.hidden[0]
-        obs = trajectory.rollout_state.obs_state
-        _, preds = model(init_hidden, obs)
-
-        # value loss
-        target_model = eqx.combine(target_params, network_static)
-        _, (_, target_value_logits) = target_model(init_hidden, obs)
-        bootstrapped_probs = rlax.transformed_lambda_returns(
-            tx,
-            trajectory.reward[:-1],
-            jnp.where(
-                trajectory.rollout_state.obs_state.is_initial[1:], 0.0, config.discount
-            ),
-            target_value_logits[1:],
-            config.lambda_gae,
-        )
-
-        value_losses = rlax.categorical_cross_entropy(
-            bootstrapped_probs,
-            preds.value_logits[:-1],
-        )
-        target_values = tx.apply_inv(jax.nn.softmax(target_value_logits, axis=-1))
-        value_probs = jax.nn.softmax(preds.value_logits, axis=-1)
-        predicted_values = tx.apply_inv(value_probs)
-
-        value_entropy = jax.vmap(rlax.softmax().entropy)(preds.value_logits)
-        value_loss = jnp.mean(value_losses)
-        td_errors = target_values - predicted_values
-
-        # policy loss
-        policy_targets = jax.nn.softmax(trajectory.logits, axis=-1)
-        policy_losses = optax.softmax_cross_entropy(preds.policy_logits, policy_targets)
-        policy_loss = jnp.mean(policy_losses)
-
-        # total
-        loss = policy_loss + config.value_coefficient * value_loss
-
-        return loss, {
-            "train/metrics/mean_bootstrapped_value": jnp.mean(
-                tx.apply_inv(bootstrapped_probs)
-            ),
-            "train/metrics/mean_target_value": jnp.mean(target_values),
-            "train/metrics/mean_predicted_value": jnp.mean(predicted_values),
-            "train/metrics/mean_td_error": jnp.mean(td_errors),
-            "train/metrics/mean_value_entropy": jnp.mean(value_entropy),
-            "train/metrics/loss": loss,
-            "train/metrics/policy_loss": policy_loss,
-            "train/metrics/value_loss": value_loss,
-        }
-
-    def eval_model(
-        params: ActorCriticRNN,
-        rollout_state: gymnax.EnvState,
-        key: rand.PRNGKey,
-        *,
-        network_static: ActorCriticRNN,
-    ):
-        key_rollout, key_id = rand.split(key)
-        _, eval_trajectory = rollout(
-            params, rollout_state, key_rollout, network_static=network_static
-        )
-        id = rand.randint(key_id, (), 0, 1 << 28)
-
-        def visualize_trajectory(
-            env_states: EnvState,
-            rewards: Float[Array, "horizon"],
-            id: Integer[Array, ""],
-        ):
-            path = f"{config.visualizations_dir}/{id.item():07X}.gif"
-
-            # visualizer expects a list of env_states
-            vis = Visualizer(
-                env,
-                env_params,
-                [tree_slice(env_states, i) for i in range(rewards.size)],
-                jnp.cumsum(rewards),
-            )
-            vis.animate(path)
-
-            wandb.log(
+            log_values(
                 {
-                    "eval/rollout": wandb.Image(path),
-                    "eval/rewards": jnp.sum(rewards),
+                    "train/metrics/reward_per_trajectory": jnp.sum(trajectories.reward)
+                    / jnp.sum(trajectories.rollout_state.obs_state.is_initial),
                 }
             )
 
-            plt.close(vis.fig)
+            # evaluate every eval_freq steps
+            jax.lax.cond(
+                iter_state.step % eval_freq == 0,
+                ft.partial(
+                    evaluate, num_envs=config.num_eval_envs, net_static=net_static
+                ),
+                lambda params, key: jnp.nan,
+                param_state.params,
+                key,
+            )
 
-        jax.debug.callback(
-            visualize_trajectory,
-            eval_trajectory.rollout_state.unobs_state.env_state,
-            eval_trajectory.reward,
-            id,
+            return IterState(
+                step=iter_state.step + 1,
+                rollout_state=rollout_state,
+                param_state=param_state,
+                target_params=target_params,
+                buffer_state=buffer_state,
+            ), None
+
+        final_iter_state, _ = iterate
+
+        final_mean_eval_reward = evaluate(
+            final_iter_state.param_state.params,
+            key_evaluate,
+            num_envs=config.num_eval_envs * 4,
+            net_static=net_static,
+        )
+        return final_iter_state, final_mean_eval_reward
+
+    def rollout(
+        net: ActorCriticRNN,
+        init_rollout_state: Batched[RolloutState, "num_envs"],
+        key: Key[Array, ""],
+    ) -> tuple[
+        Batched[RolloutState, "num_envs"], Batched[Transition, "num_envs horizon"]
+    ]:
+        @exec_loop(init_rollout_state, config.horizon, key)
+        def rollout_step(
+            rollout_state: Batched[RolloutState, "num_envs"], key: Key[Array, ""]
+        ):
+            key_action, key_step = jr.split(key)
+
+            hidden, pred = jax.vmap(net.step)(
+                rollout_state.unobs.hidden, rollout_state.obs_state
+            )
+
+            root = mctx.RootFnOutput(
+                prior_logits=pred.policy_logits,
+                value=logits_to_values(pred.value_logits),
+                # embedding contains current env_state and the hidden to pass to next net call
+                embedding=rollout_state.unobs._replace(hidden=hidden),
+            )
+
+            def mcts_recurrent_fn(
+                net: ActorCriticRNN,
+                key: Key[Array, ""],
+                action: Integer[Array, "num_envs"],
+                unobs: Batched[Unobs, "num_envs"],
+            ):
+                """Returns the logits and value for the newly created node."""
+                obs, env_states, rewards, is_initials, infos = env_step_batch(
+                    jr.split(key, config.num_envs), unobs.env_state, action, env_params
+                )
+                hiddens, preds = jax.vmap(net.step)(
+                    unobs.hidden, ObsState(obs, is_initials)
+                )
+                return mctx.RecurrentFnOutput(
+                    reward=rewards,
+                    discount=jnp.where(is_initials, 0.0, config.discount),
+                    prior_logits=preds.policy_logits,
+                    value=logits_to_values(preds.value_logits),
+                ), Unobs(env_states, hiddens)
+
+            out = mctx.muzero_policy(
+                params=net,
+                rng_key=key_action,
+                root=root,
+                recurrent_fn=mcts_recurrent_fn,
+                num_simulations=config.num_mcts_simulations,
+                max_depth=config.horizon,
+            )
+
+            obs, env_state, reward, is_initial, info = env_step_batch(
+                jr.split(key_step, config.num_envs),
+                rollout_state.unobs.env_state,
+                out.action,
+                env_params,
+            )
+
+            return RolloutState(
+                obs_state=ObsState(obs=obs, is_initial=is_initial),
+                unobs=Unobs(env_state=env_state, hidden=hidden),
+            ), Transition(
+                # contains the reward and policy logits computed from the rollout state
+                rollout_state=rollout_state,
+                reward=reward,
+                policy_logits=out.action_weights,
+            )
+
+        final_rollout_state, transitions = rollout_step
+        return final_rollout_state, jax.tree.map(
+            lambda x: jnp.swapaxes(x, 0, 1), transitions
         )
 
-    return train, (mcts_recurrent_fn, rollout, optimize_step, bc_loss, eval_model)
+    def loss_trajectory(
+        net: ActorCriticRNN,
+        target_net: ActorCriticRNN,
+        trajectory: Batched[Transition, "horizon"],
+    ):
+        """Compute behavior cloning loss for the `trajectory`. Bootstrap values from `target_net`."""
+        init_hidden = trajectory.rollout_state.unobs.hidden[0, :]
+        obs_seq = trajectory.rollout_state.obs_state
+
+        _, net_pred = net(init_hidden, obs_seq)
+
+        # policy loss
+        target_policy_probs = jax.nn.softmax(trajectory.policy_logits, axis=-1)
+        policy_losses = rlax.categorical_cross_entropy(
+            target_policy_probs, net_pred.policy_logits
+        )
+        policy_loss = jnp.mean(policy_losses)
+
+        # value loss
+        # bootstrap from target network
+        _, target_pred = target_net(init_hidden, obs_seq)
+        target_values = logits_to_values(target_pred.value_logits)
+        bootstrapped_values = rlax.n_step_bootstrapped_returns(
+            trajectory.reward[:-1],
+            jnp.where(obs_seq.is_initial[1:], 0.0, config.discount),
+            target_values[1:],
+            config.bootstrap_n,
+            config.lambda_gae,
+        )
+        value_losses = (
+            rlax.l2_loss(net_pred.value_logits[:-1], bootstrapped_values)
+            if config.num_value_bins == "scalar"
+            else rlax.categorical_cross_entropy(
+                rlax.transform_to_2hot(
+                    bootstrapped_values[:, jnp.newaxis],
+                    config.min_value,
+                    config.max_value,
+                    config.num_value_bins,
+                ),
+                net_pred.value_logits[:-1, :],
+            )
+        )
+        value_loss = jnp.mean(value_losses)
+
+        # logging
+        td_error = bootstrapped_values - logits_to_values(net_pred.value_logits)[:-1]
+
+        loss = policy_loss + config.value_coef * value_loss
+        return loss, {
+            "train/metrics/loss": loss,
+            "train/metrics/policy_loss": policy_loss,
+            "train/metrics/value_loss": value_loss,
+            "train/metrics/td_error": td_error,
+        }
+
+    def evaluate(
+        params: ActorCriticRNN,
+        key: Key[Array, ""],
+        *,
+        num_envs: int,
+        net_static: ActorCriticRNN,
+    ) -> Float[Array, ""]:
+        """Evaluate a batch of rollouts using the raw policy.
+
+        Returns mean reward per trajectory (across the batch).
+        """
+        key_reset, key_rollout = jr.split(key)
+
+        net = eqx.combine(params, net_static)
+
+        obs, env_state = env_reset_batch(jr.split(key_reset, num_envs), env_params)
+
+        init_rollout_state = RolloutState(
+            ObsState(obs, jnp.zeros(num_envs, dtype=bool)),
+            Unobs(
+                env_state,
+                jnp.broadcast_to(net.init_hidden(), (num_envs, config.rnn_size)),
+            ),
+        )
+
+        @exec_loop(
+            init_rollout_state,
+            config.horizon,
+            key_rollout,
+        )
+        def rollout_step(
+            rollout_state: Batched[RolloutState, "num_envs"], key: Key[Array, ""]
+        ):
+            key_action, key_step = jr.split(key)
+
+            @ft.partial(jax.value_and_grad, has_aux=True)
+            def predict(obs: Float[Array, "obs_size"], rollout_state: RolloutState):
+                """Differentiate with respect to value to obtain saliency map."""
+                hidden, pred = net.step(
+                    rollout_state.unobs.hidden,
+                    rollout_state.obs_state._replace(obs=obs),
+                )
+                value = logits_to_values(pred.value_logits[jnp.newaxis])[0]
+                return value, (hidden, pred.policy_logits)
+
+            (values, (hidden, policy_logits)), obs_grads = jax.vmap(predict)(
+                rollout_state.obs_state.obs, rollout_state
+            )
+            action = jr.categorical(key_action, policy_logits, axis=-1)
+            obs, env_states, rewards, is_initials, info = env_step_batch(
+                jr.split(key_step, num_envs),
+                rollout_state.unobs.env_state,
+                action,
+                env_params,
+            )
+
+            return RolloutState(
+                ObsState(obs, is_initials), Unobs(env_states, hidden)
+            ), (
+                env_states,
+                rewards,
+                is_initials,
+                values,
+                obs_grads,
+            )
+
+        _, (env_states, rewards, is_initials, values, grads) = rollout_step
+
+        bootstrapped_returns = jax.vmap(rlax.lambda_returns, (1, 1, 1, None), 1)(
+            rewards[:-1, :],
+            jnp.where(is_initials[:-1, :], 0.0, config.discount),
+            values[1:, :],
+            config.lambda_gae,
+        )
+        td_errors = bootstrapped_returns - values[:-1, :]
+
+        env_states: Batched[
+            gymnax.environments.bsuite.catch.EnvState, "num_envs horizon"
+        ]
+
+        horizon_grid, batch_grid = jnp.mgrid[: config.horizon, :num_envs]
+
+        maps = jnp.reshape(
+            jnp.astype(grads * 255.0, jnp.uint8),
+            (config.horizon, num_envs, *obs_shape),
+        )
+
+        video = (
+            jnp.empty((config.horizon, num_envs, 3, *obs_shape), dtype=jnp.uint8)
+            .at[horizon_grid, batch_grid, 0, env_states.ball_y, env_states.ball_x]
+            .set(255)
+            .at[horizon_grid, batch_grid, 1, env_states.paddle_y, env_states.paddle_x]
+            .set(255)
+            .at[:, :, 2, :, :]
+            .set(maps)
+        )
+
+        def visualize(
+            video: Float[Array, "num_envs horizon channel height width"],
+            mean_reward: Float[Array, ""],
+            mean_value: Float[Array, ""],
+            mean_td_error: Float[Array, ""],
+        ):
+            data = {
+                "eval/metrics/reward": mean_reward.item(),
+                "eval/metrics/values": mean_value.item(),
+                "eval/metrics/td_error": mean_td_error.item(),
+            }
+            wandb.log(data | {"eval/video": wandb.Video(np.asarray(video), fps=10)})
+            yaml.safe_dump(data, sys.stdout)
+
+        mean_reward = jnp.sum(rewards) / jnp.sum(is_initials)
+
+        jax.debug.callback(
+            visualize,
+            video=jnp.swapaxes(video, 0, 1),
+            mean_reward=mean_reward,
+            mean_value=jnp.mean(values),
+            mean_td_error=jnp.mean(td_errors),
+        )
+
+        return mean_reward
+
+    return train
 
 
 if __name__ == "__main__":
-    with tempfile.TemporaryDirectory() as tempdir:
-        config = Config(visualizations_dir=tempdir)
-        key = rand.PRNGKey(config.seed)
-        train = jax.jit(make_train(config)[0])
+    default_config = Config()
 
-        with wandb.init(
-            project="jax-rl",
-            config=config._asdict(),
-        ) as run:
-            # with jax.disable_jit():
-            out = jax.block_until_ready(train(key))
-        print("Done training.")
+    if len(sys.argv) >= 2:
+        if sys.argv[1] == "sweep":
+            config_values = jax.tree.map(
+                lambda x: {"value": x}, default_config._asdict()
+            ) | {
+                "lr_init": {"min": 1e-4, "max": 1e-1},
+                "num_minibatches": {"values": [4, 16, 64]},
+                "batch_size": {"values": [12, 24]},
+            }
+            sweep_config = {
+                "method": "random",
+                "metric": {"goal": "maximize", "name": "eval/final/mean_reward"},
+                "parameters": config_values,
+            }
+
+            def run():
+                with wandb.init(project="jax-rl"):
+                    train = make_train(wandb.config)
+                    _, final_reward = jax.jit(train)(jr.key(42))
+                    wandb.log({"eval/final/mean_reward": final_reward})
+
+            sweep_id = (
+                sys.argv[2]
+                if len(sys.argv) >= 3
+                else wandb.sweep(sweep_config, project="jax-rl")
+            )
+
+            wandb.agent(
+                sweep_id,
+                function=run,
+                project="jax-rl",
+                count=12,
+            )
+
+        elif sys.argv[1] == "debug":
+            yaml.safe_dump(default_config._asdict(), sys.stdout)
+            train = make_train(default_config)
+            output = train(jr.key(42))
+            jax.block_until_ready(output)
+    else:
+        yaml.safe_dump(default_config._asdict(), sys.stdout)
+        train = make_train(default_config)
+        with wandb.init(project="jax-rl", config=default_config._asdict()):
+            output = jax.jit(train)(jr.key(42))
+            _, mean_eval_reward = jax.block_until_ready(output)
+            print(mean_eval_reward)
+
+    print("Done")
