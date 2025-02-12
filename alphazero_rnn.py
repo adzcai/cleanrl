@@ -8,32 +8,46 @@
 6. Evaluation function
 """
 
-import distrax
+# jax
 import jax
 import jax.numpy as jnp
 import jax.random as jr
 import numpy as np
 
+# jax ecosystem
+import chex
+import distrax
 import equinox as eqx
-import flashbax as fbx
+import optax
+
+# rl
 import rlax
 import mctx
-import optax
+import flashbax as fbx
 import gymnax
 from gymnax.wrappers import FlattenObservationWrapper
 
+# logging
 import wandb
 import matplotlib
 import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
 import sys
 import yaml
-import functools as ft
 
+# typing
 from jaxtyping import Bool, Integer, Float, Key, Array
 from typing import Callable, Literal, NamedTuple, TypeVar, Annotated as Batched
 
-from log_util import get_norm_data, log_values, tree_slice, visualize_catch
+# util
+import functools as ft
+from log_util import (
+    exec_callback,
+    get_norm_data,
+    log_values,
+    tree_slice,
+    visualize_catch,
+)
 
 matplotlib.use("agg")  # enable plotting inside jax callback
 
@@ -48,13 +62,13 @@ class Config(NamedTuple):
     # collection
     total_transitions: int = 500_000
     num_envs: int = 8
-    horizon: int = 10
+    horizon: int = 9
     # two-hot value
     num_value_bins: int | Literal["scalar"] = "scalar"
     min_value: float = -2.0
     max_value: float = 2.0
     # search
-    num_mcts_simulations: int = 20
+    num_mcts_simulations: int = 10
     # bootstrapping
     discount: float = 0.99
     bootstrap_n: int = 10
@@ -62,7 +76,7 @@ class Config(NamedTuple):
     # optimization
     num_minibatches: int = 4
     batch_size: int = 12
-    lr_init: float = 1e-3
+    lr_init: float = 1e-2
     max_grad_norm: float = 1.0
     # target
     target_update_freq: int = 4
@@ -71,7 +85,7 @@ class Config(NamedTuple):
     value_coef: float = 1.0
     # evaluation
     num_evals: int = 4
-    num_eval_envs: int = 4
+    num_eval_envs: int = 2
 
 
 class ObsState(NamedTuple):
@@ -463,11 +477,15 @@ def make_train(config: Config):
         obs_seq = trajectory.rollout_state.obs_state
 
         _, net_pred = net(init_hidden, obs_seq)
+        chex.assert_shape(
+            [trajectory.policy_logits, net_pred.policy_logits],
+            (config.horizon, num_actions),
+        )
 
         # policy loss
         target_policy_probs = jax.nn.softmax(trajectory.policy_logits, axis=-1)
         policy_losses = rlax.categorical_cross_entropy(
-            target_policy_probs, net_pred.policy_logits
+            labels=target_policy_probs, logits=net_pred.policy_logits
         )
         policy_loss = jnp.mean(policy_losses)
 
@@ -483,7 +501,10 @@ def make_train(config: Config):
             config.lambda_gae,
         )
         value_losses = (
-            rlax.l2_loss(net_pred.value_logits[:-1], bootstrapped_values)
+            rlax.l2_loss(
+                predictions=logits_to_values(net_pred.value_logits)[:-1],
+                targets=bootstrapped_values,
+            )
             if config.num_value_bins == "scalar"
             else rlax.categorical_cross_entropy(
                 rlax.transform_to_2hot(
@@ -558,7 +579,7 @@ def make_train(config: Config):
             (values, (hidden, policy_logits)), obs_grads = jax.vmap(predict)(
                 rollout_state.obs_state.obs, rollout_state
             )
-            action = jr.categorical(key_action, policy_logits, axis=-1)
+            action = jr.categorical(key_action, logits=policy_logits, axis=-1)
             obs, env_states, rewards, is_initials, info = env_step_batch(
                 jr.split(key_step, num_envs),
                 rollout_state.unobs.env_state,
@@ -585,36 +606,42 @@ def make_train(config: Config):
             config.lambda_gae,
         )
         td_errors = bootstrapped_returns - values[:-1, :]
+        num_trajectories = jnp.sum(rollout_states.obs_state.is_initial)
+        mean_return = jnp.sum(rewards) / num_trajectories
 
-        @ft.partial(
-            jax.debug.callback,
-            video=visualize_catch(
+        @exec_callback
+        def visualize(
+            video: Float[
+                Array, "num_envs horizon channel height width"
+            ] = visualize_catch(
                 obs_shape=obs_shape,
                 env_states=rollout_states.unobs.env_state,
                 maps=grads,
             ),
-            rewards=rewards,
-            policy_logits=policy_logits,
-            values=values,
-            td_errors=td_errors,
-        )
-        def visualize(
-            video: Float[Array, "num_envs horizon channel height width"],
-            rewards: Float[Array, "horizon num_envs"],
-            policy_logits: Float[Array, "horizon num_envs num_actions"],
-            values: Float[Array, "horizon num_envs"],
-            td_errors: Float[Array, "horizon-1 num_envs"],
+            rewards: Float[Array, "horizon num_envs"] = rewards,
+            policy_logits: Float[Array, "horizon num_envs num_actions"] = policy_logits,
+            values: Float[Array, "horizon num_envs"] = values,
+            td_errors: Float[Array, "horizon-1 num_envs"] = td_errors,
+            mean_return: Float[Array, ""] = mean_return,
         ):
             if not wandb.run:
                 return
 
-            ncols = 4
-            nrows = num_envs // ncols
+            nrows = 2
+            ncols = num_envs // nrows
             horizon = list(range(config.horizon))
 
-            fig, ax = plt.subplots(nrows=nrows * 2, ncols=ncols)
+            fig, ax = plt.subplots(
+                nrows=nrows * 2,
+                ncols=ncols,
+                squeeze=False,
+                figsize=(ncols * 2, nrows * 4),
+            )
             for i in range(num_envs):
                 r, c = divmod(i, ncols)
+
+                policy_probs = jax.nn.softmax(policy_logits[:, i], axis=-1)
+
                 axes: Axes = ax[2 * r, c]
                 axes.set_title(f"Trajectory {i}")
                 axes.plot(horizon, rewards[:, i], "ro", label="reward")
@@ -622,28 +649,35 @@ def make_train(config: Config):
                 axes.plot(horizon[:-1], td_errors[:, i], "go", label="TD error")
                 axes.plot(
                     horizon,
-                    distrax.Categorical(logits=policy_logits[:, i]).entropy(),
+                    distrax.Categorical(probs=policy_probs).entropy(),
+                    label="policy entropy",
+                )
+                spread = config.max_value - config.min_value
+                axes.set_ylim(
+                    config.min_value - spread / 4, config.max_value + spread / 4
                 )
                 axes.legend()
 
                 policy_axes: Axes = ax[2 * r + 1, c]
-                for action in range(num_actions):
-                    policy_axes.plot(
-                        horizon, policy_logits[:, i, action], label=rf"$\pi({action})$"
-                    )
+                policy_axes.set_title(f"Trajectory {i} policy")
+                policy_axes.stackplot(
+                    horizon,
+                    policy_probs.swapaxes(0, 1),
+                    labels=range(num_actions),
+                )
+                policy_axes.set_ylim(0, 1)
                 policy_axes.legend()
 
             wandb.log(
                 {
                     "eval/video": wandb.Video(np.asarray(video), fps=10),
-                    "eval/statistics": fig,
+                    "eval/statistics": wandb.Image(fig),
+                    "eval/mean_return": mean_return,
                 }
             )
 
             plt.close(fig)
 
-        num_trajectories = jnp.sum(rollout_states.obs_state.is_initial)
-        mean_return = jnp.sum(rewards) / num_trajectories
         return mean_return
 
     return train

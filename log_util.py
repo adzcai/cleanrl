@@ -1,3 +1,4 @@
+import inspect
 import sys
 import jax
 import jax.numpy as jnp
@@ -7,7 +8,7 @@ import pygraphviz
 import wandb
 import yaml
 
-from typing import Annotated as Batched
+from typing import Annotated as Batched, Callable
 from gymnax.environments.bsuite.catch import EnvState as CatchEnvState
 
 
@@ -37,6 +38,26 @@ def tree_slice(tree: PyTree[Array], at: int):
     return jax.tree.map(lambda x: x[at], tree)
 
 
+def exec_callback(f: Callable[[...], ...]):
+    """A decorator for executing callbacks."""
+    args, kwargs = [], {}
+    for param in inspect.signature(f).parameters.values():
+        if param.default == inspect.Parameter.empty:
+            raise ValueError(f"All parameters of {f} must have default values")
+        if param.kind == inspect.Parameter.POSITIONAL_ONLY:
+            args.append(param.default)
+        else:
+            kwargs[param.name] = param.default
+
+    jax.debug.callback(
+        f,
+        *args,
+        **kwargs,
+    )
+
+    return f
+
+
 def visualize_catch(
     obs_shape: tuple[int, int],
     env_states: Batched[CatchEnvState, "num_envs horizon"],
@@ -44,7 +65,7 @@ def visualize_catch(
 ) -> Float[Array, "num_envs horizon channel height width"]:
     """Turn a sequence of Catch environment states into a wandb.Video matrix."""
 
-    num_envs, horizon = env_states.time.shape
+    horizon, num_envs = env_states.time.shape
     horizon_grid, batch_grid = jnp.mgrid[:horizon, :num_envs]
 
     maps = jnp.reshape(
