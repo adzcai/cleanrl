@@ -37,12 +37,13 @@ import yaml
 
 # typing
 from jaxtyping import Bool, Integer, Float, Key, Array
-from typing import Callable, Literal, NamedTuple, TypeVar, Annotated as Batched
+from typing import Literal, NamedTuple, Annotated as Batched
 
 # util
 import functools as ft
 from log_util import (
     exec_callback,
+    exec_loop,
     get_norm_data,
     log_values,
     tree_slice,
@@ -55,42 +56,37 @@ matplotlib.use("agg")  # enable plotting inside jax callback
 class Config(NamedTuple):
     env_name: str = "Catch-bsuite"
     # network architecture
-    rnn_size: int = 64
+    rnn_size: int = 128
     mlp_size: int = 64
     mlp_depth: int = 2
     activation: Literal["relu", "tanh"] = "tanh"
     # collection
-    total_transitions: int = 500_000
+    total_transitions: int = 100_000
     num_envs: int = 8
-    horizon: int = 9
+    horizon: int = 10
     # two-hot value
-    num_value_bins: int | Literal["scalar"] = "scalar"
+    num_value_bins: int | Literal["scalar"] = 4
     min_value: float = -2.0
     max_value: float = 2.0
     # search
-    num_mcts_simulations: int = 10
+    num_mcts_simulations: int = 12
     # bootstrapping
     discount: float = 0.99
-    bootstrap_n: int = 10
+    bootstrap_n: int = 5
     lambda_gae: float = 0.95
     # optimization
-    num_minibatches: int = 4
+    num_minibatches: int = 32  # number of gradient descent steps per iteration
     batch_size: int = 12
-    lr_init: float = 1e-2
-    max_grad_norm: float = 1.0
+    lr_init: float = 3e-3
+    max_grad_norm: float = 0.5
     # target
     target_update_freq: int = 4
-    target_update_size: float = 1.0
+    target_update_size: float = 0.8
     # loss
-    value_coef: float = 1.0
+    value_coef: float = 0.5
     # evaluation
     num_evals: int = 4
-    num_eval_envs: int = 2
-
-
-class ObsState(NamedTuple):
-    obs: Float[Array, "obs_size"]
-    is_initial: Bool[Array, ""]
+    num_eval_envs: int = 4
 
 
 class Prediction(NamedTuple):
@@ -128,40 +124,34 @@ class ActorCriticRNN(eqx.Module):
         )
 
     def __call__(
-        self, hidden: Float[Array, "rnn_size"], obs_state: Batched[ObsState, "horizon"]
+        self,
+        hidden: Float[Array, "rnn_size"],
+        obs: Float[Array, "horizon obs_size"],
+        done: Bool[Array, "horizon"],
     ):
         return jax.lax.scan(
-            lambda hidden, obs: self.step(hidden, obs), hidden, obs_state
+            lambda hidden, x: self.step(hidden, *x),
+            hidden,
+            (obs, done),
         )
 
-    def step(self, hidden: Float[Array, "rnn_size"], obs_state: ObsState):
+    def step(
+        self,
+        hidden: Float[Array, "rnn_size"],
+        obs: Float[Array, "obs_size"],
+        done: Bool[Array, ""],
+    ):
         """Returns the predicted policy and value for this observation."""
-        hidden = jnp.where(obs_state.is_initial, self.init_hidden(), hidden)
-        hidden = self.cell(obs_state.obs, hidden)
-        return hidden, Prediction(self.policy_head(hidden), self.value_head(hidden))
+        hidden = self.cell(obs, hidden)
+        pred = Prediction(
+            policy_logits=self.policy_head(hidden),
+            value_logits=self.value_head(hidden),
+        )
+        hidden = jnp.where(done, self.init_hidden(), hidden)
+        return hidden, pred
 
     def init_hidden(self):
         return jnp.zeros(self.cell.hidden_size)
-
-
-Carry = TypeVar("Carry")
-X = TypeVar("X")
-Y = TypeVar("Y")
-
-
-def exec_loop(init: Carry, length: int, key: Key[Array, ""]):
-    """Scan the decorated function for `length` steps.
-
-    The motivation is that loops are easier to read
-    when the target and iter are in front.
-    """
-
-    def decorator(
-        f: Callable[[Carry, X], tuple[Carry, Y]],
-    ) -> tuple[Carry, Batched[Y, "length"]]:
-        return jax.lax.scan(f, init, jr.split(key, length))
-
-    return decorator
 
 
 class Unobs(NamedTuple):
@@ -169,12 +159,13 @@ class Unobs(NamedTuple):
 
     env_state: gymnax.EnvState
     hidden: Float[Array, "rnn_size"]
+    done: Bool[Array, ""]
 
 
 class RolloutState(NamedTuple):
     """Carried when rolling out the environment."""
 
-    obs_state: ObsState
+    obs: Float[Array, "obs_size"]
     unobs: Unobs
 
 
@@ -216,9 +207,10 @@ def make_train(config: Config):
     env_reset_batch = jax.vmap(env.reset, (0, None))  # map over key
     env_step_batch = jax.vmap(env.step, (0, 0, 0, None))  # map over key, state, action
 
-    lr = optax.cosine_decay_schedule(config.lr_init, num_updates)
+    lr = optax.linear_schedule(config.lr_init, 1e-3 * config.lr_init, num_updates)
     optim = optax.chain(
-        optax.clip_by_global_norm(config.max_grad_norm), optax.adamw(lr, eps=1e-5)
+        optax.clip_by_global_norm(config.max_grad_norm),
+        optax.adamw(lr),
     )
 
     # sample config.batch_size trajectories of config.horizon transitions
@@ -260,29 +252,32 @@ def make_train(config: Config):
 
         # initialize all state
         init_net = ActorCriticRNN(
-            obs.shape[-1],
-            config.rnn_size,
-            config.mlp_size,
-            config.mlp_depth,
-            num_actions,
-            config.num_value_bins,
-            config.activation,
+            obs_size=obs.shape[-1],
+            rnn_size=config.rnn_size,
+            mlp_size=config.mlp_size,
+            mlp_depth=config.mlp_depth,
+            num_actions=num_actions,
+            num_value_bins=config.num_value_bins,
+            activation=config.activation,
             key=key_net,
         )
         init_params, net_static = eqx.partition(init_net, eqx.is_inexact_array)
         init_rollout_state = RolloutState(
-            obs_state=ObsState(obs=obs, is_initial=jnp.ones(config.num_envs, bool)),
+            obs=obs,
             unobs=Unobs(
                 env_state=env_state,
-                # hidden reinitialized for initial states
-                hidden=jnp.empty((config.num_envs, config.rnn_size)),
+                hidden=jnp.broadcast_to(
+                    init_net.init_hidden(),
+                    (config.num_envs, config.rnn_size),
+                ),
+                done=jnp.zeros(config.num_envs, bool),
             ),
         )
         init_buffer_state = buffer.init(
             Transition(
                 rollout_state=tree_slice(init_rollout_state, 0),
                 reward=jnp.empty((), float),
-                policy_logits=jnp.empty(num_actions),
+                policy_logits=jnp.empty(num_actions, float),
             )
         )
 
@@ -313,7 +308,7 @@ def make_train(config: Config):
             log_values(
                 {
                     "train/reward_per_trajectory": jnp.sum(trajectories.reward)
-                    / jnp.sum(trajectories.rollout_state.obs_state.is_initial),
+                    / jnp.sum(trajectories.rollout_state.unobs.done),
                 }
             )
 
@@ -334,7 +329,7 @@ def make_train(config: Config):
                         eqx.combine(iter_state.target_params, net_static),
                         trajectories,
                     )
-
+                    chex.assert_shape(losses, (config.batch_size,))
                     return jnp.mean(losses), aux
 
                 (_, aux), grads = loss_grad(param_state.params)
@@ -405,47 +400,9 @@ def make_train(config: Config):
         ):
             key_action, key_step = jr.split(key)
 
-            hiddens, preds = jax.vmap(net.step)(
-                rollout_state.unobs.hidden, rollout_state.obs_state
-            )
+            hiddens, out = act_mcts(net, rollout_state, key_action)
 
-            root = mctx.RootFnOutput(
-                prior_logits=preds.policy_logits,
-                value=logits_to_values(preds.value_logits),
-                # embedding contains current env_state and the hidden to pass to next net call
-                embedding=rollout_state.unobs._replace(hidden=hiddens),
-            )
-
-            def mcts_recurrent_fn(
-                _: None,
-                key: Key[Array, ""],
-                action: Integer[Array, "num_envs"],
-                unobs: Batched[Unobs, "num_envs"],
-            ):
-                """Returns the logits and value for the newly created node."""
-                obs, env_states, rewards, is_initials, infos = env_step_batch(
-                    jr.split(key, config.num_envs), unobs.env_state, action, env_params
-                )
-                hiddens, preds = jax.vmap(net.step)(
-                    unobs.hidden, ObsState(obs, is_initials)
-                )
-                return mctx.RecurrentFnOutput(
-                    reward=rewards,
-                    discount=jnp.where(is_initials, 0.0, config.discount),
-                    prior_logits=preds.policy_logits,
-                    value=logits_to_values(preds.value_logits),
-                ), Unobs(env_states, hiddens)
-
-            out = mctx.muzero_policy(
-                params=None,
-                rng_key=key_action,
-                root=root,
-                recurrent_fn=mcts_recurrent_fn,
-                num_simulations=config.num_mcts_simulations,
-                max_depth=config.horizon,
-            )
-
-            obs, env_state, reward, is_initial, info = env_step_batch(
+            obs, env_states, rewards, dones, infos = env_step_batch(
                 jr.split(key_step, config.num_envs),
                 rollout_state.unobs.env_state,
                 out.action,
@@ -453,12 +410,16 @@ def make_train(config: Config):
             )
 
             return RolloutState(
-                obs_state=ObsState(obs=obs, is_initial=is_initial),
-                unobs=Unobs(env_state=env_state, hidden=hiddens),
+                obs=obs,
+                unobs=Unobs(
+                    env_state=env_states,
+                    hidden=hiddens,
+                    done=dones,
+                ),
             ), Transition(
                 # contains the reward and policy logits computed from the rollout state
                 rollout_state=rollout_state,
-                reward=reward,
+                reward=rewards,
                 policy_logits=out.action_weights,
             )
 
@@ -467,6 +428,56 @@ def make_train(config: Config):
             lambda x: jnp.swapaxes(x, 0, 1), transitions
         )
 
+    def act_mcts(
+        net: ActorCriticRNN,
+        rollout_state: Batched[RolloutState, "num_envs"],
+        key: Key[Array, ""],
+    ):
+        hiddens, preds = jax.vmap(net.step)(
+            rollout_state.unobs.hidden,
+            rollout_state.obs,
+            rollout_state.unobs.done,
+        )
+
+        root = mctx.RootFnOutput(
+            prior_logits=preds.policy_logits,
+            value=logits_to_values(preds.value_logits),
+            # embedding contains current env_state and the hidden to pass to next net call
+            embedding=rollout_state.unobs._replace(hidden=hiddens),
+        )
+
+        def mcts_recurrent_fn(
+            _: None,  # closure net
+            key: Key[Array, ""],
+            action: Integer[Array, "num_envs"],
+            unobs: Batched[Unobs, "num_envs"],
+        ):
+            """Returns the logits and value for the newly created node."""
+            obs, env_states, rewards, dones, infos = env_step_batch(
+                jr.split(key, action.size), unobs.env_state, action, env_params
+            )
+            hiddens, preds = jax.vmap(net.step)(unobs.hidden, obs, dones)
+            return mctx.RecurrentFnOutput(
+                reward=rewards,
+                # careful for off-by-one
+                # if stepping from a terminal state,
+                # preds is prediction on new initial state
+                discount=jnp.where(unobs.done, 0.0, config.discount),
+                prior_logits=preds.policy_logits,
+                value=logits_to_values(preds.value_logits),
+            ), Unobs(env_state=env_states, hidden=hiddens, done=dones)
+
+        out = mctx.muzero_policy(
+            params=None,
+            rng_key=key,
+            root=root,
+            recurrent_fn=mcts_recurrent_fn,
+            num_simulations=config.num_mcts_simulations,
+            max_depth=config.horizon,
+        )
+
+        return hiddens, out
+
     def loss_trajectory(
         net: ActorCriticRNN,
         target_net: ActorCriticRNN,
@@ -474,28 +485,28 @@ def make_train(config: Config):
     ):
         """Compute behavior cloning loss for the `trajectory`. Bootstrap values from `target_net`."""
         init_hidden = trajectory.rollout_state.unobs.hidden[0, :]
-        obs_seq = trajectory.rollout_state.obs_state
+        obs = trajectory.rollout_state.obs
+        done = trajectory.rollout_state.unobs.done
 
-        _, net_pred = net(init_hidden, obs_seq)
+        _, net_pred = net(init_hidden, obs, done)
         chex.assert_shape(
             [trajectory.policy_logits, net_pred.policy_logits],
             (config.horizon, num_actions),
         )
 
         # policy loss
-        target_policy_probs = jax.nn.softmax(trajectory.policy_logits, axis=-1)
-        policy_losses = rlax.categorical_cross_entropy(
-            labels=target_policy_probs, logits=net_pred.policy_logits
-        )
+        mcts_dist = distrax.Categorical(logits=trajectory.policy_logits)
+        pred_policy_dist = distrax.Categorical(logits=net_pred.policy_logits)
+        policy_losses = mcts_dist.cross_entropy(pred_policy_dist)
         policy_loss = jnp.mean(policy_losses)
 
         # value loss
         # bootstrap from target network
-        _, target_pred = target_net(init_hidden, obs_seq)
+        _, target_pred = target_net(init_hidden, obs, done)
         target_values = logits_to_values(target_pred.value_logits)
         bootstrapped_values = rlax.n_step_bootstrapped_returns(
             trajectory.reward[:-1],
-            jnp.where(obs_seq.is_initial[1:], 0.0, config.discount),
+            jnp.where(done[1:], 0.0, config.discount),
             target_values[1:],
             config.bootstrap_n,
             config.lambda_gae,
@@ -506,26 +517,27 @@ def make_train(config: Config):
                 targets=bootstrapped_values,
             )
             if config.num_value_bins == "scalar"
-            else rlax.categorical_cross_entropy(
-                rlax.transform_to_2hot(
+            else distrax.Categorical(
+                probs=rlax.transform_to_2hot(
                     bootstrapped_values[:, jnp.newaxis],
                     config.min_value,
                     config.max_value,
                     config.num_value_bins,
-                ),
-                net_pred.value_logits[:-1, :],
+                )
+            ).cross_entropy(
+                distrax.Categorical(logits=net_pred.value_logits[:-1, :]),
             )
         )
         value_loss = jnp.mean(value_losses)
 
         # logging
         td_error = bootstrapped_values - logits_to_values(net_pred.value_logits)[:-1]
-        policy_entropy = distrax.Categorical(logits=net_pred.policy_logits).entropy()
 
         loss = policy_loss + config.value_coef * value_loss
         return loss, {
             "train/loss": loss,
-            "train/policy_entropy": policy_entropy,
+            "train/mcts_entropy": mcts_dist.entropy(),
+            "train/policy_entropy": pred_policy_dist.entropy(),
             "train/policy_loss": policy_loss,
             "train/value_loss": value_loss,
             "train/td_error": td_error,
@@ -549,10 +561,11 @@ def make_train(config: Config):
         obs, env_state = env_reset_batch(jr.split(key_reset, num_envs), env_params)
 
         init_rollout_state = RolloutState(
-            ObsState(obs, jnp.zeros(num_envs, dtype=bool)),
-            Unobs(
-                env_state,
-                jnp.broadcast_to(net.init_hidden(), (num_envs, config.rnn_size)),
+            obs=obs,
+            unobs=Unobs(
+                env_state=env_state,
+                hidden=jnp.broadcast_to(net.init_hidden(), (num_envs, config.rnn_size)),
+                done=jnp.zeros(num_envs, dtype=bool),
             ),
         )
 
@@ -564,50 +577,64 @@ def make_train(config: Config):
         def rollout_step(
             rollout_state: Batched[RolloutState, "num_envs"], key: Key[Array, ""]
         ):
-            key_action, key_step = jr.split(key)
+            key_action, key_step, key_mcts = jr.split(key, 3)
 
             @ft.partial(jax.value_and_grad, has_aux=True)
-            def predict(obs: Float[Array, "obs_size"], rollout_state: RolloutState):
+            def predict(obs: Float[Array, "obs_size"], unobs: Unobs):
                 """Differentiate with respect to value to obtain saliency map."""
                 hidden, pred = net.step(
-                    rollout_state.unobs.hidden,
-                    rollout_state.obs_state._replace(obs=obs),
+                    unobs.hidden,
+                    obs,
+                    unobs.done,
                 )
                 value = logits_to_values(pred.value_logits[jnp.newaxis])[0]
                 return value, (hidden, pred.policy_logits)
 
             (values, (hidden, policy_logits)), obs_grads = jax.vmap(predict)(
-                rollout_state.obs_state.obs, rollout_state
+                rollout_state.obs, rollout_state.unobs
             )
             action = jr.categorical(key_action, logits=policy_logits, axis=-1)
-            obs, env_states, rewards, is_initials, info = env_step_batch(
+            obs, env_states, rewards, dones, info = env_step_batch(
                 jr.split(key_step, num_envs),
                 rollout_state.unobs.env_state,
                 action,
                 env_params,
             )
 
+            _, mcts_out = act_mcts(net, rollout_state, key_mcts)
+            # jax.debug.print("{match}", match=jnp.allclose(hidden, hidden_mcts))
+
             return RolloutState(
-                ObsState(obs, is_initials), Unobs(env_states, hidden)
+                obs=obs,
+                unobs=Unobs(
+                    env_state=env_states,
+                    hidden=hidden,
+                    done=dones,
+                ),
             ), (
                 rollout_state,
                 rewards,
                 policy_logits,
+                mcts_out,
                 values,
                 obs_grads,
             )
 
-        _, (rollout_states, rewards, policy_logits, values, grads) = rollout_step
+        _, (rollout_states, rewards, policy_logits, mcts_out, values, obs_grads) = (
+            rollout_step
+        )
 
-        bootstrapped_returns = jax.vmap(rlax.lambda_returns, (1, 1, 1, None), 1)(
+        done = rollout_states.unobs.done
+        bootstrapped_returns = jax.vmap(
+            rlax.n_step_bootstrapped_returns, (1, 1, 1, None, None), 1
+        )(
             rewards[:-1, :],
-            jnp.where(rollout_states.obs_state.is_initial[1:, :], 0.0, config.discount),
+            jnp.where(done[1:, :], 0.0, config.discount),
             values[1:, :],
+            config.bootstrap_n,
             config.lambda_gae,
         )
-        td_errors = bootstrapped_returns - values[:-1, :]
-        num_trajectories = jnp.sum(rollout_states.obs_state.is_initial)
-        mean_return = jnp.sum(rewards) / num_trajectories
+        mean_return = jnp.sum(rewards) / jnp.sum(done)
 
         @exec_callback
         def visualize(
@@ -616,49 +643,72 @@ def make_train(config: Config):
             ] = visualize_catch(
                 obs_shape=obs_shape,
                 env_states=rollout_states.unobs.env_state,
-                maps=grads,
+                maps=obs_grads,
             ),
             rewards: Float[Array, "horizon num_envs"] = rewards,
             policy_logits: Float[Array, "horizon num_envs num_actions"] = policy_logits,
+            mcts_out: mctx.PolicyOutput[None] = mcts_out,
             values: Float[Array, "horizon num_envs"] = values,
-            td_errors: Float[Array, "horizon-1 num_envs"] = td_errors,
+            bootstrapped_returns: Float[
+                Array, "horizon-1 num_envs"
+            ] = bootstrapped_returns,
             mean_return: Float[Array, ""] = mean_return,
         ):
             if not wandb.run:
                 return
 
-            nrows = 2
-            ncols = num_envs // nrows
+            fig_width = 3
+            rows_per_env = 3
             horizon = list(range(config.horizon))
 
             fig, ax = plt.subplots(
-                nrows=nrows * 2,
-                ncols=ncols,
-                squeeze=False,
-                figsize=(ncols * 2, nrows * 4),
+                nrows=num_envs * rows_per_env,
+                figsize=(2 * fig_width, 4 * num_envs * rows_per_env),
             )
             for i in range(num_envs):
-                r, c = divmod(i, ncols)
-
                 policy_probs = jax.nn.softmax(policy_logits[:, i], axis=-1)
+                mcts_probs = jax.nn.softmax(mcts_out.action_weights[:, i], axis=-1)
 
-                axes: Axes = ax[2 * r, c]
+                axes: Axes = ax[rows_per_env * i]
                 axes.set_title(f"Trajectory {i}")
-                axes.plot(horizon, rewards[:, i], "ro", label="reward")
-                axes.plot(horizon, values[:, i], "bo", label="value")
-                axes.plot(horizon[:-1], td_errors[:, i], "go", label="TD error")
+                axes.plot(horizon, rewards[:, i], "r+", label="reward")
+                axes.plot(
+                    horizon,
+                    values[:, i],
+                    "bo",
+                    label="value",
+                    alpha=0.5,
+                )
+                axes.plot(
+                    horizon[:-1],
+                    bootstrapped_returns[:, i],
+                    "mo",
+                    label="bootstrapped returns",
+                    alpha=0.5,
+                )
+                axes.fill_between(
+                    horizon[:-1],
+                    bootstrapped_returns[:, i],
+                    values[:-1, i],
+                    alpha=0.3,
+                    label="TD error",
+                )
                 axes.plot(
                     horizon,
                     distrax.Categorical(probs=policy_probs).entropy(),
+                    "b",
                     label="policy entropy",
                 )
-                spread = config.max_value - config.min_value
-                axes.set_ylim(
-                    config.min_value - spread / 4, config.max_value + spread / 4
+                axes.plot(
+                    horizon,
+                    distrax.Categorical(probs=mcts_probs).entropy(),
+                    "g",
+                    label="MCTS entropy",
                 )
-                axes.legend()
+                # spread = config.max_value - config.min_value
+                axes.set_ylim(config.min_value, config.max_value)
 
-                policy_axes: Axes = ax[2 * r + 1, c]
+                policy_axes: Axes = ax[rows_per_env * i + 1]
                 policy_axes.set_title(f"Trajectory {i} policy")
                 policy_axes.stackplot(
                     horizon,
@@ -666,17 +716,56 @@ def make_train(config: Config):
                     labels=range(num_actions),
                 )
                 policy_axes.set_ylim(0, 1)
-                policy_axes.legend()
+
+                mcts_axes: Axes = ax[rows_per_env * i + 2]
+                mcts_axes.set_title(f"Trajectory {i} MCTS")
+                mcts_axes.stackplot(
+                    horizon,
+                    mcts_probs.swapaxes(0, 1),
+                    labels=range(num_actions),
+                )
+                mcts_axes.set_ylim(0, 1)
+
+                if i == 0:
+                    axes.legend(
+                        loc="upper center",
+                        bbox_to_anchor=(0.5, 1.20),
+                        ncol=3,
+                    )
+                    policy_axes.legend(
+                        loc="upper center",
+                        bbox_to_anchor=(0.5, 1.20),
+                        ncol=3,
+                    )
+
+            fig_trajectory, ax_trajectory = plt.subplots(
+                nrows=num_envs,
+                ncols=config.horizon,
+                squeeze=False,
+                figsize=(config.horizon * 2, num_envs * 3),
+            )
+
+            for i in range(num_envs):
+                for j in horizon:
+                    axes: Axes = ax_trajectory[i, j]
+                    # c h w -> h w c
+                    axes.imshow(jnp.permute_dims(video[i, j], (1, 2, 0)))
+                    axes.set_title(f"Trajectory {i} step {j}")
+                    axes.axis("off")
 
             wandb.log(
                 {
                     "eval/video": wandb.Video(np.asarray(video), fps=10),
+                    # use wandb.Image since otherwise wandb uses plotly,
+                    # which breaks the legends
                     "eval/statistics": wandb.Image(fig),
+                    "eval/trajectories": wandb.Image(fig_trajectory),
                     "eval/mean_return": mean_return,
                 }
             )
 
             plt.close(fig)
+            plt.close(fig_trajectory)
 
         return mean_return
 
@@ -685,6 +774,7 @@ def make_train(config: Config):
 
 if __name__ == "__main__":
     default_config = Config()
+    seed = 0
 
     WANDB_PROJECT = "alphazero"
 
@@ -699,15 +789,15 @@ if __name__ == "__main__":
             }
             sweep_config = {
                 "method": "random",
-                "metric": {"goal": "maximize", "name": "eval/final/mean_reward"},
+                "metric": {"goal": "maximize", "name": "sweep/mean_reward"},
                 "parameters": config_values,
             }
 
             def run():
                 with wandb.init(project=WANDB_PROJECT):
                     train = make_train(wandb.config)
-                    _, final_reward = jax.jit(train)(jr.key(42))
-                    wandb.log({"eval/final/mean_reward": final_reward})
+                    _, final_reward = jax.jit(train)(jr.key(seed))
+                    wandb.log({"sweep/mean_reward": final_reward})
 
             sweep_id = (
                 sys.argv[2]
@@ -725,12 +815,12 @@ if __name__ == "__main__":
         elif sys.argv[1] == "debug":
             train = make_train(default_config)
             with jax.disable_jit():
-                output = train(jr.key(42))
+                output = train(jr.key(seed))
             jax.block_until_ready(output)
     else:
         train = make_train(default_config)
         with wandb.init(project=WANDB_PROJECT, config=default_config._asdict()):
-            output = jax.jit(train)(jr.key(42))
+            output = jax.jit(train)(jr.key(seed))
             # with jax.profiler.trace(f"/tmp/{WANDB_PROJECT}-trace", create_perfetto_link=True):
             _, mean_eval_reward = jax.block_until_ready(output)
             sys.stdout.write(f"{mean_eval_reward=}\n")

@@ -2,13 +2,14 @@ import inspect
 import sys
 import jax
 import jax.numpy as jnp
-from jaxtyping import Float, Array, PyTree
+import jax.random as jr
+from jaxtyping import Float, Array, Key, PyTree
 import mctx
 import pygraphviz
 import wandb
 import yaml
 
-from typing import Annotated as Batched, Callable
+from typing import Annotated as Batched, Callable, TypeVar
 from gymnax.environments.bsuite.catch import EnvState as CatchEnvState
 
 
@@ -56,6 +57,26 @@ def exec_callback(f: Callable[[...], ...]):
     )
 
     return f
+
+
+Carry = TypeVar("Carry")
+X = TypeVar("X")
+Y = TypeVar("Y")
+
+
+def exec_loop(init: Carry, length: int, key: Key[Array, ""]):
+    """Scan the decorated function for `length` steps.
+
+    The motivation is that loops are easier to read
+    when the target and iter are in front.
+    """
+
+    def decorator(
+        f: Callable[[Carry, X], tuple[Carry, Y]],
+    ) -> tuple[Carry, Batched[Y, "length"]]:
+        return jax.lax.scan(f, init, jr.split(key, length))
+
+    return decorator
 
 
 def visualize_catch(
