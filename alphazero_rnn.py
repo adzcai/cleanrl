@@ -19,6 +19,8 @@ import functools as ft
 from jaxtyping import Bool, Integer, Float, Key, Array, PyTree
 from typing import Callable, Literal, NamedTuple, TypeVar, Annotated as Batched
 
+from log_util import get_norm_data, log_values, tree_slice, visualize_catch
+
 
 class Config(NamedTuple):
     env_name: str = "Catch-bsuite"
@@ -169,30 +171,6 @@ class IterState(NamedTuple):
     param_state: ParamState
     target_params: ActorCriticRNN
     buffer_state: fbx.trajectory_buffer.TrajectoryBufferState[Transition]
-
-
-def tree_slice(tree: PyTree[Array], at: int):
-    return jax.tree.map(lambda x: x[at], tree)
-
-
-def log_values(data: dict[str, Float[Array, ""]]):
-    def log(data: dict[str, Float[Array, ""]]):
-        data = jax.tree.map(lambda x: x.item(), data)
-        if wandb.run:
-            wandb.log(data)
-        else:
-            yaml.safe_dump(data, sys.stdout)
-
-    jax.debug.callback(log, data)
-
-
-def get_norm_data(tree: PyTree[Array], prefix: str):
-    """Utility function for logging norms of pytree leaves."""
-    return {
-        f"{prefix}{jax.tree_util.keystr(keys)}": jnp.linalg.norm(ary)
-        for keys, ary in jax.tree.leaves_with_path(tree)
-        if ary is not None
-    }
 
 
 def make_train(config: Config):
@@ -581,27 +559,17 @@ def make_train(config: Config):
         )
         td_errors = bootstrapped_returns - values[:-1, :]
 
-        env_states: Batched[
-            gymnax.environments.bsuite.catch.EnvState, "num_envs horizon"
-        ]
+        mean_reward = jnp.sum(rewards) / jnp.sum(is_initials)
 
-        horizon_grid, batch_grid = jnp.mgrid[: config.horizon, :num_envs]
-
-        maps = jnp.reshape(
-            jnp.astype(grads * 255.0, jnp.uint8),
-            (config.horizon, num_envs, *obs_shape),
+        @ft.partial(
+            jax.debug.callback,
+            video=visualize_catch(
+                obs_shape=obs_shape, env_states=env_states, maps=grads
+            ),
+            mean_reward=mean_reward,
+            mean_value=jnp.mean(values),
+            mean_td_error=jnp.mean(td_errors),
         )
-
-        video = (
-            jnp.empty((config.horizon, num_envs, 3, *obs_shape), dtype=jnp.uint8)
-            .at[horizon_grid, batch_grid, 0, env_states.ball_y, env_states.ball_x]
-            .set(255)
-            .at[horizon_grid, batch_grid, 1, env_states.paddle_y, env_states.paddle_x]
-            .set(255)
-            .at[:, :, 2, :, :]
-            .set(maps)
-        )
-
         def visualize(
             video: Float[Array, "num_envs horizon channel height width"],
             mean_reward: Float[Array, ""],
@@ -616,16 +584,6 @@ def make_train(config: Config):
             wandb.log(data | {"eval/video": wandb.Video(np.asarray(video), fps=10)})
             yaml.safe_dump(data, sys.stdout)
 
-        mean_reward = jnp.sum(rewards) / jnp.sum(is_initials)
-
-        jax.debug.callback(
-            visualize,
-            video=jnp.swapaxes(video, 0, 1),
-            mean_reward=mean_reward,
-            mean_value=jnp.mean(values),
-            mean_td_error=jnp.mean(td_errors),
-        )
-
         return mean_reward
 
     return train
@@ -636,12 +594,12 @@ if __name__ == "__main__":
 
     if len(sys.argv) >= 2:
         if sys.argv[1] == "sweep":
+            num_runs = 6
             config_values = jax.tree.map(
                 lambda x: {"value": x}, default_config._asdict()
             ) | {
-                "lr_init": {"min": 1e-4, "max": 1e-1},
-                "num_minibatches": {"values": [4, 16, 64]},
-                "batch_size": {"values": [12, 24]},
+                "lr_init": {"min": 1e-5, "max": 1e-3},
+                "num_minibatches": {"values": [64, 128]},
             }
             sweep_config = {
                 "method": "random",
@@ -665,7 +623,7 @@ if __name__ == "__main__":
                 sweep_id,
                 function=run,
                 project="jax-rl",
-                count=12,
+                count=num_runs,
             )
 
         elif sys.argv[1] == "debug":
