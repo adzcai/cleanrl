@@ -9,7 +9,7 @@ import pygraphviz
 import wandb
 import yaml
 
-from typing import Annotated as Batched, Callable, TypeVar
+from typing import Annotated as Batched, Any, Callable, NamedTuple, TypeVar
 from gymnax.environments.bsuite.catch import EnvState as CatchEnvState
 
 
@@ -20,6 +20,18 @@ def get_norm_data(tree: PyTree[Float[Array, "..."]], prefix: str):
         for keys, ary in jax.tree.leaves_with_path(tree)
         if ary is not None
     }
+
+
+def replace(f: NamedTuple, key: str, value: Any):
+    """Replace nested namedtuple fields."""
+    idx = key.find(".")
+    if idx == -1:
+        return f._replace(**{key: value})
+
+    key, rest = key[:idx], key[idx + 1 :]
+    prop = getattr(f, key)
+    prop = replace(prop, rest, value)
+    return f._replace(**{key: prop})
 
 
 def log_values(data: dict[str, Float[Array, ""]]):
@@ -82,29 +94,33 @@ def exec_loop(init: Carry, length: int, key: Key[Array, ""]):
 def visualize_catch(
     obs_shape: tuple[int, int],
     env_states: Batched[CatchEnvState, "num_envs horizon"],
-    maps: Float[Array, "num_envs horizon obs_size"],
+    maps: Float[Array, "num_envs horizon obs_size"] | None = None,
 ) -> Float[Array, "num_envs horizon channel height width"]:
     """Turn a sequence of Catch environment states into a wandb.Video matrix."""
 
-    horizon, num_envs = env_states.time.shape
-    horizon_grid, batch_grid = jnp.mgrid[:horizon, :num_envs]
+    num_envs, horizon = env_states.time.shape
+    num_envs_grid, horizon_grid = jnp.mgrid[:num_envs, :horizon]
 
-    maps = jnp.reshape(
-        jnp.astype(maps * 255.0, jnp.uint8),
-        (horizon, num_envs, *obs_shape),
+    maps = (
+        jnp.reshape(
+            jnp.astype(maps * 255.0, jnp.uint8),
+            (num_envs, horizon, *obs_shape),
+        )
+        if maps is not None
+        else 0
     )
 
     video = (
-        jnp.empty((horizon, num_envs, 3, *obs_shape), dtype=jnp.uint8)
-        .at[horizon_grid, batch_grid, 0, env_states.ball_y, env_states.ball_x]
+        jnp.empty((num_envs, horizon, 3, *obs_shape), dtype=jnp.uint8)
+        .at[num_envs_grid, horizon_grid, 0, env_states.ball_y, env_states.ball_x]
         .set(255)
-        .at[horizon_grid, batch_grid, 1, env_states.paddle_y, env_states.paddle_x]
+        .at[num_envs_grid, horizon_grid, 1, env_states.paddle_y, env_states.paddle_x]
         .set(255)
         .at[:, :, 2, :, :]
         .set(maps)
     )
 
-    return jnp.swapaxes(video, 0, 1)
+    return video
 
 
 def convert_tree_to_graph(
