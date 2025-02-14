@@ -13,7 +13,7 @@ You need to install graphviz to make the MCTS visualizations. On a mac:
 brew install graphviz
 ```
 
-You may also need to tell compilers and linkers about its path:
+You may also need to tell compilers and linkers about its path before running `uv sync`:
 
 ```bash
 export CFLAGS="-I$(brew --prefix graphviz)/include"

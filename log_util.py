@@ -1,14 +1,20 @@
-import inspect
-import sys
+# jax
 import jax
 import jax.numpy as jnp
 import jax.random as jr
-from jaxtyping import Float, Array, Key, PyTree
 import mctx
+
+# visualization
 import pygraphviz
 import wandb
+
+# util
+import inspect
+import sys
 import yaml
 
+# typing
+from jaxtyping import Bool, Float, Array, Key, PyTree
 from typing import Annotated as Batched, Any, Callable, NamedTuple, TypeVar
 from gymnax.environments.bsuite.catch import EnvState as CatchEnvState
 
@@ -16,7 +22,7 @@ from gymnax.environments.bsuite.catch import EnvState as CatchEnvState
 def get_norm_data(tree: PyTree[Float[Array, "..."]], prefix: str):
     """For logging norms of pytree leaves."""
     return {
-        f"{prefix}{jax.tree_util.keystr(keys)}": jnp.linalg.norm(ary)
+        f"{prefix}{jax.tree_util.keystr(keys)}": jnp.sqrt(jnp.mean(jnp.square(ary)))
         for keys, ary in jax.tree.leaves_with_path(tree)
         if ary is not None
     }
@@ -51,23 +57,15 @@ def tree_slice(tree: PyTree[Array], at: int):
     return jax.tree.map(lambda x: x[at], tree)
 
 
-def exec_callback(f: Callable[[...], ...]):
-    """A decorator for executing callbacks."""
-    args, kwargs = [], {}
-    for param in inspect.signature(f).parameters.values():
-        if param.default == inspect.Parameter.empty:
-            raise ValueError(f"All parameters of {f} must have default values")
-        if param.kind == inspect.Parameter.POSITIONAL_ONLY:
-            args.append(param.default)
-        else:
-            kwargs[param.name] = param.default
-
+def exec_callback(f: Callable | None, *, cond=True):
+    """A decorator for executing callbacks that applies the default arguments."""
+    signature = inspect.signature(f)
+    signature.apply_defaults()
     jax.debug.callback(
         f,
-        *args,
-        **kwargs,
+        *signature.args,
+        **signature.kwargs,
     )
-
     return f
 
 
@@ -76,7 +74,7 @@ X = TypeVar("X")
 Y = TypeVar("Y")
 
 
-def exec_loop(init: Carry, length: int, key: Key[Array, ""]):
+def exec_loop(init: Carry, length: int, key: Key[Array, ""], cond: Bool[Array, ""] | None = None):
     """Scan the decorated function for `length` steps.
 
     The motivation is that loops are easier to read
@@ -86,38 +84,46 @@ def exec_loop(init: Carry, length: int, key: Key[Array, ""]):
     def decorator(
         f: Callable[[Carry, X], tuple[Carry, Y]],
     ) -> tuple[Carry, Batched[Y, "length"]]:
-        return jax.lax.scan(f, init, jr.split(key, length))
+        if cond is None:
+            return jax.lax.scan(f, init, jr.split(key, length))
+        else:
+            return jax.lax.cond(
+                cond,
+                lambda init, key: jax.lax.scan(f, init, jr.split(key, length)),
+                lambda init, key: (init, None),
+                init,
+                key,
+            )
 
     return decorator
 
 
 def visualize_catch(
     obs_shape: tuple[int, int],
-    env_states: Batched[CatchEnvState, "num_envs horizon"],
-    maps: Float[Array, "num_envs horizon obs_size"] | None = None,
-) -> Float[Array, "num_envs horizon channel height width"]:
+    env_states: Batched[CatchEnvState, "horizon"],
+    maps: Float[Array, "horizon obs_size"] | None = None,
+) -> Float[Array, "horizon channel height width"]:
     """Turn a sequence of Catch environment states into a wandb.Video matrix."""
 
-    num_envs, horizon = env_states.time.shape
-    num_envs_grid, horizon_grid = jnp.mgrid[:num_envs, :horizon]
+    horizon = env_states.time.size
+    horizon_grid = jnp.arange(horizon)
+    video_shape = (horizon, 3, *obs_shape)
 
-    maps = (
-        jnp.reshape(
-            jnp.astype(maps * 255.0, jnp.uint8),
-            (num_envs, horizon, *obs_shape),
-        )
-        if maps is not None
-        else 0
-    )
+    if maps is not None:
+        # rescale to [0, 255]
+        maps_min = jnp.min(maps, keepdims=True)
+        maps = 255 * (maps - maps_min) / (jnp.max(maps, keepdims=True) - maps_min)
+        maps = maps.astype(jnp.uint8)
+        maps = jnp.reshape(maps, (horizon, 1, *obs_shape))
+        maps = jnp.broadcast_to(maps, video_shape)
+    else:
+        maps = jnp.full(video_shape, 255, dtype=jnp.uint8)
 
     video = (
-        jnp.empty((num_envs, horizon, 3, *obs_shape), dtype=jnp.uint8)
-        .at[num_envs_grid, horizon_grid, 0, env_states.ball_y, env_states.ball_x]
-        .set(255)
-        .at[num_envs_grid, horizon_grid, 1, env_states.paddle_y, env_states.paddle_x]
-        .set(255)
-        .at[:, :, 2, :, :]
-        .set(maps)
+        maps.at[horizon_grid, :, env_states.ball_y, env_states.ball_x]
+        .set(jnp.array([255, 0, 0], dtype=jnp.uint8))
+        .at[horizon_grid, :, env_states.paddle_y, env_states.paddle_x]
+        .set(jnp.array([0, 255, 0], dtype=jnp.uint8))
     )
 
     return video

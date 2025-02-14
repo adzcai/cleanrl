@@ -15,6 +15,10 @@ dependencies = [
     "pygraphviz>=1.14",
     "pytest>=8.3.4",
     "rlax>=0.1.6",
-    "typeguard>=4.4.1",
+    "typeguard>=2.13.3",
     "wandb[media]>=0.19.4",
 ]
+
+[tool.ruff]
+line-length = 100
+ignore = ["F722"]
