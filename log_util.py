@@ -28,18 +28,6 @@ def get_norm_data(tree: PyTree[Float[Array, "..."]], prefix: str):
     }
 
 
-def replace(f: NamedTuple, key: str, value: Any):
-    """Replace nested namedtuple fields."""
-    idx = key.find(".")
-    if idx == -1:
-        return f._replace(**{key: value})
-
-    key, rest = key[:idx], key[idx + 1 :]
-    prop = getattr(f, key)
-    prop = replace(prop, rest, value)
-    return f._replace(**{key: prop})
-
-
 def log_values(data: dict[str, Float[Array, ""]]):
     """Log a dict of values to wandb or terminal."""
 

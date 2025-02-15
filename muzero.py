@@ -9,7 +9,6 @@
 """
 
 # jax
-from dataclasses import asdict, field
 import jax
 import jax.numpy as jnp
 import jax.random as jr
@@ -38,9 +37,16 @@ import yaml
 # typing
 from typeguard import typechecked as typechecker
 from jaxtyping import Bool, Integer, Float, Key, Array, jaxtyped
-from typing import Literal, NamedTuple, Annotated as Batched
+from typing import TYPE_CHECKING, Literal, NamedTuple, Annotated as Batched, get_args, get_origin
+
+if TYPE_CHECKING:
+    from dataclasses import dataclass
+else:
+    from chex import dataclass
 
 # util
+import argparse
+import dataclasses as dc
 import functools as ft
 from log_util import (
     exec_loop,
@@ -54,52 +60,57 @@ from log_util import (
 matplotlib.use("agg")  # enable plotting inside jax callback
 
 
-@chex.dataclass(frozen=True)
+@dataclass(frozen=True)
 class ArchConfig:
     """Network architecture"""
 
     rnn_size: int = 128
     mlp_size: int = 32
-    mlp_depth: int = 2
-    activation: Literal["relu", "tanh"] = "relu"
+    mlp_depth: int = 1
+    activation: str = "relu"
 
 
-@chex.dataclass(frozen=True)
+@dataclass(frozen=True)
 class Config:
+    """Command-line arguments and experiment configuration.
+
+    Implemented as a dataclass for simple recursive printing.
+    """
+
+    mode: Literal["debug", "run", "sweep"] = "run"
     env_name: str = "Catch-bsuite"
-    arch: ArchConfig = field(default_factory=ArchConfig)
+    arch: ArchConfig = dc.field(default_factory=ArchConfig)
+    wandb_mode: Literal["online", "offline", "disabled"] = "disabled"
     # collection
-    total_transitions: int = 500_000
+    total_transitions: int = 100_000
     num_envs: int = 64  # more parallel data collection
-    horizon: int = 9  # also mcts max depth
+    horizon: int = 10  # also mcts max depth
+    num_mcts_simulations: int = 4  # stronger policy improvement
     # two-hot value
     num_value_bins: int | Literal["scalar"] = 5
     min_value: float = -1.0
     max_value: float = 1.0
-    # search
-    num_mcts_simulations: int = 4  # stronger policy improvement
     # bootstrapping
     discount: float = 0.997  # R2D2 standard
     lambda_gae: float = 0.95
     # optimization
-    num_minibatches: int = 6  # number of gradient descent steps per iteration
-    batch_size: int = 16  # reduce gradient variance
+    num_minibatches: int = 8  # number of gradient descent updates per iteration
+    batch_size: int = 12  # reduce gradient variance
     lr_init: float = 1e-2
     max_grad_norm: float = 2 * jnp.pi
-    # prioritized replay
-    priority_exponent: float = 0.6
+    value_coef: float = 0.6  # scale the value loss
+    reward_coef: float = 0.8  # scale the reward loss
+    priority_exponent: float = 0.6  # prioritized replay
     # target
     target_update_freq: int = 4
     target_update_size: float = 3 / 4
-    # loss
-    value_coef: float = 0.4  # scale the value loss
-    reward_coef: float = 0.6  # scale the reward loss
     # evaluation
     num_evals: int = 6
     num_eval_envs: int = 2
 
 
-debug_config = Config(
+# minimal
+debug_config = dict(
     arch=ArchConfig(
         rnn_size=1,
         mlp_size=1,
@@ -115,6 +126,45 @@ debug_config = Config(
     num_evals=1,
     num_eval_envs=1,
 )
+
+
+def get_cli_args() -> Config:
+    parser = argparse.ArgumentParser("muzero", description="Run the MuZero algorithm")
+    add_dataclass_to_parser(parser, Config)
+    args = parser.parse_args()
+    config = Config()
+    for key, value in vars(args).items():
+        config = nestattr(config, key, value)
+    if config.mode == "debug":
+        config = dc.replace(config, **debug_config)
+    return config
+
+
+def add_dataclass_to_parser(parser: argparse.ArgumentParser, cls: type, prefix: str = "") -> None:
+    for field in dc.fields(cls):
+        arg_name = prefix + field.name
+        if dc.is_dataclass(field.type):
+            add_dataclass_to_parser(parser, field.type, prefix=arg_name + ".")
+        elif get_origin(field.type) is Literal:
+            parser.add_argument(
+                "--" + arg_name,
+                default=field.default,
+                type=str,
+                choices=get_args(field.type),
+            )
+        else:
+            parser.add_argument("--" + arg_name, default=field.default, type=field.type)
+
+
+def nestattr(obj: object, key: str, value: object):
+    """Replace nested dataclass fields."""
+    idx = key.find(".")
+    if idx == -1:
+        return dc.replace(obj, **{key: value})
+    key, rest = key[:idx], key[idx + 1 :]
+    prop = getattr(obj, key)
+    prop = nestattr(prop, rest, value)
+    return dc.replace(obj, **{key: prop})
 
 
 class WorldModelRNN(eqx.Module):
@@ -343,7 +393,7 @@ def make_train(config: Config):
         add_batch_size=config.num_envs,
         sample_batch_size=config.batch_size,
         sample_sequence_length=config.horizon,
-        period=config.horizon // 2,  # avoid some correlations
+        period=1,
         min_length_time_axis=trajectories_per_batch * config.horizon,
         max_length_time_axis=max_horizon,  # keep all transitions
         priority_exponent=config.priority_exponent,
@@ -402,7 +452,7 @@ def make_train(config: Config):
         key_reset, key_net, key_iter = jr.split(key, 3)
 
         sys.stdout.write("Config\n" + "=" * 20 + "\n")
-        yaml.safe_dump(asdict(config), sys.stdout)
+        yaml.safe_dump(dc.asdict(config), sys.stdout)
         sys.stdout.write("=" * 20 + "\n")
         sys.stdout.write("Buffer arguments\n" + "=" * 20 + "\n")
         yaml.safe_dump(buffer_args, sys.stdout)
@@ -561,7 +611,7 @@ def make_train(config: Config):
                     num_envs=config.num_eval_envs,
                     net_static=net_static,
                 ),
-                lambda *_: -2 * jnp.pi,
+                lambda *_: -jnp.inf,  # avoid nan to support debugging
                 # cond only accepts positional arguments
                 param_state.params,
                 target_params,
@@ -771,22 +821,6 @@ def make_train(config: Config):
         value_loss = jnp.mean(value_losses * mask[:-1, :-1], where=mask[:-1, :-1] > 0)
         reward_loss = jnp.mean(reward_losses * mask, where=mask > 0)
 
-        # def debug(n, broken, mcts, p):
-        #     if n and not broken:
-        #         print("BROKEN")
-        #         print(mcts)
-        #         print(p)
-
-        # all_broken = jnp.isnan(policy_loss) & jnp.isnan(value_loss) & jnp.isnan(reward_loss)
-        # jax.debug.callback(
-        #     debug,
-        #     jnp.isnan(policy_loss),
-        #     all_broken,
-        #     mcts_probs_rolled[0],
-        #     online_pred.policy_logits,
-        # )
-        # jax.debug.print("{}", mcts_probs_rolled[0])
-
         loss = policy_loss + config.value_coef * value_loss + config.reward_coef * reward_loss
 
         # logging
@@ -833,7 +867,7 @@ def make_train(config: Config):
         init_rollout_states = RolloutState(
             obs=obs,
             env_state=env_state,
-            initial=jnp.zeros(num_envs, dtype=jnp.bool),
+            initial=jnp.ones(num_envs, dtype=bool),
         )
 
         @exec_loop(
@@ -1102,58 +1136,57 @@ def make_train(config: Config):
 
 
 if __name__ == "__main__":
-    default_config = Config()
+    args_config = get_cli_args()
     seed = 0
 
     WANDB_PROJECT = "alphazero"
 
-    if len(sys.argv) >= 2:
-        if sys.argv[1] == "sweep":
-            num_runs = 6
-            config_values = jax.tree.map(lambda x: {"value": x}, default_config._asdict()) | {
-                "lr_init": {"min": 1e-5, "max": 1e-3},
-                "num_minibatches": {"values": [64, 128]},
-            }
-            sweep_config = {
-                "method": "random",
-                "metric": {"goal": "maximize", "name": "sweep/mean_reward"},
-                "parameters": config_values,
-            }
+    if args_config.mode == "sweep":
+        num_runs = 6
+        config_values = jax.tree.map(lambda x: {"value": x}, dc.asdict(args_config)) | {
+            "lr_init": {"min": 1e-5, "max": 1e-3},
+            "num_minibatches": {"values": [64, 128]},
+        }
+        sweep_config = {
+            "method": "random",
+            "metric": {"goal": "maximize", "name": "sweep/mean_reward"},
+            "parameters": config_values,
+        }
 
-            def run():
-                with wandb.init(project=WANDB_PROJECT):
-                    train = make_train(wandb.config)
-                    _, final_reward = jax.jit(train)(jr.key(seed))
-                    wandb.log({"sweep/mean_reward": final_reward})
+        def run():
+            with wandb.init(project=WANDB_PROJECT):
+                train = make_train(wandb.config)
+                _, final_reward = jax.jit(train)(jr.key(seed))
+                wandb.log({"sweep/mean_reward": final_reward})
 
-            sweep_id = (
-                sys.argv[2]
-                if len(sys.argv) >= 3
-                else wandb.sweep(sweep_config, project=WANDB_PROJECT)
-            )
+        sweep_id = (
+            sys.argv[2] if len(sys.argv) >= 3 else wandb.sweep(sweep_config, project=WANDB_PROJECT)
+        )
 
-            wandb.agent(
-                sweep_id,
-                function=run,
-                project=WANDB_PROJECT,
-                count=num_runs,
-            )
+        wandb.agent(
+            sweep_id,
+            function=run,
+            project=WANDB_PROJECT,
+            count=num_runs,
+        )
 
-        elif sys.argv[1] == "debug":
-            train = make_train(debug_config)
-            with jax.disable_jit():
-                output = train(jr.key(seed))
-            jax.block_until_ready(output)
-    else:
-        train = make_train(default_config)
+    elif args_config.mode == "debug":
+        train = make_train(debug_config)
+        with jax.disable_jit():
+            output = train(jr.key(seed))
+        jax.block_until_ready(output)
+
+    elif args_config.mode == "run":
+        train = make_train(args_config)
         with wandb.init(
             project=WANDB_PROJECT,
-            config=asdict(default_config),
-            mode="disabled",
+            config=dc.asdict(args_config),
+            mode=args_config.wandb_mode,
         ) as run:
             output = jax.jit(train)(jr.key(seed))
             # with jax.profiler.trace(f"/tmp/{WANDB_PROJECT}-trace", create_perfetto_link=True):
             _, mean_eval_reward = jax.block_until_ready(output)
+            mean_eval_reward = mean_eval_reward[mean_eval_reward != -jnp.inf]
             sys.stdout.write(f"{mean_eval_reward=}\n")
 
     sys.stdout.write("Done training\n")
