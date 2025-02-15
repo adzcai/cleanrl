@@ -74,6 +74,10 @@ X = TypeVar("X")
 Y = TypeVar("Y")
 
 
+def roll_into_matrix(ary: Float[Array, " n *size"]) -> Float[Array, " n n *size"]:
+    return jax.vmap(jnp.roll, in_axes=(None, 0, None))(ary, -jnp.arange(ary.shape[0]), 0)
+
+
 def exec_loop(init: Carry, length: int, key: Key[Array, ""], cond: Bool[Array, ""] | None = None):
     """Scan the decorated function for `length` steps.
 

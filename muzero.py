@@ -88,7 +88,6 @@ class Config:
     max_grad_norm: float = 2 * jnp.pi
     # prioritized replay
     priority_exponent: float = 0.6
-    priority_td_norm_ord: float = 1.0  # norm of TD error (1 for abs, inf for max)
     # target
     target_update_freq: int = 4
     target_update_size: float = 3 / 4
@@ -323,7 +322,9 @@ def make_train(config: Config):
     env, env_params = gymnax.make(config.env_name)
     env_params = env_params.replace(max_steps_in_episode=max_horizon)  # don't truncate
     obs_shape = env.observation_space(env_params).shape  # for visualization
-    num_actions = env.action_space(env_params).n
+    action_space = env.action_space(env_params)
+    num_actions = action_space.n
+    action_dtype = action_space.dtype
     env: gymnax.environments.environment.Environment = FlattenObservationWrapper(env)
 
     env_reset_batch = jax.vmap(env.reset, in_axes=(0, None))  # map over key
@@ -483,6 +484,26 @@ def make_train(config: Config):
                 batch = buffer.sample(param_state.buffer_state, key)
                 trajectories: Batched[Transition, "batch_size horizon"] = batch.experience
 
+                if False:
+
+                    def debug(batch, free):
+                        """Flashbax returns zero when JAX_ENABLE_X64 is not set."""
+                        trajectories = batch.experience
+                        for i in range(config.batch_size):
+                            weights = trajectories.mcts_probs[i]
+                            if not jnp.allclose(jnp.sum(weights, axis=-1), 1) and not jnp.all(
+                                jnp.isnan(weights)
+                            ):
+                                print("INVALID OUTPUT DISTRIBUTION BROKEN")
+                                print(weights)
+                                print(free)
+                                print(batch.indices)
+                                print(batch.priorities)
+                                print("Trajectory with broken weights:")
+                                print(tree_slice(trajectories, i))
+
+                    jax.debug.callback(debug, batch, buffer_available)
+
                 @ft.partial(jax.value_and_grad, has_aux=True)
                 def loss_grad(params: MuZeroNetwork):
                     """Average the loss across a batch of trjaectories."""
@@ -501,9 +522,6 @@ def make_train(config: Config):
                 params = optax.apply_updates(param_state.params, updates)
 
                 # prioritize trajectories with high TD error
-                # priorities = jnp.linalg.vector_norm(
-                #     aux.td_error, axis=-1, ord=config.priority_td_norm_ord
-                # )
                 priorities = jnp.mean(jnp.abs(aux.td_error), axis=-1)
                 buffer_state = buffer.set_priorities(
                     param_state.buffer_state,
@@ -554,11 +572,13 @@ def make_train(config: Config):
             jax.debug.print(
                 "step {step}/{num_iters}. "
                 "seen {transitions}/{total_transitions} transitions. "
+                "buffer full {full}. "
                 "mean return {mean_return}",
                 step=iter_state.step,
                 num_iters=num_iters,
                 transitions=param_state.buffer_state.current_index * config.num_envs,
                 total_transitions=config.total_transitions,
+                full=buffer_state.is_full,
                 mean_return=mean_return,
             )
 
@@ -582,10 +602,11 @@ def make_train(config: Config):
             key_action, key_step = jr.split(key)
 
             preds, outs = act_mcts(net, rollout_states, key_action)
+            actions = outs.action.astype(action_dtype)
             obs, env_states, rewards, initials, infos = env_step_batch(
                 jr.split(key_step, outs.action.shape[0]),
                 rollout_states.env_state,
-                outs.action,
+                actions,
                 env_params,
             )
             return RolloutState(
@@ -595,18 +616,18 @@ def make_train(config: Config):
             ), Transition(
                 # contains the reward and network predictions computed from the rollout state
                 rollout_state=rollout_states,
-                action=outs.action,
+                action=actions,
                 reward=rewards,
                 pred=preds,
                 mcts_probs=outs.action_weights,
             )
 
-        final_rollout_state, transitions = rollout_step
-        transitions = jax.tree.map(
-            lambda x: jnp.swapaxes(x, 0, 1), transitions
+        final_rollout_state, trajectories = rollout_step
+        trajectories = jax.tree.map(
+            lambda x: jnp.swapaxes(x, 0, 1), trajectories
         )  # swap horizon and num_envs axes
 
-        return final_rollout_state, transitions
+        return final_rollout_state, trajectories
 
     def act_mcts(
         net: MuZeroNetwork,
@@ -912,7 +933,7 @@ def make_train(config: Config):
         prefix: str,
         priorities: Float[Array, " num_envs"] | None = None,
     ) -> None:
-        if not wandb.run:
+        if not wandb.run or wandb.run.disabled:
             return
 
         fig_width = 3
