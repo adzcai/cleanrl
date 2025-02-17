@@ -25,6 +25,7 @@ import mctx
 import flashbax as fbx
 import gymnax
 from gymnax.wrappers import FlattenObservationWrapper
+# from prioritized_buffer import PrioritizedBuffer, BufferState
 
 # logging
 import wandb
@@ -81,8 +82,10 @@ class Config:
     env_name: str = "Catch-bsuite"
     arch: ArchConfig = dc.field(default_factory=ArchConfig)
     wandb_mode: Literal["online", "offline", "disabled"] = "disabled"
+    wandb_project: str = "muzero"
+    sweep_id: str | None = None
     # collection
-    total_transitions: int = 100_000
+    total_transitions: int = 5000
     num_envs: int = 64  # more parallel data collection
     horizon: int = 10  # also mcts max depth
     num_mcts_simulations: int = 4  # stronger policy improvement
@@ -95,7 +98,7 @@ class Config:
     lambda_gae: float = 0.95
     # optimization
     num_minibatches: int = 8  # number of gradient descent updates per iteration
-    batch_size: int = 12  # reduce gradient variance
+    batch_size: int = 32  # reduce gradient variance
     lr_init: float = 1e-2
     max_grad_norm: float = 2 * jnp.pi
     value_coef: float = 0.6  # scale the value loss
@@ -111,11 +114,7 @@ class Config:
 
 # minimal
 debug_config = dict(
-    arch=ArchConfig(
-        rnn_size=1,
-        mlp_size=1,
-        mlp_depth=0,
-    ),
+    arch=ArchConfig(rnn_size=1, mlp_size=1, mlp_depth=0),
     total_transitions=100,
     num_envs=1,
     horizon=9,
@@ -131,7 +130,7 @@ debug_config = dict(
 def get_cli_args() -> Config:
     parser = argparse.ArgumentParser("muzero", description="Run the MuZero algorithm")
     add_dataclass_to_parser(parser, Config)
-    args = parser.parse_args()
+    args = parser.parse_args()  # can't parse directly into "Config" due to nesting
     config = Config()
     for key, value in vars(args).items():
         config = nestattr(config, key, value)
@@ -147,13 +146,14 @@ def add_dataclass_to_parser(parser: argparse.ArgumentParser, cls: type, prefix: 
             add_dataclass_to_parser(parser, field.type, prefix=arg_name + ".")
         elif get_origin(field.type) is Literal:
             parser.add_argument(
-                "--" + arg_name,
-                default=field.default,
-                type=str,
-                choices=get_args(field.type),
+                "--" + arg_name, default=field.default, type=str, choices=get_args(field.type)
             )
         else:
-            parser.add_argument("--" + arg_name, default=field.default, type=field.type)
+            parser.add_argument(
+                "--" + arg_name,
+                default=field.default,
+                type=field.type if callable(field.type) else None,
+            )
 
 
 def nestattr(obj: object, key: str, value: object):
@@ -400,6 +400,12 @@ def make_train(config: Config):
     )
     buffer: TrajectoryBuffer = fbx.make_prioritised_trajectory_buffer(**buffer_args)
 
+    # buffer = PrioritizedBuffer.new(
+    #     batch_size=config.num_envs,
+    #     max_time=max_horizon,
+    #     horizon=config.horizon,
+    # )
+
     def logits_to_value(
         value_logits: Float[Array, " horizon num_value_bins"],
     ) -> Float[Array, " horizon"]:
@@ -414,23 +420,16 @@ def make_train(config: Config):
                 config.num_value_bins,
             )
 
-    def value_to_probs(
-        value: Float[Array, " horizon"],
-    ) -> Float[Array, " horizon num_value_bins"]:
+    def value_to_probs(value: Float[Array, " horizon"]) -> Float[Array, " horizon num_value_bins"]:
         """Convert from scalar values to probabilities for two-hot encoding."""
         if config.num_value_bins == "scalar":
             return value
         else:
             return rlax.transform_to_2hot(
-                value,
-                config.min_value,
-                config.max_value,
-                config.num_value_bins,
+                value, config.min_value, config.max_value, config.num_value_bins
             )
 
-    def get_invalid_actions(
-        env_state: gymnax.EnvState,
-    ) -> Bool[Array, "num_actions"]:
+    def get_invalid_actions(env_state: gymnax.EnvState) -> Bool[Array, "num_actions"]:
         if env.name == "Catch-bsuite":
             catch_state: gymnax.environments.bsuite.catch.EnvState = env_state
             catch_env: gymnax.environments.bsuite.catch.Catch = env
@@ -523,6 +522,7 @@ def make_train(config: Config):
             log_values({"iter/step": iter_state.step, "iter/mean_return": mean_return})
 
             buffer_available = buffer.can_sample(buffer_state)
+            # buffer_available = buffer.num_available(buffer_state) >= config.batch_size
 
             @exec_loop(
                 iter_state.param_state._replace(buffer_state=buffer_state),
@@ -532,6 +532,9 @@ def make_train(config: Config):
             )
             def optimize_step(param_state: ParamState, key: Key[Array, ""]):
                 batch = buffer.sample(param_state.buffer_state, key)
+                # batch = jax.vmap(buffer.sample, in_axes=(None, 0))(
+                #     param_state.buffer_state, jr.split(key, config.batch_size)
+                # )
                 trajectories: Batched[Transition, "batch_size horizon"] = batch.experience
 
                 if False:
@@ -577,6 +580,8 @@ def make_train(config: Config):
                     param_state.buffer_state,
                     batch.indices,
                     priorities,
+                    # batch.idx,
+                    # priorities**config.priority_exponent,
                 )
 
                 log_values(
@@ -592,6 +597,14 @@ def make_train(config: Config):
                 ), None
 
             param_state, _ = optimize_step
+            del buffer_state  # out of date
+            # calibrate floating point errors
+            # buffer_state = buffer.calibrate(param_state.buffer_state)
+            nodes = param_state.buffer_state.priority_state.nodes
+            jax.debug.print(
+                "d={}",
+                nodes[0] - nodes[((nodes.size + 1) >> 1) - 1 :].sum(),
+            )
 
             target_params = jax.tree.map(
                 lambda online, target: jnp.where(
@@ -606,16 +619,12 @@ def make_train(config: Config):
             # evaluate every eval_freq steps
             eval_return = jax.lax.cond(
                 (iter_state.step % eval_freq == 0) & buffer_available,
-                ft.partial(
-                    evaluate,
-                    num_envs=config.num_eval_envs,
-                    net_static=net_static,
-                ),
+                ft.partial(evaluate, num_envs=config.num_eval_envs, net_static=net_static),
                 lambda *_: -jnp.inf,  # avoid nan to support debugging
                 # cond only accepts positional arguments
                 param_state.params,
                 target_params,
-                buffer_state,
+                param_state.buffer_state,
                 key_evaluate,
             )
 
@@ -627,8 +636,10 @@ def make_train(config: Config):
                 step=iter_state.step,
                 num_iters=num_iters,
                 transitions=param_state.buffer_state.current_index * config.num_envs,
+                # transitions=param_state.buffer_state.pos * config.num_envs,
                 total_transitions=config.total_transitions,
-                full=buffer_state.is_full,
+                full=param_state.buffer_state.is_full,
+                # full=param_state.buffer_state.pos >= buffer.max_time,
                 mean_return=mean_return,
             )
 
@@ -817,6 +828,8 @@ def make_train(config: Config):
         mask = horizon_axis.size - mask
         mask = mask / (mask.sum(where=mask > 0))
 
+        # multiplying by mask accounts for multiple-counting timesteps
+        # and taking the mean averages across the horizon
         policy_loss = jnp.mean(policy_losses * mask, where=mask > 0)
         value_loss = jnp.mean(value_losses * mask[:-1, :-1], where=mask[:-1, :-1] > 0)
         reward_loss = jnp.mean(reward_losses * mask, where=mask > 0)
@@ -870,11 +883,7 @@ def make_train(config: Config):
             initial=jnp.ones(num_envs, dtype=bool),
         )
 
-        @exec_loop(
-            init_rollout_states,
-            config.horizon,
-            key_rollout,
-        )
+        @exec_loop(init_rollout_states, config.horizon, key_rollout)
         def rollout_step(rollout_states: Batched[RolloutState, "num_envs"], key: Key[Array, ""]):
             key_action, key_step, key_mcts = jr.split(key, 3)
 
@@ -889,10 +898,7 @@ def make_train(config: Config):
             (_, policy_logits), obs_grads = jax.vmap(predict)(rollout_states.obs)
             actions = jr.categorical(key_action, logits=policy_logits, axis=-1)
             obs, env_states, rewards, initials, infos = env_step_batch(
-                jr.split(key_step, num_envs),
-                rollout_states.env_state,
-                actions,
-                env_params,
+                jr.split(key_step, num_envs), rollout_states.env_state, actions, env_params
             )
 
             preds, outs = act_mcts(net, rollout_states, key_mcts)
@@ -922,9 +928,7 @@ def make_train(config: Config):
             trajectories,
             bootstrapped_returns[:, 0],
             jax.vmap(visualize_catch, in_axes=(None, 0, 0))(
-                obs_shape,
-                trajectories.rollout_state.env_state,
-                obs_grads,
+                obs_shape, trajectories.rollout_state.env_state, obs_grads
             ),
             prefix="eval",
         )
@@ -938,23 +942,24 @@ def make_train(config: Config):
         sampled_trajectories: Batched[Transition, "num_envs horizon"] = tree_slice(
             batch.experience, slice(0, num_envs)
         )
+        # batch = jax.vmap(buffer.sample, in_axes=(None, 0))(
+        #     buffer_state, jr.split(key_sample, num_envs)
+        # )
+        # sampled_trajectories = batch.experience
         _, aux = loss_trajectory(params, target_params, sampled_trajectories, net_static)
 
         jax.debug.callback(
             visualize_callback,
             trajectories=sampled_trajectories._replace(
-                pred=Prediction(
-                    value_logits=aux.value_logits,
-                    policy_logits=aux.policy_logits,
-                )
+                pred=Prediction(value_logits=aux.value_logits, policy_logits=aux.policy_logits)
             ),
             bootstrapped_returns=aux.bootstrapped_return,
             video=jax.vmap(visualize_catch, (None, 0))(
-                obs_shape,
-                sampled_trajectories.rollout_state.env_state,
+                obs_shape, sampled_trajectories.rollout_state.env_state
             ),
             prefix="visualize",
             priorities=batch.priorities,
+            # priorities=batch.priority,
             # target_value_logits=aux["train/target_value_logits"],
         )
 
@@ -1066,31 +1071,15 @@ def make_train(config: Config):
 
         # misc
         initial_idx = horizon[trajectory.rollout_state.initial]
-        ax.plot(
-            initial_idx,
-            jnp.zeros_like(initial_idx),
-            "k>",
-            label="initial",
-            alpha=0.5,
-        )
+        ax.plot(initial_idx, jnp.zeros_like(initial_idx), "k>", label="initial", alpha=0.5)
 
         # value
         online_value = logits_to_value(trajectory.pred.value_logits)
         ax.plot(horizon, trajectory.reward, "r+", label="reward")
         ax.plot(horizon, online_value, "bo", label="online value")
-        ax.plot(
-            horizon[:-1],
-            bootstrapped_return,
-            "mo",
-            label="bootstrapped returns",
-            alpha=0.5,
-        )
+        ax.plot(horizon[:-1], bootstrapped_return, "mo", label="bootstrapped returns", alpha=0.5)
         ax.fill_between(
-            horizon[:-1],
-            bootstrapped_return,
-            online_value[:-1],
-            alpha=0.3,
-            label="TD error",
+            horizon[:-1], bootstrapped_return, online_value[:-1], alpha=0.3, label="TD error"
         )
 
         # entropy
@@ -1139,9 +1128,10 @@ if __name__ == "__main__":
     args_config = get_cli_args()
     seed = 0
 
-    WANDB_PROJECT = "alphazero"
-
     if args_config.mode == "sweep":
+        if args_config.wandb_mode != "online":
+            raise ValueError("Sweep mode requires WANDB_MODE to be 'online'")
+
         num_runs = 6
         config_values = jax.tree.map(lambda x: {"value": x}, dc.asdict(args_config)) | {
             "lr_init": {"min": 1e-5, "max": 1e-3},
@@ -1154,19 +1144,21 @@ if __name__ == "__main__":
         }
 
         def run():
-            with wandb.init(project=WANDB_PROJECT):
+            with wandb.init(project=args_config.wandb_project):
                 train = make_train(wandb.config)
                 _, final_reward = jax.jit(train)(jr.key(seed))
                 wandb.log({"sweep/mean_reward": final_reward})
 
         sweep_id = (
-            sys.argv[2] if len(sys.argv) >= 3 else wandb.sweep(sweep_config, project=WANDB_PROJECT)
+            args_config.sweep_id
+            if args_config.sweep_id is not None
+            else wandb.sweep(sweep_config, project=args_config.wandb_project)
         )
 
         wandb.agent(
             sweep_id,
             function=run,
-            project=WANDB_PROJECT,
+            project=args_config.wandb_project,
             count=num_runs,
         )
 
@@ -1179,7 +1171,7 @@ if __name__ == "__main__":
     elif args_config.mode == "run":
         train = make_train(args_config)
         with wandb.init(
-            project=WANDB_PROJECT,
+            project=args_config.wandb_project,
             config=dc.asdict(args_config),
             mode=args_config.wandb_mode,
         ) as run:
