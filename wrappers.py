@@ -60,11 +60,11 @@ class LogWrapper:
     ) -> tuple[Float[Array, " obs_size"], gymenv.TEnvState]:
         obs, env_state = self._env.reset(key, params)
         env_state = LogWrapperState(
-            current_return=jnp.zeros((), jnp.float_),
-            current_length=jnp.zeros((), jnp.uint),
-            current_index=jnp.zeros((), jnp.uint),
+            current_return=jnp.zeros((), float),
+            current_length=jnp.zeros((), jnp.uint32),
+            current_index=jnp.zeros((), jnp.uint32),
             episode_returns=jnp.zeros(self._num_episodes),
-            episode_lengths=jnp.zeros(self._num_episodes, jnp.uint),
+            episode_lengths=jnp.zeros(self._num_episodes, jnp.uint32),
             _env_state=env_state,
         )
         return obs, env_state
@@ -81,8 +81,8 @@ class LogWrapper:
         env_state = jax.lax.cond(
             timestep.done,
             lambda state, timestep: LogWrapperState(
-                current_return=jnp.zeros((), jnp.float_),
-                current_length=jnp.zeros((), jnp.uint),
+                current_return=jnp.zeros((), float),
+                current_length=jnp.zeros((), jnp.uint32),
                 current_index=state.current_index + 1,
                 episode_returns=state.episode_returns.at[state.current_index].set(
                     state.current_return + timestep.reward

@@ -75,7 +75,7 @@ class PrioritizedBuffer(Generic[Experience]):
 
         return BufferState(
             data=data,
-            pos=jnp.uint(0),
+            pos=jnp.zeros((), jnp.uint32),
             priority_state=self.priority_tree.init(),
         )
 
@@ -170,7 +170,11 @@ class SumTree:
 
     def init(self):
         nodes = jnp.zeros((1 << (self.depth + 1)) - 1)
-        return SumTreeState(nodes=nodes, max_priority=jnp.float_(1.0), step=jnp.uint(0))
+        return SumTreeState(
+            nodes=nodes,
+            max_priority=jnp.ones((), float),
+            step=jnp.zeros((), jnp.uint32),
+        )
 
     def update(
         self, state: SumTreeState, indices: UInt[Array, " n"], priority: Float[Array, " n"]
@@ -249,7 +253,7 @@ class SumTree:
         Returns:
             UInt (): The sampled index.
         """
-        idx = jnp.uint(0)
+        idx = jnp.zeros((), jnp.uint32)
         value = jr.uniform(key, maxval=state.nodes[idx])
         for _ in range(self.depth):
             left_idx = (idx << 1) + 1

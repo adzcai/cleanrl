@@ -79,13 +79,21 @@ class Config:
     Implemented as a dataclass for simple recursive printing.
     """
 
-    mode: Literal["debug", "run", "sweep"] = "run"
+    mode: Literal["debug", "run", "sweep", "agent"] = dc.field(
+        default="run", metadata={"cli": False}
+    )
+    config_path: str | None = None
+    warnings: bool = False
+    # environment
     env_name: str = "Catch-bsuite"
-    arch: ArchConfig = dc.field(default_factory=ArchConfig)
+    # wandb
     wandb_mode: Literal["online", "offline", "disabled"] = "disabled"
     wandb_project: str = "muzero"
+    # sweeps
     sweep_id: str | None = None
-    warnings: bool = False
+    num_sweep_runs: int | None = 1
+    # network architecture
+    arch: ArchConfig = dc.field(default_factory=ArchConfig)
     # collection
     total_transitions: int = 200_000
     num_envs: int = 64  # more parallel data collection
@@ -130,42 +138,74 @@ debug_config = dict(
 
 
 def get_cli_args() -> Config:
+    """Command line interface.
+
+    Config is loaded in the following order:
+
+    1. Defaults in this file
+    2. The passed yaml file
+    3. The debug arguments
+    3. Command line
+    """
     parser = argparse.ArgumentParser("muzero", description="Run the MuZero algorithm")
-    add_dataclass_to_parser(parser, Config)
-    parser.add_argument("--config_path", type=str, help="Path to a yaml configuration file")
+
+    subparsers = parser.add_subparsers(dest="mode", required=True)
+    sweep_prefix = "sweep."
+    for mode in ["debug", "run", "sweep", "agent"]:
+        subparser = subparsers.add_parser(mode)
+        if mode == "agent":
+            subparser.add_argument("sweep_id")
+            subparser.add_argument("--num_sweep_runs", "-n", type=int)
+        else:
+            add_dataclass_to_parser(subparser, Config)
+        if mode == "sweep":
+            sweep_parser = subparser.add_argument_group("sweep")
+            add_dataclass_to_parser(sweep_parser, Config, prefix=sweep_prefix, nargs=2)
+
     args = parser.parse_args()
 
     # set defaults
-    if args.config_path:
+    if "config_path" in args and args.config_path is not None:
         with open(args.config_path, "r") as f:
             yaml_config = yaml.safe_load(f)
         config = Config(**yaml_config)
-    elif args.mode == "debug":
-        config = Config(**debug_config)
     else:
         # can't pass kwargs directly due to nesting
         config = Config()
 
+    if args.mode == "debug":
+        config = dc.replace(config, **debug_config)
+
     # override with cli args
     for key, value in vars(args).items():
-        if value is not None and key != "config_path":
+        if value is not None:
+            if key.startswith(sweep_prefix):
+                key = key[len(sweep_prefix) :]
             config = nestattr(config, key, value)
     return config
 
 
-def add_dataclass_to_parser(parser: argparse.ArgumentParser, cls: type, prefix: str = "") -> None:
+def add_dataclass_to_parser(
+    parser: argparse.ArgumentParser, cls: type, prefix: str = "", nargs=None
+) -> None:
     """Adds all fields of a dataclass object as command-line arguments.
 
     Doesn't set defaults on the command-line.
     """
     for field in dc.fields(cls):
         arg_name = prefix + field.name
+        if not field.metadata.get("cli", True):
+            continue
         if dc.is_dataclass(field.type):
             add_dataclass_to_parser(parser, field.type, prefix=arg_name + ".")
         elif get_origin(field.type) is Literal:
-            parser.add_argument("--" + arg_name, type=str, choices=get_args(field.type))
+            parser.add_argument(
+                "--" + arg_name, type=str, nargs=nargs, choices=get_args(field.type)
+            )
         else:
-            parser.add_argument("--" + arg_name, type=field.type if callable(field.type) else None)
+            parser.add_argument(
+                "--" + arg_name, type=field.type if callable(field.type) else None, nargs=nargs
+            )
 
 
 def nestattr(obj: object, key: str, value: object):
@@ -439,9 +479,9 @@ def make_train(config: Config):
     def train(key: Key[Array, ""]):
         key_reset, key_net, key_iter = jr.split(key, 3)
 
-        sys.stdout.write("Config\n" + "=" * 20 + "\n")
+        print("Config\n" + "=" * 25)
         yaml.safe_dump(dc.asdict(config), sys.stdout)
-        sys.stdout.write("=" * 20 + "\n")
+        print("=" * 25)
 
         init_obs, init_env_states = env_reset_batch(
             jr.split(key_reset, config.num_envs), env_params
@@ -507,7 +547,11 @@ def make_train(config: Config):
             env_states: Batched[LogWrapperState[gymenv.TEnvState], "num_envs"] = (
                 rollout_states.env_state
             )
-            mean_return = jnp.mean(env_states.average_return())
+            mean_return = jnp.mean(
+                env_states.episode_returns[
+                    jnp.arange(config.num_envs), env_states.current_index - 1
+                ]
+            )
             log_values({"iter/step": iter_state.step, "iter/mean_return": mean_return})
 
             buffer_available = buffer.num_available(buffer_state) >= config.batch_size
@@ -925,6 +969,7 @@ def make_train(config: Config):
         )
         eval_return = jnp.mean(env_states.average_return())
         log_values({"eval/mean_return": eval_return})
+        jax.debug.print("eval mean return {}", eval_return)
 
         # debug training procedure
         batch = jax.vmap(buffer.sample, in_axes=(None, 0))(
@@ -1115,34 +1160,37 @@ if __name__ == "__main__":
         if args_config.wandb_mode != "online":
             raise ValueError("Sweep mode requires WANDB_MODE to be 'online'")
 
-        num_runs = 6
-        config_values = jax.tree.map(lambda x: {"value": x}, dc.asdict(args_config)) | {
-            "lr_init": {"min": 1e-5, "max": 1e-3},
-            "num_minibatches": {"values": [64, 128]},
-        }
         sweep_config = {
             "method": "random",
             "metric": {"goal": "maximize", "name": "sweep/mean_reward"},
-            "parameters": config_values,
+            "parameters": {
+                k: {"min": v[0], "max": v[1]} if isinstance(v, list) else {"value": v}
+                for k, v in dc.asdict(args_config).items()
+                if v is not None
+            },
         }
+        yaml.safe_dump(sweep_config, sys.stdout)
+        wandb.sweep(sweep_config, project=args_config.wandb_project)
 
-        def run():
+    elif args_config.mode == "agent":
+
+        def sweep_main():
+            """Main function for wandb sweeps."""
             with wandb.init(project=args_config.wandb_project):
-                train = make_train(wandb.config)
-                _, final_reward = jax.jit(train)(jr.key(seed))
-                wandb.log({"sweep/mean_reward": final_reward})
-
-        sweep_id = (
-            args_config.sweep_id
-            if args_config.sweep_id is not None
-            else wandb.sweep(sweep_config, project=args_config.wandb_project)
-        )
+                config = wandb.config.as_dict()
+                arch = config.pop("arch")
+                train = make_train(Config(**config, arch=ArchConfig(**arch)))
+                _, eval_returns = jax.jit(train)(jr.key(seed))
+                print(eval_returns)
+                final_eval_return = eval_returns[~jnp.isneginf(eval_returns)][-1]
+                wandb.log({"sweep/mean_reward": final_eval_return})
+            print(f"Done sweep run. {final_eval_return=}")
 
         wandb.agent(
-            sweep_id,
-            function=run,
+            args_config.sweep_id,
+            function=sweep_main,
             project=args_config.wandb_project,
-            count=num_runs,
+            count=args_config.num_sweep_runs,
         )
 
     elif args_config.mode == "debug":
@@ -1157,11 +1205,9 @@ if __name__ == "__main__":
             project=args_config.wandb_project,
             config=dc.asdict(args_config),
             mode=args_config.wandb_mode,
-        ) as run:
+        ) as sweep_main:
             output = jax.jit(train)(jr.key(seed))
             # with jax.profiler.trace(f"/tmp/{WANDB_PROJECT}-trace", create_perfetto_link=True):
             _, mean_eval_reward = jax.block_until_ready(output)
             mean_eval_reward = mean_eval_reward[mean_eval_reward != -jnp.inf]
-            sys.stdout.write(f"{mean_eval_reward=}\n")
-
-    sys.stdout.write("Done training\n")
+        print(f"Done training. {mean_eval_reward=}")
