@@ -23,8 +23,10 @@ import optax
 import rlax
 import mctx
 import gymnax
-from gymnax.wrappers import FlattenObservationWrapper
+import gymnax.environments.environment as gymenv
 from prioritized_buffer import PrioritizedBuffer, BufferState
+from gymnax.wrappers import FlattenObservationWrapper
+from wrappers import LogWrapper, LogWrapperState
 
 # logging
 import wandb
@@ -39,11 +41,6 @@ from typeguard import typechecked as typechecker
 from jaxtyping import Bool, Integer, Float, Key, Array, jaxtyped
 from typing import TYPE_CHECKING, Literal, NamedTuple, Annotated as Batched, get_args, get_origin
 
-if TYPE_CHECKING:
-    from dataclasses import dataclass
-else:
-    from chex import dataclass
-
 # util
 import argparse
 import dataclasses as dc
@@ -57,6 +54,11 @@ from log_util import (
     visualize_catch,
 )
 
+if TYPE_CHECKING:
+    from dataclasses import dataclass
+else:
+    from chex import dataclass
+
 matplotlib.use("agg")  # enable plotting inside jax callback
 
 
@@ -65,7 +67,7 @@ class ArchConfig:
     """Network architecture"""
 
     rnn_size: int = 128
-    mlp_size: int = 32
+    mlp_size: int = 64
     mlp_depth: int = 1
     activation: str = "relu"
 
@@ -83,13 +85,14 @@ class Config:
     wandb_mode: Literal["online", "offline", "disabled"] = "disabled"
     wandb_project: str = "muzero"
     sweep_id: str | None = None
+    warnings: bool = False
     # collection
-    total_transitions: int = 5000
+    total_transitions: int = 200_000
     num_envs: int = 64  # more parallel data collection
-    horizon: int = 10  # also mcts max depth
+    horizon: int = 9  # also mcts max depth
     num_mcts_simulations: int = 4  # stronger policy improvement
     # two-hot value
-    num_value_bins: int | Literal["scalar"] = 5
+    num_value_bins: int | Literal["scalar"] = 7
     min_value: float = -1.0
     max_value: float = 1.0
     # bootstrapping
@@ -102,12 +105,12 @@ class Config:
     max_grad_norm: float = 2 * jnp.pi
     value_coef: float = 0.6  # scale the value loss
     reward_coef: float = 0.8  # scale the reward loss
-    priority_exponent: float = 0.6  # prioritized replay
+    priority_exponent: float = 0.8  # prioritized replay
     # target
-    target_update_freq: int = 4
+    target_update_freq: int = 4  # in global iterations
     target_update_size: float = 3 / 4
     # evaluation
-    num_evals: int = 6
+    num_evals: int = 8
     num_eval_envs: int = 2
 
 
@@ -129,30 +132,40 @@ debug_config = dict(
 def get_cli_args() -> Config:
     parser = argparse.ArgumentParser("muzero", description="Run the MuZero algorithm")
     add_dataclass_to_parser(parser, Config)
-    args = parser.parse_args()  # can't parse directly into "Config" due to nesting
-    config = Config()
+    parser.add_argument("--config_path", type=str, help="Path to a yaml configuration file")
+    args = parser.parse_args()
+
+    # set defaults
+    if args.config_path:
+        with open(args.config_path, "r") as f:
+            yaml_config = yaml.safe_load(f)
+        config = Config(**yaml_config)
+    elif args.mode == "debug":
+        config = Config(**debug_config)
+    else:
+        # can't pass kwargs directly due to nesting
+        config = Config()
+
+    # override with cli args
     for key, value in vars(args).items():
-        config = nestattr(config, key, value)
-    if config.mode == "debug":
-        config = dc.replace(config, **debug_config)
+        if value is not None and key != "config_path":
+            config = nestattr(config, key, value)
     return config
 
 
 def add_dataclass_to_parser(parser: argparse.ArgumentParser, cls: type, prefix: str = "") -> None:
+    """Adds all fields of a dataclass object as command-line arguments.
+
+    Doesn't set defaults on the command-line.
+    """
     for field in dc.fields(cls):
         arg_name = prefix + field.name
         if dc.is_dataclass(field.type):
             add_dataclass_to_parser(parser, field.type, prefix=arg_name + ".")
         elif get_origin(field.type) is Literal:
-            parser.add_argument(
-                "--" + arg_name, default=field.default, type=str, choices=get_args(field.type)
-            )
+            parser.add_argument("--" + arg_name, type=str, choices=get_args(field.type))
         else:
-            parser.add_argument(
-                "--" + arg_name,
-                default=field.default,
-                type=field.type if callable(field.type) else None,
-            )
+            parser.add_argument("--" + arg_name, type=field.type if callable(field.type) else None)
 
 
 def nestattr(obj: object, key: str, value: object):
@@ -365,7 +378,7 @@ def make_train(config: Config):
     action_space = env.action_space(env_params)
     num_actions = action_space.n
     action_dtype = action_space.dtype
-    env: gymnax.environments.environment.Environment = FlattenObservationWrapper(env)
+    env: gymenv.Environment = LogWrapper(FlattenObservationWrapper(env), num_episodes=num_iters)
 
     env_reset_batch = jax.vmap(env.reset, in_axes=(0, None))  # map over key
     env_step_batch = jax.vmap(env.step, in_axes=(0, 0, 0, None))  # map over key, state, action
@@ -491,7 +504,10 @@ def make_train(config: Config):
             )
             buffer_state = buffer.add(iter_state.param_state.buffer_state, trajectories)
 
-            mean_return = jnp.sum(trajectories.reward) / jnp.sum(trajectories.rollout_state.initial)
+            env_states: Batched[LogWrapperState[gymenv.TEnvState], "num_envs"] = (
+                rollout_states.env_state
+            )
+            mean_return = jnp.mean(env_states.average_return())
             log_values({"iter/step": iter_state.step, "iter/mean_return": mean_return})
 
             buffer_available = buffer.num_available(buffer_state) >= config.batch_size
@@ -503,8 +519,10 @@ def make_train(config: Config):
                 cond=buffer_available,
             )
             def optimize_step(param_state: ParamState, key: Key[Array, ""]):
-                batch = jax.vmap(buffer.sample, in_axes=(None, 0))(
-                    param_state.buffer_state, jr.split(key, config.batch_size)
+                batch = jax.vmap(buffer.sample, in_axes=(None, 0, None))(
+                    param_state.buffer_state,
+                    jr.split(key, config.batch_size),
+                    config.warnings,
                 )
                 trajectories: Batched[Transition, "batch_size horizon"] = batch.experience
 
@@ -565,14 +583,8 @@ def make_train(config: Config):
                     buffer_state=buffer_state,
                 ), None
 
+            del buffer_state  # replaced by param_state.buffer_state
             param_state, _ = optimize_step
-            del buffer_state  # out of date
-            # calibrate floating point errors
-            nodes = param_state.buffer_state.priority_state.nodes
-            jax.debug.print(
-                "d={}",
-                nodes[0] - nodes[((nodes.size + 1) >> 1) - 1 :].sum(),
-            )
 
             target_params = jax.tree.map(
                 lambda online, target: jnp.where(
@@ -608,6 +620,14 @@ def make_train(config: Config):
                 full=param_state.buffer_state.pos >= buffer.max_time,
                 mean_return=mean_return,
             )
+
+            if config.warnings:
+                valid = jax.tree.map(lambda x: jnp.any(jnp.isnan(x)), param_state.params)
+
+                @ft.partial(jax.debug.callback, valid=valid)
+                def debug(valid):
+                    if not valid:
+                        raise ValueError("NaN parameters.")
 
             return IterState(
                 step=iter_state.step + 1,
@@ -842,6 +862,7 @@ def make_train(config: Config):
 
         key_reset = jr.split(key_reset, num_envs)
         obs, env_state = env_reset_batch(key_reset, env_params)
+        env_state: Batched[LogWrapperState[gymenv.TEnvState], "num_envs"]
 
         init_rollout_states = RolloutState(
             obs=obs,
@@ -880,7 +901,7 @@ def make_train(config: Config):
                 obs_grads,
             )
 
-        _, (trajectories, obs_grads) = rollout_step
+        rollout_states, (trajectories, obs_grads) = rollout_step
         trajectories, obs_grads = jax.tree.map(
             lambda x: x.swapaxes(0, 1), (trajectories, obs_grads)
         )
@@ -899,7 +920,10 @@ def make_train(config: Config):
             prefix="eval",
         )
 
-        eval_return = jnp.sum(trajectories.reward) / jnp.sum(trajectories.rollout_state.initial)
+        env_states: Batched[LogWrapperState[gymenv.TEnvState], "num_envs"] = (
+            rollout_states.env_state
+        )
+        eval_return = jnp.mean(env_states.average_return())
         log_values({"eval/mean_return": eval_return})
 
         # debug training procedure

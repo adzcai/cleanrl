@@ -15,7 +15,7 @@ import yaml
 
 # typing
 from jaxtyping import Bool, Float, Array, Key, PyTree
-from typing import Annotated as Batched, Any, Callable, NamedTuple, TypeVar
+from typing import Annotated as Batched, Callable, TypeVar
 from gymnax.environments.bsuite.catch import EnvState as CatchEnvState
 
 

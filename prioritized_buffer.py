@@ -1,22 +1,23 @@
 """A prioritized buffer for replay."""
 
-from dataclasses import replace
-from typing import TYPE_CHECKING, Generic, TypeVar, Annotated as Batched
-import warnings
+# jax
+import jax
+import jax.numpy as jnp
+import jax.random as jr
 
+# typing
+from jaxtyping import UInt, Key, Float, Array, PyTree
+from typing import TYPE_CHECKING, Generic, TypeVar, Annotated as Batched
+
+# util
+import dataclasses as dc
+import functools as ft
 from log_util import tree_slice
 
 if TYPE_CHECKING:
     from dataclasses import dataclass
 else:
     from chex import dataclass
-
-import jax
-import jax.numpy as jnp
-import jax.random as jr
-
-from jaxtyping import UInt, Key, Float, Array, PyTree
-
 
 Experience = TypeVar("Experience", bound=PyTree[Array])
 
@@ -25,6 +26,7 @@ Experience = TypeVar("Experience", bound=PyTree[Array])
 class SumTreeState:
     nodes: Float[Array, " max_size"]
     max_priority: Float[Array, ""]  # new trajectories are assigned max priority
+    step: UInt[Array, ""]  # calibrate every some updates
 
 
 @dataclass(frozen=True)
@@ -96,7 +98,7 @@ class PrioritizedBuffer(Generic[Experience]):
         data = jax.tree.map(
             lambda whole, new: whole.at[:, pos_ary].set(new), state.data, experience
         )
-        state = replace(state, data=data, pos=state.pos + horizon)
+        state = dc.replace(state, data=data, pos=state.pos + horizon)
         # enable the trajectories starting up to this point
         pos_enabled = jnp.maximum(0, state.pos - self.horizon - jnp.arange(horizon)) % self.max_time
         pos_enabled = jnp.broadcast_to(pos_enabled, (self.batch_size, horizon))
@@ -121,13 +123,13 @@ class PrioritizedBuffer(Generic[Experience]):
     ) -> BufferState[Experience]:
         """Set priorities for a batch of trajectories."""
         priority_state = self.priority_tree.update(state.priority_state, idx, priorities)
-        return replace(state, priority_state=priority_state)
+        return dc.replace(state, priority_state=priority_state)
 
     def sample(
-        self, state: BufferState[Experience], key: Key[Array, ""]
+        self, state: BufferState[Experience], key: Key[Array, ""], debug=False
     ) -> Batched[Sample[Experience], "horizon"]:
         """Sample a trajectory from the buffer."""
-        idx, priority = self.priority_tree.sample(state.priority_state, key)
+        idx, priority = self.priority_tree.sample(state.priority_state, key, debug=debug)
         batch, pos = divmod(idx, self.max_time)
         pos_ary = (pos + jnp.arange(self.horizon)) % self.max_time
         return Sample(
@@ -135,9 +137,6 @@ class PrioritizedBuffer(Generic[Experience]):
             idx=idx,
             priority=priority,
         )
-
-    def calibrate(self, state: BufferState[Experience]):
-        return replace(state, priority_state=self.priority_tree.recompute(state.priority_state))
 
     def num_available(self, state: BufferState[Experience]) -> int:
         """The number of possible trajectories (overlapping and across batch)."""
@@ -158,26 +157,29 @@ class SumTree:
 
     size: int
     depth: int
+    calibrate_freq: int
 
     @classmethod
-    def new(cls, size: int):
+    def new(cls, size: int, calibrate_freq: int = 64):
         depth = int(jnp.ceil(jnp.log2(size)))  # root at zero
         return cls(
             size=size,
             depth=depth,
+            calibrate_freq=calibrate_freq,
         )
 
     def init(self):
         nodes = jnp.zeros((1 << (self.depth + 1)) - 1)
-        return SumTreeState(
-            nodes=nodes,
-            max_priority=jnp.float_(1.0),
-        )
+        return SumTreeState(nodes=nodes, max_priority=jnp.float_(1.0), step=jnp.uint(0))
 
     def update(
         self, state: SumTreeState, indices: UInt[Array, " n"], priority: Float[Array, " n"]
     ) -> SumTreeState:
         """Set priorities at the given indices.
+
+        To mitigate floating point errors,
+        every calibrate_freq updates,
+        recompute the tree.
 
         Args:
             indices (UInt (n,)): The indices to update.
@@ -186,6 +188,18 @@ class SumTree:
         Returns:
             SumTree: The updated tree.
         """
+        return jax.lax.cond(
+            state.step % self.calibrate_freq == 0,
+            self._recompute,
+            self._update,
+            state,
+            indices,
+            priority,
+        )
+
+    def _update(
+        self, state: SumTreeState, indices: UInt[Array, " n"], priority: Float[Array, " n"]
+    ) -> SumTreeState:
         # we only update using the first priority for each index
         # turn others into no-ops (add zero)
         unique, first = jnp.unique(
@@ -201,13 +215,40 @@ class SumTree:
             nodes = nodes.at[idx].add(delta)
             idx = (idx - 1) >> 1
 
-        return replace(
+        return dc.replace(
             state,
             nodes=nodes,
             max_priority=jnp.maximum(jnp.max(priority), state.max_priority),
+            step=state.step + 1,
         )
 
-    def sample(self, state: SumTreeState, key: Key[Array, ""]) -> UInt[Array, " n"]:
+    def _recompute(
+        self, state: SumTreeState, indices: UInt[Array, " n"], priority: Float[Array, " n"]
+    ):
+        """Sets the priorities and recomputes the entire tree."""
+        nodes = state.nodes.at[indices + self.leaf_idx].set(priority)
+        idx = jnp.arange(self.leaf_idx, nodes.size)
+        for _ in range(self.depth):
+            idx = (idx - 1) >> 1
+            left_idx = (idx << 1) + 1
+            right_idx = (idx << 1) + 2
+            nodes = nodes.at[idx].set(nodes[left_idx] + nodes[right_idx])
+        return dc.replace(
+            state,
+            nodes=nodes,
+            max_priority=jnp.max(nodes[self.leaf_idx :]),
+            step=state.step + 1,
+        )
+
+    def sample(self, state: SumTreeState, key: Key[Array, ""], debug=False) -> UInt[Array, ""]:
+        """Sample a single index from the priorities.
+
+        Raises:
+            ValueError: If debug is enabled and an out-of-bounds index is returned.
+
+        Returns:
+            UInt (): The sampled index.
+        """
         idx = jnp.uint(0)
         value = jr.uniform(key, maxval=state.nodes[idx])
         for _ in range(self.depth):
@@ -216,25 +257,18 @@ class SumTree:
             idx = jnp.where(value < left_sum, left_idx, left_idx + 1)
             value = jnp.where(value < left_sum, value, value - left_sum)
 
-        def debug(error):
-            if error:
-                raise ValueError("Inconsistency in the priority tree! Invalid index encountered")
+        if debug:
 
-        jax.debug.callback(debug, jnp.any(idx - self.leaf_idx >= self.size))
+            @ft.partial(jax.debug.callback, error=jnp.any(idx - self.leaf_idx >= self.size))
+            def debug(error):
+                if error:
+                    raise IndexError(
+                        "Invalid index encountered when sampling from the priority tree. "
+                        "This is most likely due to accumulated floating-point errors. "
+                        "Pass a smaller calibrate_freq to mitigate this."
+                    )
 
         return idx - self.leaf_idx, state.nodes[idx]
-
-    def recompute(self, state: SumTreeState):
-        """Recomputes the entire tree."""
-        nodes = state.nodes
-        start, end = self.leaf_idx, nodes.size
-        for _ in range(self.depth):
-            start, end = start >> 1, start
-            idx = jnp.arange(start, end)
-            left_idx = (idx << 1) + 1
-            right_idx = (idx << 1) + 2
-            nodes = nodes.at[idx].set(nodes[left_idx] + nodes[right_idx])
-        return replace(state, nodes=nodes)
 
     @property
     def leaf_idx(self):
