@@ -22,10 +22,9 @@ import optax
 # rl
 import rlax
 import mctx
-import flashbax as fbx
 import gymnax
 from gymnax.wrappers import FlattenObservationWrapper
-# from prioritized_buffer import PrioritizedBuffer, BufferState
+from prioritized_buffer import PrioritizedBuffer, BufferState
 
 # logging
 import wandb
@@ -319,15 +318,6 @@ class Transition(NamedTuple):
     mcts_probs: Float[Array, " num_actions"]
 
 
-BufferState = fbx.prioritised_trajectory_buffer.PrioritisedTrajectoryBufferState[Transition]
-TrajectorySample = fbx.prioritised_trajectory_buffer.PrioritisedTrajectoryBufferSample[Transition]
-TrajectoryBuffer = fbx.prioritised_trajectory_buffer.PrioritisedTrajectoryBuffer[
-    Transition,
-    BufferState,
-    TrajectorySample,
-]
-
-
 class ParamState(NamedTuple):
     """Carried during optimization."""
 
@@ -386,25 +376,11 @@ def make_train(config: Config):
         optax.adamw(lr),
     )
 
-    # ceil(batch_size / num_envs)
-    trajectories_per_batch = (config.batch_size - 1) // config.num_envs + 1
-    # save to dict for logging
-    buffer_args = dict(
-        add_batch_size=config.num_envs,
-        sample_batch_size=config.batch_size,
-        sample_sequence_length=config.horizon,
-        period=1,
-        min_length_time_axis=trajectories_per_batch * config.horizon,
-        max_length_time_axis=max_horizon,  # keep all transitions
-        priority_exponent=config.priority_exponent,
+    buffer = PrioritizedBuffer.new(
+        batch_size=config.num_envs,
+        max_time=max_horizon,
+        horizon=config.horizon,
     )
-    buffer: TrajectoryBuffer = fbx.make_prioritised_trajectory_buffer(**buffer_args)
-
-    # buffer = PrioritizedBuffer.new(
-    #     batch_size=config.num_envs,
-    #     max_time=max_horizon,
-    #     horizon=config.horizon,
-    # )
 
     def logits_to_value(
         value_logits: Float[Array, " horizon num_value_bins"],
@@ -452,9 +428,6 @@ def make_train(config: Config):
 
         sys.stdout.write("Config\n" + "=" * 20 + "\n")
         yaml.safe_dump(dc.asdict(config), sys.stdout)
-        sys.stdout.write("=" * 20 + "\n")
-        sys.stdout.write("Buffer arguments\n" + "=" * 20 + "\n")
-        yaml.safe_dump(buffer_args, sys.stdout)
         sys.stdout.write("=" * 20 + "\n")
 
         init_obs, init_env_states = env_reset_batch(
@@ -521,8 +494,7 @@ def make_train(config: Config):
             mean_return = jnp.sum(trajectories.reward) / jnp.sum(trajectories.rollout_state.initial)
             log_values({"iter/step": iter_state.step, "iter/mean_return": mean_return})
 
-            buffer_available = buffer.can_sample(buffer_state)
-            # buffer_available = buffer.num_available(buffer_state) >= config.batch_size
+            buffer_available = buffer.num_available(buffer_state) >= config.batch_size
 
             @exec_loop(
                 iter_state.param_state._replace(buffer_state=buffer_state),
@@ -531,10 +503,9 @@ def make_train(config: Config):
                 cond=buffer_available,
             )
             def optimize_step(param_state: ParamState, key: Key[Array, ""]):
-                batch = buffer.sample(param_state.buffer_state, key)
-                # batch = jax.vmap(buffer.sample, in_axes=(None, 0))(
-                #     param_state.buffer_state, jr.split(key, config.batch_size)
-                # )
+                batch = jax.vmap(buffer.sample, in_axes=(None, 0))(
+                    param_state.buffer_state, jr.split(key, config.batch_size)
+                )
                 trajectories: Batched[Transition, "batch_size horizon"] = batch.experience
 
                 if False:
@@ -578,10 +549,8 @@ def make_train(config: Config):
                 priorities = jnp.mean(jnp.abs(aux.td_error), axis=-1)
                 buffer_state = buffer.set_priorities(
                     param_state.buffer_state,
-                    batch.indices,
-                    priorities,
-                    # batch.idx,
-                    # priorities**config.priority_exponent,
+                    batch.idx,
+                    priorities**config.priority_exponent,
                 )
 
                 log_values(
@@ -599,7 +568,6 @@ def make_train(config: Config):
             param_state, _ = optimize_step
             del buffer_state  # out of date
             # calibrate floating point errors
-            # buffer_state = buffer.calibrate(param_state.buffer_state)
             nodes = param_state.buffer_state.priority_state.nodes
             jax.debug.print(
                 "d={}",
@@ -635,11 +603,9 @@ def make_train(config: Config):
                 "mean return {mean_return}",
                 step=iter_state.step,
                 num_iters=num_iters,
-                transitions=param_state.buffer_state.current_index * config.num_envs,
-                # transitions=param_state.buffer_state.pos * config.num_envs,
+                transitions=param_state.buffer_state.pos * config.num_envs,
                 total_transitions=config.total_transitions,
-                full=param_state.buffer_state.is_full,
-                # full=param_state.buffer_state.pos >= buffer.max_time,
+                full=param_state.buffer_state.pos >= buffer.max_time,
                 mean_return=mean_return,
             )
 
@@ -764,8 +730,8 @@ def make_train(config: Config):
         return pred, bootstrapped_return
 
     # jit to ease debugging
-    @ft.partial(jax.vmap, in_axes=(None, None, 0, None))
     @ft.partial(jax.jit, static_argnames=("net_static",))
+    @ft.partial(jax.vmap, in_axes=(None, None, 0, None))
     def loss_trajectory(
         params: MuZeroNetwork,
         target_params: MuZeroNetwork,
@@ -937,15 +903,10 @@ def make_train(config: Config):
         log_values({"eval/mean_return": eval_return})
 
         # debug training procedure
-
-        batch = buffer.sample(buffer_state, key_sample)
-        sampled_trajectories: Batched[Transition, "num_envs horizon"] = tree_slice(
-            batch.experience, slice(0, num_envs)
+        batch = jax.vmap(buffer.sample, in_axes=(None, 0))(
+            buffer_state, jr.split(key_sample, num_envs)
         )
-        # batch = jax.vmap(buffer.sample, in_axes=(None, 0))(
-        #     buffer_state, jr.split(key_sample, num_envs)
-        # )
-        # sampled_trajectories = batch.experience
+        sampled_trajectories = batch.experience
         _, aux = loss_trajectory(params, target_params, sampled_trajectories, net_static)
 
         jax.debug.callback(
@@ -958,9 +919,7 @@ def make_train(config: Config):
                 obs_shape, sampled_trajectories.rollout_state.env_state
             ),
             prefix="visualize",
-            priorities=batch.priorities,
-            # priorities=batch.priority,
-            # target_value_logits=aux["train/target_value_logits"],
+            priorities=batch.priority,
         )
 
         return eval_return
