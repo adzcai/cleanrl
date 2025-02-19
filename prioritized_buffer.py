@@ -253,9 +253,8 @@ class SumTree:
         Returns:
             UInt (): The sampled index.
         """
-        key_value, key_fallback = jr.split(key)
         idx = jnp.zeros((), jnp.uint32)
-        value = jr.uniform(key_value, maxval=state.nodes[idx])
+        value = jr.uniform(key, maxval=state.nodes[idx])
         for _ in range(self.depth):
             left_idx = (idx << 1) + 1
             left_sum = state.nodes[left_idx]
@@ -272,9 +271,6 @@ class SumTree:
                         "This is most likely due to accumulated floating-point errors. "
                         "Pass a smaller calibrate_freq to mitigate this."
                     )
-        else:
-            fallback_idx = jr.randint(key_fallback, (), 0, self.size, jnp.uint32)
-            idx = jnp.where(idx - self.leaf_idx < self.size, idx, fallback_idx + self.leaf_idx)
 
         return idx - self.leaf_idx, state.nodes[idx]
 

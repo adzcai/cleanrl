@@ -972,7 +972,9 @@ def make_train(config: TrainConfig):
             bootstrapped_returns[:, 0],
             jax.vmap(visualize_catch, in_axes=(None, 0, 0))(
                 obs_shape, trajectories.rollout_state.env_state, obs_grads
-            ),
+            )
+            if config.env_name == "Catch-bsuite"
+            else None,
             prefix="eval",
         )
 
@@ -1008,10 +1010,19 @@ def make_train(config: TrainConfig):
     def visualize_callback(
         trajectories: Batched[Transition, "num_envs horizon"],
         bootstrapped_returns: Float[Array, " num_envs horizon-1"],
-        video: Float[Array, " num_envs horizon 3 height width"],
+        video: Float[Array, " num_envs horizon 3 height width"] | None,
         prefix: str,
         priorities: Float[Array, " num_envs"] | None = None,
     ) -> None:
+        """Visualize a batch of trajectories.
+
+        Args:
+            trajectories (Transition (num_envs, horizon)): The batch of trajectories.
+            bootstrapped_returns (Float (num_envs, horizon)): The bootstrapped target returns.
+            video (Float (num_envs, horizon, 3, height, width)): A batch of sequences of images to imshow.
+            prefix (str): The wandb prefix to log under.
+            priorities (Float (num_envs), optional): The priorities of the trajectories. Defaults to None.
+        """
         if not wandb.run or wandb.run.disabled:
             return
 
@@ -1071,34 +1082,33 @@ def make_train(config: TrainConfig):
                 if config.num_value_bins != "scalar":
                     ax_value.legend(loc="upper center", bbox_to_anchor=(0.5, 1.20), ncol=3)
 
+        # use wandb.Image since otherwise wandb uses plotly,
+        # which breaks the legends
+        obj = {f"{prefix}/statistics": wandb.Image(fig_stats)}
+
         # separate figure for plotting video
-        fig_video, ax_video = plt.subplots(
-            nrows=num_envs,
-            ncols=horizon,
-            squeeze=False,
-            figsize=(horizon * 2, num_envs * 3),
-        )
+        if video is not None:
+            fig_video, ax_video = plt.subplots(
+                nrows=num_envs,
+                ncols=horizon,
+                squeeze=False,
+                figsize=(horizon * 2, num_envs * 3),
+            )
 
-        for i in range(num_envs):
-            for h in range(horizon):
-                ax_stats: Axes = ax_video[i, h]
-                initial = trajectories.rollout_state.initial[i, h].item()
-                a = trajectories.action[i, h].item()
-                # c h w -> h w c
-                ax_stats.imshow(jnp.permute_dims(video[i, h], (1, 2, 0)))
-                ax_stats.set_title(f"{h=} {initial=} {a=}")
-                ax_stats.axis("off")
+            # wandb.Video(np.asarray(video), fps=10),
 
-        wandb.log(
-            {
-                # "eval/video": wandb.Video(np.asarray(video), fps=10),
-                # use wandb.Image since otherwise wandb uses plotly,
-                # which breaks the legends
-                f"{prefix}/statistics": wandb.Image(fig_stats),
-                f"{prefix}/trajectories": wandb.Image(fig_video),
-            }
-        )
+            for i in range(num_envs):
+                for h in range(horizon):
+                    ax_stats: Axes = ax_video[i, h]
+                    initial = trajectories.rollout_state.initial[i, h].item()
+                    a = trajectories.action[i, h].item()
+                    # c h w -> h w c
+                    ax_stats.imshow(jnp.permute_dims(video[i, h], (1, 2, 0)))
+                    ax_stats.set_title(f"{h=} {initial=} {a=}")
+                    ax_stats.axis("off")
+            obj[f"{prefix}/trajectories"] = wandb.Image(fig_video)
 
+        wandb.log(obj)
         plt.close(fig_stats)
         plt.close(fig_video)
 

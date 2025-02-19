@@ -4,9 +4,14 @@ import jax.numpy as jnp
 import jax.random as jr
 import mctx
 
+
 # visualization
-import pygraphviz
 import wandb
+
+try:
+    import pygraphviz
+except ImportError:
+    print("pygraphviz not installed")
 
 # util
 import inspect
@@ -123,7 +128,7 @@ def visualize_catch(
 
 def convert_tree_to_graph(
     tree: mctx.Tree, action_labels: list[str] | None = None, batch_index: int = 0
-) -> pygraphviz.AGraph:
+) -> "pygraphviz.AGraph":
     """Converts a search tree into a Graphviz graph.
 
     Args:
