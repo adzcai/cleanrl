@@ -43,6 +43,7 @@ from typing import TYPE_CHECKING, Literal, NamedTuple, Annotated as Batched, get
 
 # util
 import argparse
+from pathlib import Path
 import dataclasses as dc
 import functools as ft
 from log_util import (
@@ -73,53 +74,40 @@ class ArchConfig:
 
 
 @dataclass(frozen=True)
-class Config:
-    """Command-line arguments and experiment configuration.
+class TrainConfig:
+    """Training parameters."""
 
-    Implemented as a dataclass for simple recursive printing.
-    """
-
-    mode: Literal["debug", "run", "sweep", "agent"] = dc.field(
-        default="run", metadata={"cli": False}
-    )
-    config_path: str | None = None
-    warnings: bool = False
     # environment
-    env_name: str = "Catch-bsuite"
-    # wandb
-    wandb_mode: Literal["online", "offline", "disabled"] = "disabled"
-    wandb_project: str = "muzero"
-    # sweeps
-    sweep_id: str | None = None
-    num_sweep_runs: int | None = 1
+    env_name: str
     # network architecture
-    arch: ArchConfig = dc.field(default_factory=ArchConfig)
+    arch: ArchConfig
     # collection
-    total_transitions: int = 200_000
-    num_envs: int = 64  # more parallel data collection
-    horizon: int = 9  # also mcts max depth
-    num_mcts_simulations: int = 4  # stronger policy improvement
+    total_transitions: int
+    num_envs: int  # more parallel data collection
+    horizon: int  # also mcts max depth
+    num_mcts_simulations: int  # stronger policy improvement
     # two-hot value
-    num_value_bins: int | Literal["scalar"] = 7
-    min_value: float = -1.0
-    max_value: float = 1.0
+    num_value_bins: int | Literal["scalar"]
+    min_value: float
+    max_value: float
     # bootstrapping
-    discount: float = 0.997  # R2D2 standard
-    lambda_gae: float = 0.95
+    discount: float  # R2D2 standard
+    lambda_gae: float
     # optimization
-    num_minibatches: int = 8  # number of gradient descent updates per iteration
-    batch_size: int = 32  # reduce gradient variance
-    lr_init: float = 1e-2
-    max_grad_norm: float = 2 * jnp.pi
-    value_coef: float = 0.6  # scale the value loss
-    reward_coef: float = 0.8  # scale the reward loss
-    priority_exponent: float = 0.8  # prioritized replay
+    num_minibatches: int  # number of gradient descent updates per iteration
+    batch_size: int  # reduce gradient variance
+    lr_init: float
+    max_grad_norm: float
+    value_coef: float  # scale the value loss
+    reward_coef: float  # scale the reward loss
+    priority_exponent: float  # prioritized replay
     # target
-    target_update_freq: int = 4  # in global iterations
-    target_update_size: float = 3 / 4
+    target_update_freq: int  # in global iterations
+    target_update_size: float
     # evaluation
-    num_evals: int = 8
-    num_eval_envs: int = 2
+    warnings: bool
+    num_evals: int
+    num_eval_envs: int
 
 
 # minimal
@@ -137,7 +125,23 @@ debug_config = dict(
 )
 
 
-def get_cli_args() -> Config:
+@dataclass(frozen=True)
+class SetupArgs:
+    """Command-line arguments."""
+
+    mode: Literal["debug", "run", "sweep", "agent"] = dc.field(
+        default="run", metadata={"cli": False}
+    )
+    # agent only
+    sweep_id: str | None = dc.field(default=None, metadata={"cli": False})
+    num_sweep_runs: int | None = dc.field(default=None, metadata={"cli": False})
+    # other (training)
+    config_path: Path = Path(__file__).parent / "conf" / "catch.yaml"
+    wandb_mode: Literal["online", "offline", "disabled"] = "disabled"
+    wandb_project: str = "muzero"
+
+
+def get_cli_args() -> tuple[SetupArgs, TrainConfig | None]:
     """Command line interface.
 
     Config is loaded in the following order:
@@ -146,6 +150,9 @@ def get_cli_args() -> Config:
     2. The passed yaml file
     3. The debug arguments
     3. Command line
+
+    Returns:
+        tuple[Args, TrainConfig | None]: The second value is None if mode is "agent".
     """
     parser = argparse.ArgumentParser("muzero", description="Run the MuZero algorithm")
 
@@ -153,36 +160,41 @@ def get_cli_args() -> Config:
     sweep_prefix = "sweep."
     for mode in ["debug", "run", "sweep", "agent"]:
         subparser = subparsers.add_parser(mode)
+        args_subparser = subparser.add_argument_group("wandb etc")
         if mode == "agent":
-            subparser.add_argument("sweep_id")
-            subparser.add_argument("--num_sweep_runs", "-n", type=int)
+            args_subparser.add_argument("sweep_id")
+            args_subparser.add_argument("--num_sweep_runs", "-n", type=int, default=1)
         else:
-            add_dataclass_to_parser(subparser, Config)
+            add_dataclass_to_parser(args_subparser, SetupArgs)
+            training_parser = subparser.add_argument_group("training")
+            add_dataclass_to_parser(training_parser, TrainConfig)
         if mode == "sweep":
             sweep_parser = subparser.add_argument_group("sweep")
-            add_dataclass_to_parser(sweep_parser, Config, prefix=sweep_prefix, nargs=2)
+            add_dataclass_to_parser(sweep_parser, TrainConfig, prefix=sweep_prefix, nargs=2)
 
     args = parser.parse_args()
+    setup_fields = {field.name for field in dc.fields(SetupArgs)}
+    setup_args = SetupArgs(
+        **{k: v for k, v in vars(args).items() if k in setup_fields and v is not None}
+    )
+    if setup_args.mode == "agent":
+        return setup_args, None
 
-    # set defaults
-    if "config_path" in args and args.config_path is not None:
-        with open(args.config_path, "r") as f:
-            yaml_config = yaml.safe_load(f)
-        config = Config(**yaml_config)
-    else:
-        # can't pass kwargs directly due to nesting
-        config = Config()
+    with open(setup_args.config_path, "r") as f:
+        yaml_config = yaml.safe_load(f)
+    config = TrainConfig(**yaml_config)
 
-    if args.mode == "debug":
+    if setup_args.mode == "debug":
         config = dc.replace(config, **debug_config)
 
     # override with cli args
     for key, value in vars(args).items():
-        if value is not None:
-            if key.startswith(sweep_prefix):
-                key = key[len(sweep_prefix) :]
+        if key.startswith(sweep_prefix):
+            key = key[len(sweep_prefix) :]
+        if key not in setup_fields and value is not None:
             config = nestattr(config, key, value)
-    return config
+    config = dc.replace(config, arch=ArchConfig(**config.arch))
+    return setup_args, config
 
 
 def add_dataclass_to_parser(
@@ -406,7 +418,7 @@ class LossStatistics(NamedTuple):
 
 
 @jaxtyped(typechecker=typechecker)
-def make_train(config: Config):
+def make_train(config: TrainConfig):
     num_iters = config.total_transitions // (config.num_envs * config.horizon)
     max_horizon = num_iters * config.horizon
     num_grad_updates = num_iters * config.num_minibatches
@@ -1153,11 +1165,11 @@ def make_train(config: Config):
 
 
 if __name__ == "__main__":
-    args_config = get_cli_args()
+    setup_args, config = get_cli_args()
     seed = 0
 
-    if args_config.mode == "sweep":
-        if args_config.wandb_mode != "online":
+    if setup_args.mode == "sweep":
+        if setup_args.wandb_mode != "online":
             raise ValueError("Sweep mode requires WANDB_MODE to be 'online'")
 
         sweep_config = {
@@ -1165,21 +1177,21 @@ if __name__ == "__main__":
             "metric": {"goal": "maximize", "name": "sweep/mean_reward"},
             "parameters": {
                 k: {"min": v[0], "max": v[1]} if isinstance(v, list) else {"value": v}
-                for k, v in dc.asdict(args_config).items()
+                for k, v in dc.asdict(config).items()
                 if v is not None
             },
         }
         yaml.safe_dump(sweep_config, sys.stdout)
-        wandb.sweep(sweep_config, project=args_config.wandb_project)
+        wandb.sweep(sweep_config, project=setup_args.wandb_project)
 
-    elif args_config.mode == "agent":
+    elif setup_args.mode == "agent":
 
         def sweep_main():
             """Main function for wandb sweeps."""
-            with wandb.init(project=args_config.wandb_project):
+            with wandb.init(project=setup_args.wandb_project):
                 config = wandb.config.as_dict()
                 arch = config.pop("arch")
-                train = make_train(Config(**config, arch=ArchConfig(**arch)))
+                train = make_train(TrainConfig(**config, arch=ArchConfig(**arch)))
                 _, eval_returns = jax.jit(train)(jr.key(seed))
                 print(eval_returns)
                 final_eval_return = eval_returns[~jnp.isneginf(eval_returns)][-1]
@@ -1187,24 +1199,24 @@ if __name__ == "__main__":
             print(f"Done sweep run. {final_eval_return=}")
 
         wandb.agent(
-            args_config.sweep_id,
+            setup_args.sweep_id,
             function=sweep_main,
-            project=args_config.wandb_project,
-            count=args_config.num_sweep_runs,
+            project=setup_args.wandb_project,
+            count=setup_args.num_sweep_runs,
         )
 
-    elif args_config.mode == "debug":
+    elif setup_args.mode == "debug":
         train = make_train(debug_config)
         with jax.disable_jit():
             output = train(jr.key(seed))
         jax.block_until_ready(output)
 
-    elif args_config.mode == "run":
-        train = make_train(args_config)
+    elif setup_args.mode == "run":
+        train = make_train(config)
         with wandb.init(
-            project=args_config.wandb_project,
-            config=dc.asdict(args_config),
-            mode=args_config.wandb_mode,
+            project=setup_args.wandb_project,
+            config=dc.asdict(config),
+            mode=setup_args.wandb_mode,
         ) as sweep_main:
             output = jax.jit(train)(jr.key(seed))
             # with jax.profiler.trace(f"/tmp/{WANDB_PROJECT}-trace", create_perfetto_link=True):
