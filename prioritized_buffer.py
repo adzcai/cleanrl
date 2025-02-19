@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Generic, TypeVar, Annotated as Batched
 # util
 import dataclasses as dc
 import functools as ft
-from log_util import tree_slice
+from log_util import tree_slice, exec_callback
 
 if TYPE_CHECKING:
     from dataclasses import dataclass
@@ -129,8 +129,17 @@ class PrioritizedBuffer(Generic[Experience]):
         self, state: BufferState[Experience], key: Key[Array, ""], debug=False
     ) -> Batched[Sample[Experience], "horizon"]:
         """Sample a trajectory from the buffer."""
-        idx, priority = self.priority_tree.sample(state.priority_state, key, debug=debug)
+        key_sample, key_fallback = jr.split(key)
+        idx, priority = self.priority_tree.sample(state.priority_state, key_sample, debug=debug)
         batch, pos = divmod(idx, self.max_time)
+
+        # ensure valid indices
+        # sample from uniform if invalid
+        pos_avail = self.available_pos(state)
+        fallback_pos = jr.randint(key_fallback, pos.shape, 0, pos_avail)
+        pos = jnp.where(pos < pos_avail, pos, fallback_pos)
+
+        # take trajectories
         pos_ary = (pos + jnp.arange(self.horizon)) % self.max_time
         return Sample(
             experience=tree_slice(state.data, (batch, pos_ary)),
@@ -138,9 +147,17 @@ class PrioritizedBuffer(Generic[Experience]):
             priority=priority,
         )
 
+    def available_pos(self, state: BufferState[Experience]) -> int:
+        """The number of available initial positions (along the horizon axis).
+
+        i.e. (randint(0, available_pos) + range(horizon)) % max_time
+        is entirely populated.
+        """
+        return jnp.minimum(state.pos, self.max_time) - self.horizon + 1
+
     def num_available(self, state: BufferState[Experience]) -> int:
         """The number of possible trajectories (overlapping and across batch)."""
-        size = self.batch_size * (jnp.minimum(state.pos, self.max_time) - self.horizon + 1)
+        size = self.batch_size * self.available_pos(state)
         # could also count nonzero in self.priority_tree.nodes[(1 << self.priority_tree.depth) - 1 :]
         return size
 
@@ -263,12 +280,18 @@ class SumTree:
 
         if debug:
 
-            @ft.partial(jax.debug.callback, error=jnp.any(idx - self.leaf_idx >= self.size))
-            def debug(error):
+            @exec_callback
+            def debug(
+                error=jnp.any(idx - self.leaf_idx >= self.size),
+                top=state.nodes[0],
+                total=state.nodes[self.leaf_idx :].sum(),
+            ):
                 if error:
                     raise IndexError(
                         "Invalid index encountered when sampling from the priority tree. "
                         "This is most likely due to accumulated floating-point errors. "
+                        f"Difference was {top - total:.3e} "
+                        f"(relative {(top - total) / top:.3e}). "
                         "Pass a smaller calibrate_freq to mitigate this."
                     )
 

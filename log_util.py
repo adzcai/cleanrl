@@ -50,14 +50,14 @@ def tree_slice(tree: PyTree[Array], at: int):
     return jax.tree.map(lambda x: x[at], tree)
 
 
-def exec_callback(f: Callable | None, *, cond=True):
+def exec_callback(f: Callable):
     """A decorator for executing callbacks that applies the default arguments."""
-    signature = inspect.signature(f)
-    signature.apply_defaults()
+    bound = inspect.signature(f).bind()
+    bound.apply_defaults()
     jax.debug.callback(
         f,
-        *signature.args,
-        **signature.kwargs,
+        *bound.args,
+        **bound.kwargs,
     )
     return f
 
