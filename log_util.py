@@ -54,11 +54,7 @@ def exec_callback(f: Callable):
     """A decorator for executing callbacks that applies the default arguments."""
     bound = inspect.signature(f).bind()
     bound.apply_defaults()
-    jax.debug.callback(
-        f,
-        *bound.args,
-        **bound.kwargs,
-    )
+    jax.debug.callback(f, *bound.args, **bound.kwargs)
     return f
 
 

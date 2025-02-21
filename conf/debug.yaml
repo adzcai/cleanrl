@@ -1,0 +1,21 @@
+arch:
+  rnn_size: 1
+  mlp_size: 1
+  mlp_depth: 0
+
+collection:
+  total_transitions: 100
+  num_envs: 1
+  horizon: 9
+  num_mcts_simulations: 1
+
+value:
+  num_value_bins: "scalar"
+
+optim:
+  num_minibatches: 1
+  batch_size: 1
+
+eval:
+  num_evals: 1
+  num_eval_envs: 1
