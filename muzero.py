@@ -34,6 +34,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
 import sys
+import json
 import yaml
 
 # typing
@@ -74,26 +75,30 @@ class ArchConfig:
 
 
 @dataclass(frozen=True)
-class TrainConfig:
-    """Training parameters."""
-
-    # environment
-    env_name: str
-    # network architecture
-    arch: ArchConfig
-    # collection
+class CollectionConfig:
     total_transitions: int
     num_envs: int  # more parallel data collection
     horizon: int  # also mcts max depth
     num_mcts_simulations: int  # stronger policy improvement
-    # two-hot value
+
+
+@dataclass(frozen=True)
+class ValueConfig:
     num_value_bins: int | Literal["scalar"]
     min_value: float
     max_value: float
-    # bootstrapping
+
+
+@dataclass(frozen=True)
+class BootstrapConfig:
     discount: float  # R2D2 standard
     lambda_gae: float
-    # optimization
+    target_update_freq: int  # in global iterations
+    target_update_size: float
+
+
+@dataclass(frozen=True)
+class OptimConfig:
     num_minibatches: int  # number of gradient descent updates per iteration
     batch_size: int  # reduce gradient variance
     lr_init: float
@@ -101,134 +106,210 @@ class TrainConfig:
     value_coef: float  # scale the value loss
     reward_coef: float  # scale the reward loss
     priority_exponent: float  # prioritized replay
-    # target
-    target_update_freq: int  # in global iterations
-    target_update_size: float
-    # evaluation
+
+
+@dataclass(frozen=True)
+class EvalConfig:
     warnings: bool
     num_evals: int
     num_eval_envs: int
 
 
-# minimal
-debug_config = dict(
-    arch=ArchConfig(rnn_size=1, mlp_size=1, mlp_depth=0),
-    total_transitions=100,
-    num_envs=1,
-    horizon=9,
-    num_value_bins="scalar",
-    num_mcts_simulations=1,
-    num_minibatches=1,
-    batch_size=1,
-    num_evals=1,
-    num_eval_envs=1,
-)
+@dataclass(frozen=True)
+class TrainConfig:
+    """Training parameters."""
+
+    env_name: str
+    arch: ArchConfig
+    collection: CollectionConfig
+    value: ValueConfig
+    bootstrap: BootstrapConfig
+    optim: OptimConfig
+    eval: EvalConfig
+
+    @classmethod
+    def from_dict(cls, *cfg_dicts: dict):
+        # merge dictionaries (take last)
+        cfg_dict = {}
+        for cfg in cfg_dicts:
+            for k, v in cfg.items():
+                if isinstance(v, dict):
+                    cfg_dict[k] = {**cfg_dict.get(k, {}), **v}
+                else:
+                    cfg_dict[k] = v
+
+        config = {}
+
+        for field in dc.fields(cls):
+            if field.name not in cfg_dict:
+                raise ValueError(f"Missing field {field.name}")
+
+            subcfg = cfg_dict[field.name]
+
+            if dc.is_dataclass(ConfigDC := field.type):
+                missing = {
+                    subfield.name for subfield in dc.fields(ConfigDC) if subfield.name not in subcfg
+                }
+                if missing:
+                    raise ValueError(f"Missing subfields for {field.name}: {', '.join(missing)}")
+                subcfg = ConfigDC(**subcfg)
+
+            config[field.name] = subcfg
+
+        config = cls(**config)
+        config.validate()
+        return config
+
+    def validate(self) -> None:
+        for field in dc.fields(self):
+            subcfg = getattr(self, field.name)
+            if dc.is_dataclass(ConfigDC := field.type):
+                for subfield in dc.fields(ConfigDC):
+                    value = getattr(subcfg, subfield.name)
+                    if isinstance(value, dict) and not self.generate_sweep:
+                        raise ValueError(
+                            "Dictionary values should only be passed when generating a sweep configuration with --generate_sweep. "
+                            f"Found {value} at {field.name}.{subfield.name}"
+                        )
 
 
 @dataclass(frozen=True)
-class SetupArgs:
-    """Command-line arguments."""
+class ExperimentConfig:
+    """Command-line arguments. Not included in train config."""
 
-    mode: Literal["debug", "run", "sweep", "agent"] = dc.field(
-        default="run", metadata={"cli": False}
+    # passed as positional arguments
+    config_path: tuple[str, ...] = dc.field(metadata={"nargs": "*"})
+    wandb_mode: Literal["online", "offline", "disabled"] = "offline"
+    sweep_method: str | None = None
+    generate_sweep: bool = dc.field(
+        default=False,
+        metadata={"help": "Output a wandb sweep configuration yaml instead of executing the run."},
     )
-    # agent only
-    sweep_id: str | None = dc.field(default=None, metadata={"cli": False})
-    num_sweep_runs: int | None = dc.field(default=None, metadata={"cli": False})
-    # other (training)
-    config_path: Path = Path(__file__).parent / "conf" / "catch.yaml"
-    wandb_mode: Literal["online", "offline", "disabled"] = "disabled"
-    wandb_project: str = "muzero"
+    agent: bool = dc.field(
+        default=False,
+        metadata={
+            "help": "Flag that indicates whether the script is being run as an agent. "
+            "Loads config from wandb instead of cli."
+        },
+    )
 
 
-def get_cli_args() -> tuple[SetupArgs, TrainConfig | None]:
-    """Command line interface.
+def get_cli_args() -> tuple[ExperimentConfig, TrainConfig | None]:
+    """Command line interface. Returns `None` if the `--agent` flag is passed."""
+    # construct parser. none of the arguments have default values to allow file composition
+    parser = argparse.ArgumentParser(
+        "muzero",
+        description="""Run the MuZero algorithm.
 
-    Config is loaded in the following order:
+Examples:
 
-    1. Defaults in this file
-    2. The passed yaml file
-    3. The debug arguments
-    3. Command line
+- python muzero.py conf/catch.yaml
 
-    Returns:
-        tuple[Args, TrainConfig | None]: The second value is None if mode is "agent".
-    """
-    parser = argparse.ArgumentParser("muzero", description="Run the MuZero algorithm")
+To run a sweep, first execute
 
-    subparsers = parser.add_subparsers(dest="mode", required=True)
-    sweep_prefix = "sweep."
-    for mode in ["debug", "run", "sweep", "agent"]:
-        subparser = subparsers.add_parser(mode)
-        args_subparser = subparser.add_argument_group("wandb etc")
-        if mode == "agent":
-            args_subparser.add_argument("sweep_id")
-            args_subparser.add_argument("--num_sweep_runs", "-n", type=int, default=1)
+python muzero.py conf/catch.yaml conf/catch_sweep.yaml --generate_sweep > sweep.yaml
+
+to save the wandb sweep configuration to sweep.yaml. Then run
+
+wandb sweep sweep.yaml
+
+to register the sweep to wandb.
+This will output a string of the form $PROJECT/$ENTITY/$SWEEP_ID.
+Then run
+
+wandb agent $PROJECT/$ENTITY/$SWEEP_ID
+""",
+    )
+    for field in dc.fields(TrainConfig):
+        if dc.is_dataclass(ConfigDC := field.type):
+            group_parser = parser.add_argument_group(ConfigDC.__name__)
+            for subfield in dc.fields(ConfigDC):
+                add_field_to_parser(group_parser, subfield)
         else:
-            add_dataclass_to_parser(args_subparser, SetupArgs)
-            training_parser = subparser.add_argument_group("training")
-            add_dataclass_to_parser(training_parser, TrainConfig)
-        if mode == "sweep":
-            sweep_parser = subparser.add_argument_group("sweep")
-            add_dataclass_to_parser(sweep_parser, TrainConfig, prefix=sweep_prefix, nargs=2)
-
+            add_field_to_parser(parser, field)
+    group_parser = parser.add_argument_group(ExperimentConfig.__name__)
+    for field in dc.fields(ExperimentConfig):
+        add_field_to_parser(field, group_parser)
     args = parser.parse_args()
-    setup_fields = {field.name for field in dc.fields(SetupArgs)}
-    setup_args = SetupArgs(
-        **{k: v for k, v in vars(args).items() if k in setup_fields and v is not None}
+
+    experiment_args = ExperimentConfig(
+        **{getattr(args, field.name, field.default) for field in dc.fields(ExperimentConfig)}
     )
-    if setup_args.mode == "agent":
-        return setup_args, None
 
-    with open(setup_args.config_path, "r") as f:
-        yaml_config = yaml.safe_load(f)
-    config = TrainConfig(**yaml_config)
+    if experiment_args.agent:
+        return experiment_args, None
 
-    if setup_args.mode == "debug":
-        config = dc.replace(config, **debug_config)
+    assert not experiment_args.generate_sweep or experiment_args.wandb_mode == "online", (
+        "wandb_mode must be 'online' when generating a sweep configuration with --generate_sweep"
+    )
 
-    # override with cli args
-    for key, value in vars(args).items():
-        if key.startswith(sweep_prefix):
-            key = key[len(sweep_prefix) :]
-        if key not in setup_fields and value is not None:
-            config = nestattr(config, key, value)
-    config = dc.replace(config, arch=ArchConfig(**config.arch))
-    return setup_args, config
+    assert len(experiment_args.config_path) > 0, (
+        "At least one config must be given unless running as agent"
+    )
 
+    # read from config files
+    cfg_dicts: list[dict] = []
+    for cfg_path in map(Path, experiment_args.config_path):
+        with cfg_path.open() as f:
+            if cfg_path.suffix == ".yaml":
+                cfg = yaml.safe_load(f)
+            elif cfg_path.suffix == ".json":
+                cfg = json.load(f)
+            else:
+                raise ValueError("Only JSON and YAML config files supported. Got " + cfg_path)
+            cfg_dicts.append(cfg)
 
-def add_dataclass_to_parser(
-    parser: argparse.ArgumentParser, cls: type, prefix: str = "", nargs=None
-) -> None:
-    """Adds all fields of a dataclass object as command-line arguments.
+    # reformat cli args into hierarchical format
+    args_cfg_dict = {}
+    for field in dc.fields(TrainConfig):
+        if dc.is_dataclass(ConfigDC := field.type):
+            args_cfg_dict[field.name] = {
+                subfield.name: value
+                for subfield in dc.fields(ConfigDC)
+                if (value := getattr(args, subfield.name, None)) is not None
+            }
+        elif (value := getattr(args, field.name, None)) is not None:
+            args_cfg_dict[field.name] = value
 
-    Doesn't set defaults on the command-line.
-    """
-    for field in dc.fields(cls):
-        arg_name = prefix + field.name
-        if not field.metadata.get("cli", True):
-            continue
-        if dc.is_dataclass(field.type):
-            add_dataclass_to_parser(parser, field.type, prefix=arg_name + ".")
-        elif get_origin(field.type) is Literal:
-            parser.add_argument(
-                "--" + arg_name, type=str, nargs=nargs, choices=get_args(field.type)
-            )
-        else:
-            parser.add_argument(
-                "--" + arg_name, type=field.type if callable(field.type) else None, nargs=nargs
-            )
+    return experiment_args, TrainConfig.from_dict(*cfg_dicts, args_cfg_dict)
 
 
-def nestattr(obj: object, key: str, value: object):
-    """Replace nested dataclass fields."""
-    idx = key.find(".")
-    if idx == -1:
-        return dc.replace(obj, **{key: value})
-    key, rest = key[:idx], key[idx + 1 :]
-    prop = getattr(obj, key)
-    prop = nestattr(prop, rest, value)
-    return dc.replace(obj, **{key: prop})
+def add_field_to_parser(parser: argparse.ArgumentParser, field: dc.Field) -> None:
+    nargs = field.metadata.get("nargs", None)
+    help = field.metadata.get("help", None)
+    if get_origin(field.type) is Literal:
+        parser.add_argument(
+            "--" + field.name,
+            type=str,
+            choices=get_args(field.type),
+            nargs=nargs,
+            help=help,
+        )
+    elif field.type is bool:
+        parser.add_argument(
+            "--" + field.name,
+            # don't set default
+            action="store_const",
+            const=True,
+            help=help,
+        )
+    elif nargs in ["*", "+"]:
+        assert get_origin(field.type) is tuple
+        tp, _ = get_args(field.type)
+        # make config_path positional
+        parser.add_argument(
+            field.name,
+            type=tp,
+            nargs=nargs,
+            help=help,
+        )
+    else:
+        parser.add_argument(
+            "--" + field.name,
+            type=field.type if callable(field.type) and nargs is None else None,
+            nargs=nargs,
+            help=help,
+        )
 
 
 class WorldModelRNN(eqx.Module):
@@ -419,10 +500,12 @@ class LossStatistics(NamedTuple):
 
 @jaxtyped(typechecker=typechecker)
 def make_train(config: TrainConfig):
-    num_iters = config.total_transitions // (config.num_envs * config.horizon)
-    max_horizon = num_iters * config.horizon
-    num_grad_updates = num_iters * config.num_minibatches
-    eval_freq = num_iters // config.num_evals
+    num_iters = config.collection.total_transitions // (
+        config.collection.num_envs * config.collection.horizon
+    )
+    max_horizon = num_iters * config.collection.horizon
+    num_grad_updates = num_iters * config.optim.num_minibatches
+    eval_freq = num_iters // config.eval.num_evals
 
     env, env_params = gymnax.make(config.env_name)
     env_params = env_params.replace(max_steps_in_episode=max_horizon)  # don't truncate
@@ -435,39 +518,39 @@ def make_train(config: TrainConfig):
     env_reset_batch = jax.vmap(env.reset, in_axes=(0, None))  # map over key
     env_step_batch = jax.vmap(env.step, in_axes=(0, 0, 0, None))  # map over key, state, action
 
-    lr = optax.cosine_decay_schedule(config.lr_init, num_grad_updates)
+    lr = optax.cosine_decay_schedule(config.optim.lr_init, num_grad_updates)
     optim = optax.chain(
-        optax.clip_by_global_norm(config.max_grad_norm),
+        optax.clip_by_global_norm(config.optim.max_grad_norm),
         optax.adamw(lr),
     )
 
     buffer = PrioritizedBuffer.new(
-        batch_size=config.num_envs,
+        batch_size=config.collection.num_envs,
         max_time=max_horizon,
-        horizon=config.horizon,
+        horizon=config.collection.horizon,
     )
 
     def logits_to_value(
         value_logits: Float[Array, " horizon num_value_bins"],
     ) -> Float[Array, " horizon"]:
         """Convert from logits for two-hot encoding to scalar values."""
-        if config.num_value_bins == "scalar":
+        if config.value.num_value_bins == "scalar":
             return value_logits
         else:
             return rlax.transform_from_2hot(
                 jax.nn.softmax(value_logits, axis=-1),
-                config.min_value,
-                config.max_value,
-                config.num_value_bins,
+                config.value.min_value,
+                config.value.max_value,
+                config.value.num_value_bins,
             )
 
     def value_to_probs(value: Float[Array, " horizon"]) -> Float[Array, " horizon num_value_bins"]:
         """Convert from scalar values to probabilities for two-hot encoding."""
-        if config.num_value_bins == "scalar":
+        if config.value.num_value_bins == "scalar":
             return value
         else:
             return rlax.transform_to_2hot(
-                value, config.min_value, config.max_value, config.num_value_bins
+                value, config.value.min_value, config.value.max_value, config.value.num_value_bins
             )
 
     def get_invalid_actions(env_state: gymnax.EnvState) -> Bool[Array, "num_actions"]:
@@ -496,7 +579,7 @@ def make_train(config: TrainConfig):
         print("=" * 25)
 
         init_obs, init_env_states = env_reset_batch(
-            jr.split(key_reset, config.num_envs), env_params
+            jr.split(key_reset, config.collection.num_envs), env_params
         )
 
         # initialize all state
@@ -504,17 +587,17 @@ def make_train(config: TrainConfig):
             config=config.arch,
             obs_size=init_obs.shape[-1],
             num_actions=num_actions,
-            num_value_bins=config.num_value_bins,
+            num_value_bins=config.value.num_value_bins,
             key=key_net,
         )
         init_params, net_static = eqx.partition(init_net, eqx.is_inexact_array)
         init_hiddens = jnp.broadcast_to(
-            init_net.world_model.init_hidden(), (config.num_envs, config.arch.rnn_size)
+            init_net.world_model.init_hidden(), (config.collection.num_envs, config.arch.rnn_size)
         )
         init_rollout_states = RolloutState(
             obs=init_obs,
             env_state=init_env_states,
-            initial=jnp.ones(config.num_envs, jnp.bool),
+            initial=jnp.ones(config.collection.num_envs, jnp.bool),
         )
         init_buffer_state = buffer.init(
             Transition(
@@ -561,24 +644,24 @@ def make_train(config: TrainConfig):
             )
             mean_return = jnp.mean(
                 env_states.episode_returns[
-                    jnp.arange(config.num_envs), env_states.current_index - 1
+                    jnp.arange(config.collection.num_envs), env_states.current_index - 1
                 ]
             )
             log_values({"iter/step": iter_state.step, "iter/mean_return": mean_return})
 
-            buffer_available = buffer.num_available(buffer_state) >= config.batch_size
+            buffer_available = buffer.num_available(buffer_state) >= config.optim.batch_size
 
             @exec_loop(
                 iter_state.param_state._replace(buffer_state=buffer_state),
-                config.num_minibatches,
+                config.optim.num_minibatches,
                 key_optim,
                 cond=buffer_available,
             )
             def optimize_step(param_state: ParamState, key: Key[Array, ""]):
                 batch = jax.vmap(buffer.sample, in_axes=(None, 0, None))(
                     param_state.buffer_state,
-                    jr.split(key, config.batch_size),
-                    config.warnings,
+                    jr.split(key, config.optim.batch_size),
+                    config.eval.warnings,
                 )
                 trajectories: Batched[Transition, "batch_size horizon"] = batch.experience
 
@@ -587,7 +670,7 @@ def make_train(config: TrainConfig):
                     def debug(batch, free):
                         """Flashbax returns zero when JAX_ENABLE_X64 is not set."""
                         trajectories = batch.experience
-                        for i in range(config.batch_size):
+                        for i in range(config.optim.batch_size):
                             weights = trajectories.mcts_probs[i]
                             if not jnp.allclose(jnp.sum(weights, axis=-1), 1) and not jnp.all(
                                 jnp.isnan(weights)
@@ -608,7 +691,7 @@ def make_train(config: TrainConfig):
                     losses, aux = loss_trajectory(
                         params, iter_state.target_params, trajectories, net_static
                     )
-                    chex.assert_shape(losses, (config.batch_size,))
+                    chex.assert_shape(losses, (config.optim.batch_size,))
                     # TODO add importance reweighting
                     return jnp.mean(losses), aux
 
@@ -624,7 +707,7 @@ def make_train(config: TrainConfig):
                 buffer_state = buffer.set_priorities(
                     param_state.buffer_state,
                     batch.idx,
-                    priorities**config.priority_exponent,
+                    priorities**config.optim.priority_exponent,
                 )
 
                 log_values(
@@ -644,8 +727,8 @@ def make_train(config: TrainConfig):
 
             target_params = jax.tree.map(
                 lambda online, target: jnp.where(
-                    iter_state.step % config.target_update_freq == 0,
-                    optax.incremental_update(online, target, config.target_update_size),
+                    iter_state.step % config.bootstrap.target_update_freq == 0,
+                    optax.incremental_update(online, target, config.bootstrap.target_update_size),
                     target,
                 ),
                 param_state.params,
@@ -655,7 +738,7 @@ def make_train(config: TrainConfig):
             # evaluate every eval_freq steps
             eval_return = jax.lax.cond(
                 (iter_state.step % eval_freq == 0) & buffer_available,
-                ft.partial(evaluate, num_envs=config.num_eval_envs, net_static=net_static),
+                ft.partial(evaluate, num_envs=config.eval.num_eval_envs, net_static=net_static),
                 lambda *_: -jnp.inf,  # avoid nan to support debugging
                 # cond only accepts positional arguments
                 param_state.params,
@@ -671,13 +754,13 @@ def make_train(config: TrainConfig):
                 "mean return {mean_return}",
                 step=iter_state.step,
                 num_iters=num_iters,
-                transitions=param_state.buffer_state.pos * config.num_envs,
-                total_transitions=config.total_transitions,
+                transitions=param_state.buffer_state.pos * config.collection.num_envs,
+                total_transitions=config.collection.total_transitions,
                 full=param_state.buffer_state.pos >= buffer.max_time,
                 mean_return=mean_return,
             )
 
-            if config.warnings:
+            if config.eval.warnings:
                 valid = jax.tree.map(lambda x: jnp.any(jnp.isnan(x)), param_state.params)
 
                 @ft.partial(jax.debug.callback, valid=valid)
@@ -700,7 +783,7 @@ def make_train(config: TrainConfig):
         init_rollout_state: Batched[RolloutState, "num_envs"],
         key: Key[Array, ""],
     ) -> tuple[Batched[RolloutState, "num_envs"], Batched[Transition, "num_envs horizon"]]:
-        @exec_loop(init_rollout_state, config.horizon, key)
+        @exec_loop(init_rollout_state, config.collection.horizon, key)
         def rollout_step(rollout_states: Batched[RolloutState, "num_envs"], key: Key[Array, ""]):
             key_action, key_step = jr.split(key)
 
@@ -762,7 +845,7 @@ def make_train(config: TrainConfig):
             return mctx.RecurrentFnOutput(
                 reward=logits_to_value(rewards),
                 # TODO termination
-                discount=jnp.full(actions.shape[0], config.discount),
+                discount=jnp.full(actions.shape[0], config.bootstrap.discount),
                 prior_logits=preds.policy_logits,
                 value=logits_to_value(preds.value_logits),
             ), hiddens
@@ -772,9 +855,9 @@ def make_train(config: TrainConfig):
             rng_key=key,
             root=root,
             recurrent_fn=mcts_recurrent_fn,
-            num_simulations=config.num_mcts_simulations,
+            num_simulations=config.collection.num_mcts_simulations,
             invalid_actions=invalid_actions,
-            max_depth=config.horizon,
+            max_depth=config.collection.horizon,
         )
 
         return preds, out
@@ -798,9 +881,9 @@ def make_train(config: TrainConfig):
             rlax.lambda_returns, (0, 0, 0, None)
         )(
             reward_rolled[:, :-1],
-            jnp.where(initial_rolled[:, 1:], 0.0, config.discount),
+            jnp.where(initial_rolled[:, 1:], 0.0, config.bootstrap.discount),
             value[:, 1:],
-            config.lambda_gae,
+            config.bootstrap.lambda_gae,
         )
 
         return pred, bootstrapped_return
@@ -835,7 +918,7 @@ def make_train(config: TrainConfig):
 
         # value loss
         online_value = logits_to_value(online_pred.value_logits)
-        if config.num_value_bins == "scalar":
+        if config.value.num_value_bins == "scalar":
             value_losses = rlax.l2_loss(
                 predictions=online_value[:-1, :-1],
                 targets=bootstrapped_return[:-1, :],
@@ -856,7 +939,7 @@ def make_train(config: TrainConfig):
 
         # reward model loss
         reward_rolled = roll_into_matrix(trajectory.reward)
-        if config.num_value_bins == "scalar":
+        if config.value.num_value_bins == "scalar":
             reward_losses = rlax.l2_loss(predictions=online_reward, targets=reward_rolled)
         else:
             reward_losses = rlax.categorical_cross_entropy(
@@ -876,7 +959,11 @@ def make_train(config: TrainConfig):
         value_loss = jnp.mean(value_losses * mask[:-1, :-1], where=mask[:-1, :-1] > 0)
         reward_loss = jnp.mean(reward_losses * mask, where=mask > 0)
 
-        loss = policy_loss + config.value_coef * value_loss + config.reward_coef * reward_loss
+        loss = (
+            policy_loss
+            + config.optim.value_coef * value_loss
+            + config.optim.reward_coef * reward_loss
+        )
 
         # logging
         mcts_dist = distrax.Categorical(probs=mcts_probs_rolled)
@@ -926,7 +1013,7 @@ def make_train(config: TrainConfig):
             initial=jnp.ones(num_envs, dtype=bool),
         )
 
-        @exec_loop(init_rollout_states, config.horizon, key_rollout)
+        @exec_loop(init_rollout_states, config.collection.horizon, key_rollout)
         def rollout_step(rollout_states: Batched[RolloutState, "num_envs"], key: Key[Array, ""]):
             key_action, key_step, key_mcts = jr.split(key, 3)
 
@@ -1028,7 +1115,7 @@ def make_train(config: TrainConfig):
 
         fig_width = 3
         rows_per_env = 2
-        if config.num_value_bins != "scalar":
+        if config.value.num_value_bins != "scalar":
             rows_per_env += 1
         num_envs, horizon = trajectories.reward.shape
 
@@ -1055,7 +1142,7 @@ def make_train(config: TrainConfig):
                 trajectories.mcts_probs[i],
             )
 
-            if config.num_value_bins != "scalar":
+            if config.value.num_value_bins != "scalar":
                 ax_value: Axes = ax[rows_per_env * i + j]
                 j += 1
                 ax_value.set_title(f"Trajectory {i} Value and Bootstrapped")
@@ -1079,7 +1166,7 @@ def make_train(config: TrainConfig):
                 )
                 ax_stats.legend(loc="center left", bbox_to_anchor=(1, 0.5))
                 ax_policy.legend(loc="upper center", bbox_to_anchor=(0.5, 1.20), ncol=3)
-                if config.num_value_bins != "scalar":
+                if config.value.num_value_bins != "scalar":
                     ax_value.legend(loc="upper center", bbox_to_anchor=(0.5, 1.20), ncol=3)
 
         # use wandb.Image since otherwise wandb uses plotly,
@@ -1137,13 +1224,13 @@ def make_train(config: TrainConfig):
         mcts_dist = distrax.Categorical(probs=trajectory.mcts_probs)
         ax.plot(horizon, policy_dist.entropy(), "b:", label="policy entropy")
         ax.plot(horizon, mcts_dist.entropy(), "g:", label="MCTS entropy")
-        if config.num_value_bins != "scalar":
+        if config.value.num_value_bins != "scalar":
             value_dist = distrax.Categorical(logits=trajectory.pred.value_logits)
             ax.plot(horizon, value_dist.entropy(), "y:", label="value entropy")
 
         # loss
         ax.plot(horizon, mcts_dist.kl_divergence(policy_dist), "c--", label="policy / mcts kl")
-        if config.num_value_bins != "scalar":
+        if config.value.num_value_bins != "scalar":
             bootstrapped_dist = distrax.Categorical(probs=value_to_probs(bootstrapped_return))
             value_loss = bootstrapped_dist.kl_divergence(value_dist[:-1])
             ax.plot(horizon[:-1], value_loss, "r--", label="value / bootstrap kl")
@@ -1152,7 +1239,7 @@ def make_train(config: TrainConfig):
             ax.plot(horizon[:-1], value_loss, "r--", label="value / bootstrap l2")
 
         ax.set_xticks(horizon, horizon)
-        ax.set_ylim(config.min_value, config.max_value)
+        ax.set_ylim(config.value.min_value, config.value.max_value)
 
     def plot_compare_dists(
         ax: Axes, p0: Float[Array, " horizon n"], p1: Float[Array, " horizon n"]
@@ -1174,60 +1261,58 @@ def make_train(config: TrainConfig):
     return train
 
 
+def generate_sweep_config(experiment_config: ExperimentConfig, config: TrainConfig):
+    """Generates the wandb sweep config. Does not upload to wandb."""
+    sweep_params = set()
+    parameters = {}
+    for field in dc.fields(TrainConfig):
+        subcfg = getattr(config, field.name)
+        if dc.is_dataclass(ConfigDC := field.type):
+            obj = {}
+            for subfield in dc.fields(ConfigDC):
+                value = getattr(subcfg, subfield.name)
+                if isinstance(value, dict):
+                    sweep_params.add(subfield.name)
+                    obj[subfield.name] = value
+                else:
+                    obj[subfield.name] = {"value": value}
+            obj = dict(parameters=obj)  # wandb nested parameters
+        elif isinstance(subcfg, dict):
+            sweep_params.add(field.name)
+            obj = subcfg
+        else:
+            obj = {"value": subcfg}
+        parameters[field.name] = obj
+
+    return {
+        "program": "muzero.py",
+        "method": experiment_config.sweep_method,
+        "name": f"sweep {config.env_name} {' '.join(sweep_params)}",
+        "metric": {"goal": "maximize", "name": "eval/mean_return"},
+        "parameters": parameters,
+        "command": [
+            r"${env}",
+            r"${interpreter}",
+            r"${program}",
+            r"--agent",
+        ],
+    }
+
+
 if __name__ == "__main__":
-    setup_args, config = get_cli_args()
+    experiment_config, config = get_cli_args()
     seed = 0
 
-    if setup_args.mode == "sweep":
-        if setup_args.wandb_mode != "online":
-            raise ValueError("Sweep mode requires WANDB_MODE to be 'online'")
+    if config is not None and experiment_config.generate_sweep:
+        yaml.safe_dump(generate_sweep_config(experiment_config, config), sys.stdout)
 
-        sweep_config = {
-            "method": "random",
-            "metric": {"goal": "maximize", "name": "sweep/mean_reward"},
-            "parameters": {
-                k: {"min": v[0], "max": v[1]} if isinstance(v, list) else {"value": v}
-                for k, v in dc.asdict(config).items()
-                if v is not None
-            },
-        }
-        yaml.safe_dump(sweep_config, sys.stdout)
-        wandb.sweep(sweep_config, project=setup_args.wandb_project)
-
-    elif setup_args.mode == "agent":
-
-        def sweep_main():
-            """Main function for wandb sweeps."""
-            with wandb.init(project=setup_args.wandb_project):
-                config = wandb.config.as_dict()
-                arch = config.pop("arch")
-                train = make_train(TrainConfig(**config, arch=ArchConfig(**arch)))
-                _, eval_returns = jax.jit(train)(jr.key(seed))
-                print(eval_returns)
-                final_eval_return = eval_returns[~jnp.isneginf(eval_returns)][-1]
-                wandb.log({"sweep/mean_reward": final_eval_return})
-            print(f"Done sweep run. {final_eval_return=}")
-
-        wandb.agent(
-            setup_args.sweep_id,
-            function=sweep_main,
-            project=setup_args.wandb_project,
-            count=setup_args.num_sweep_runs,
-        )
-
-    elif setup_args.mode == "debug":
-        train = make_train(debug_config)
-        with jax.disable_jit():
-            output = train(jr.key(seed))
-        jax.block_until_ready(output)
-
-    elif setup_args.mode == "run":
-        train = make_train(config)
+    else:
         with wandb.init(
-            project=setup_args.wandb_project,
-            config=dc.asdict(config),
-            mode=setup_args.wandb_mode,
-        ) as sweep_main:
+            mode=config.wandb_mode,
+            config=dc.asdict(config) if not config.agent else None,
+        ) as run:
+            config = TrainConfig.from_dict(wandb.config.as_dict())
+            train = make_train(config)
             output = jax.jit(train)(jr.key(seed))
             # with jax.profiler.trace(f"/tmp/{WANDB_PROJECT}-trace", create_perfetto_link=True):
             _, mean_eval_reward = jax.block_until_ready(output)

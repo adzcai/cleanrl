@@ -1,0 +1,12 @@
+experiment:
+  wandb_mode: online
+  sweep_method: random
+
+value:
+  num_value_bins:
+    values: [5, 6, 7]
+
+optim:
+  lr_init:
+    min: 0.0001
+    max: 0.01
