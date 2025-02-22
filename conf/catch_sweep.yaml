@@ -1,5 +1,4 @@
 experiment:
-  wandb_mode: online
   sweep_method: random
 
 value:

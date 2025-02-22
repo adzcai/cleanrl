@@ -1,12 +1,4 @@
-"""Implementation of AlphaZero with a recurrent actor-critic network.
-
-1. Config
-2. Data structures for loop carries
-3. Model definitions
-4. Training loop
-5. Rollout function
-6. Evaluation function
-"""
+"""Implementation of AlphaZero with a recurrent actor-critic network."""
 
 # jax
 import jax
@@ -46,6 +38,7 @@ from typing import TYPE_CHECKING, Literal, NamedTuple, Annotated as Batched, get
 import argparse
 from pathlib import Path
 import dataclasses as dc
+from collections import defaultdict
 import functools as ft
 from log_util import (
     exec_loop,
@@ -63,19 +56,56 @@ else:
 
 matplotlib.use("agg")  # enable plotting inside jax callback
 
+CLI_DESCRIPTION = """See below for arguments and usage examples.
+
+RUNNING
+-------
+To run the algorithm,
+create a yaml file matching the required config and run
+
+    python muzero.py $CONFIG_YAML
+
+SWEEPS
+------
+To run a wandb sweep, first execute
+
+    python muzero.py $CONFIG_YAML --generate_sweep > sweep.yaml
+
+to save the wandb sweep configuration to sweep.yaml. Then run
+
+    wandb sweep sweep.yaml
+
+to register the sweep to wandb.
+This will output a string of the form $PROJECT/$ENTITY/$SWEEP_ID. Then run
+
+    wandb agent $PROJECT/$ENTITY/$SWEEP_ID --count $COUNT
+
+to run an agent.
+
+WANDB
+-----
+We do not provide explicit commands for configuring wandb.
+You can control wandb using its environment variables (https://docs.wandb.ai/guides/track/environment-variables/)
+or by running
+
+    wandb init --project $PROJECT --entity $ENTITY
+
+before launching any sweeps and agents."""
+
 
 @dataclass(frozen=True)
 class ArchConfig:
     """Network architecture"""
 
-    rnn_size: int = 128
-    mlp_size: int = 64
-    mlp_depth: int = 1
-    activation: str = "relu"
+    rnn_size: int
+    mlp_size: int
+    mlp_depth: int
+    activation: str
 
 
 @dataclass(frozen=True)
 class CollectionConfig:
+    env_name: str
     total_transitions: int
     num_envs: int  # more parallel data collection
     horizon: int  # also mcts max depth
@@ -116,71 +146,12 @@ class EvalConfig:
 
 
 @dataclass(frozen=True)
-class TrainConfig:
-    """Training parameters."""
-
-    env_name: str
-    arch: ArchConfig
-    collection: CollectionConfig
-    value: ValueConfig
-    bootstrap: BootstrapConfig
-    optim: OptimConfig
-    eval: EvalConfig
-
-    @classmethod
-    def from_dict(cls, *cfg_dicts: dict):
-        # merge dictionaries (take last)
-        cfg_dict = {}
-        for cfg in cfg_dicts:
-            for k, v in cfg.items():
-                if isinstance(v, dict):
-                    cfg_dict[k] = {**cfg_dict.get(k, {}), **v}
-                else:
-                    cfg_dict[k] = v
-
-        config = {}
-
-        for field in dc.fields(cls):
-            if field.name not in cfg_dict:
-                raise ValueError(f"Missing field {field.name}")
-
-            subcfg = cfg_dict[field.name]
-
-            if dc.is_dataclass(ConfigDC := field.type):
-                missing = {
-                    subfield.name for subfield in dc.fields(ConfigDC) if subfield.name not in subcfg
-                }
-                if missing:
-                    raise ValueError(f"Missing subfields for {field.name}: {', '.join(missing)}")
-                subcfg = ConfigDC(**subcfg)
-
-            config[field.name] = subcfg
-
-        config = cls(**config)
-        config.validate()
-        return config
-
-    def validate(self) -> None:
-        for field in dc.fields(self):
-            subcfg = getattr(self, field.name)
-            if dc.is_dataclass(ConfigDC := field.type):
-                for subfield in dc.fields(ConfigDC):
-                    value = getattr(subcfg, subfield.name)
-                    if isinstance(value, dict) and not self.generate_sweep:
-                        raise ValueError(
-                            "Dictionary values should only be passed when generating a sweep configuration with --generate_sweep. "
-                            f"Found {value} at {field.name}.{subfield.name}"
-                        )
-
-
-@dataclass(frozen=True)
 class ExperimentConfig:
-    """Command-line arguments. Not included in train config."""
+    """Command-line arguments."""
 
-    # passed as positional arguments
-    config_path: tuple[str, ...] = dc.field(metadata={"nargs": "*"})
-    wandb_mode: Literal["online", "offline", "disabled"] = "offline"
-    sweep_method: str | None = None
+    seed: int = 0
+    config_path: tuple[str, ...] = dc.field(default=(), metadata={"nargs": "*"})
+    sweep_method: Literal["grid", "random", "bayes"] = "random"
     generate_sweep: bool = dc.field(
         default=False,
         metadata={"help": "Output a wandb sweep configuration yaml instead of executing the run."},
@@ -194,84 +165,90 @@ class ExperimentConfig:
     )
 
 
-def get_cli_args() -> tuple[ExperimentConfig, TrainConfig | None]:
+@dataclass(frozen=True)
+class TrainConfig:
+    """Training parameters."""
+
+    arch: ArchConfig
+    collection: CollectionConfig
+    value: ValueConfig
+    bootstrap: BootstrapConfig
+    optim: OptimConfig
+    eval: EvalConfig
+    experiment: ExperimentConfig
+
+    @classmethod
+    def from_dict(cls, args: dict):
+        """Construct a TrainConfig from the merged cli argument dictionary.
+
+        Args:
+            args (dict): The nested dictionary of cli args.
+
+        Returns:
+            TrainConfig: The args packaged into a TrainConfig dataclass.
+        """
+        config = {}
+        for field in dc.fields(cls):
+            if field.name not in args:
+                raise ValueError(f"Missing field {field.name}")
+            subcfg = args[field.name]
+            missing = {
+                subfield.name
+                for subfield in dc.fields(field.type)
+                if subfield.default == dc.MISSING and subfield.name not in subcfg
+            }
+            if missing:
+                raise ValueError(f"Missing subfields for {field.name}: {', '.join(missing)}")
+            config[field.name] = field.type(**subcfg)
+        config = cls(**config)
+        config.validate()
+        return config
+
+    def validate(self) -> None:
+        for field in dc.fields(self):
+            subcfg = getattr(self, field.name)
+            for subfield in dc.fields(field.type):
+                value = getattr(subcfg, subfield.name)
+                if isinstance(value, dict) and not self.experiment.generate_sweep:
+                    raise ValueError(
+                        "Dictionary values should only be passed when generating a sweep configuration with --generate_sweep. "
+                        f"Found {value} at {field.name}.{subfield.name}"
+                    )
+
+
+def get_cli_args() -> dict:
     """Command line interface. Returns `None` if the `--agent` flag is passed."""
     # construct parser. none of the arguments have default values to allow file composition
-    parser = argparse.ArgumentParser(
-        "muzero",
-        description="""Run the MuZero algorithm.
-
-Examples:
-
-- python muzero.py conf/catch.yaml
-
-To run a sweep, first execute
-
-python muzero.py conf/catch.yaml conf/catch_sweep.yaml --generate_sweep > sweep.yaml
-
-to save the wandb sweep configuration to sweep.yaml. Then run
-
-wandb sweep sweep.yaml
-
-to register the sweep to wandb.
-This will output a string of the form $PROJECT/$ENTITY/$SWEEP_ID.
-Then run
-
-wandb agent $PROJECT/$ENTITY/$SWEEP_ID
-""",
-    )
+    parser = argparse.ArgumentParser("muzero", usage=CLI_DESCRIPTION)
     for field in dc.fields(TrainConfig):
-        if dc.is_dataclass(ConfigDC := field.type):
-            group_parser = parser.add_argument_group(ConfigDC.__name__)
-            for subfield in dc.fields(ConfigDC):
-                add_field_to_parser(group_parser, subfield)
-        else:
-            add_field_to_parser(parser, field)
-    group_parser = parser.add_argument_group(ExperimentConfig.__name__)
-    for field in dc.fields(ExperimentConfig):
-        add_field_to_parser(field, group_parser)
+        group_parser = parser.add_argument_group(field.type.__name__)
+        for subfield in dc.fields(field.type):
+            add_field_to_parser(group_parser, subfield)
     args = parser.parse_args()
 
-    experiment_args = ExperimentConfig(
-        **{getattr(args, field.name, field.default) for field in dc.fields(ExperimentConfig)}
-    )
-
-    if experiment_args.agent:
-        return experiment_args, None
-
-    assert not experiment_args.generate_sweep or experiment_args.wandb_mode == "online", (
-        "wandb_mode must be 'online' when generating a sweep configuration with --generate_sweep"
-    )
-
-    assert len(experiment_args.config_path) > 0, (
-        "At least one config must be given unless running as agent"
-    )
+    # read hierarchical structure into cfg_dict
+    cfg_dict = defaultdict(dict)
 
     # read from config files
-    cfg_dicts: list[dict] = []
-    for cfg_path in map(Path, experiment_args.config_path):
+    for cfg_path in map(Path, args.config_path):
         with cfg_path.open() as f:
             if cfg_path.suffix == ".yaml":
-                cfg = yaml.safe_load(f)
+                cfg: dict = yaml.safe_load(f)
             elif cfg_path.suffix == ".json":
                 cfg = json.load(f)
             else:
                 raise ValueError("Only JSON and YAML config files supported. Got " + cfg_path)
-            cfg_dicts.append(cfg)
+        for k, subcfg in cfg.items():
+            cfg_dict[k] |= subcfg
 
-    # reformat cli args into hierarchical format
-    args_cfg_dict = {}
     for field in dc.fields(TrainConfig):
-        if dc.is_dataclass(ConfigDC := field.type):
-            args_cfg_dict[field.name] = {
-                subfield.name: value
-                for subfield in dc.fields(ConfigDC)
-                if (value := getattr(args, subfield.name, None)) is not None
-            }
-        elif (value := getattr(args, field.name, None)) is not None:
-            args_cfg_dict[field.name] = value
+        cfg_dict[field.name] |= {
+            subfield.name: subcfg
+            for subfield in dc.fields(field.type)
+            if (subcfg := getattr(args, subfield.name, None)) is not None
+        }
 
-    return experiment_args, TrainConfig.from_dict(*cfg_dicts, args_cfg_dict)
+    return cfg_dict
 
 
 def add_field_to_parser(parser: argparse.ArgumentParser, field: dc.Field) -> None:
@@ -507,7 +484,7 @@ def make_train(config: TrainConfig):
     num_grad_updates = num_iters * config.optim.num_minibatches
     eval_freq = num_iters // config.eval.num_evals
 
-    env, env_params = gymnax.make(config.env_name)
+    env, env_params = gymnax.make(config.collection.env_name)
     env_params = env_params.replace(max_steps_in_episode=max_horizon)  # don't truncate
     obs_shape = env.observation_space(env_params).shape  # for visualization
     action_space = env.action_space(env_params)
@@ -1060,7 +1037,7 @@ def make_train(config: TrainConfig):
             jax.vmap(visualize_catch, in_axes=(None, 0, 0))(
                 obs_shape, trajectories.rollout_state.env_state, obs_grads
             )
-            if config.env_name == "Catch-bsuite"
+            if config.collection.env_name == "Catch-bsuite"
             else None,
             prefix="eval",
         )
@@ -1261,33 +1238,26 @@ def make_train(config: TrainConfig):
     return train
 
 
-def generate_sweep_config(experiment_config: ExperimentConfig, config: TrainConfig):
+def generate_sweep_config(config: TrainConfig):
     """Generates the wandb sweep config. Does not upload to wandb."""
     sweep_params = set()
     parameters = {}
     for field in dc.fields(TrainConfig):
         subcfg = getattr(config, field.name)
-        if dc.is_dataclass(ConfigDC := field.type):
-            obj = {}
-            for subfield in dc.fields(ConfigDC):
-                value = getattr(subcfg, subfield.name)
-                if isinstance(value, dict):
-                    sweep_params.add(subfield.name)
-                    obj[subfield.name] = value
-                else:
-                    obj[subfield.name] = {"value": value}
-            obj = dict(parameters=obj)  # wandb nested parameters
-        elif isinstance(subcfg, dict):
-            sweep_params.add(field.name)
-            obj = subcfg
-        else:
-            obj = {"value": subcfg}
-        parameters[field.name] = obj
+        obj = {}
+        for subfield in dc.fields(field.type):
+            value = getattr(subcfg, subfield.name)
+            if isinstance(value, dict):
+                sweep_params.add(subfield.name)
+                obj[subfield.name] = value
+            else:
+                obj[subfield.name] = {"value": value}
+        parameters[field.name] = dict(parameters=obj)  # wandb nested parameters
 
     return {
         "program": "muzero.py",
-        "method": experiment_config.sweep_method,
-        "name": f"sweep {config.env_name} {' '.join(sweep_params)}",
+        "method": config.experiment.sweep_method,
+        "name": f"sweep {config.collection.env_name} {' '.join(sweep_params)}",
         "metric": {"goal": "maximize", "name": "eval/mean_return"},
         "parameters": parameters,
         "command": [
@@ -1299,22 +1269,24 @@ def generate_sweep_config(experiment_config: ExperimentConfig, config: TrainConf
     }
 
 
-if __name__ == "__main__":
-    experiment_config, config = get_cli_args()
-    seed = 0
-
-    if config is not None and experiment_config.generate_sweep:
-        yaml.safe_dump(generate_sweep_config(experiment_config, config), sys.stdout)
+def main(args: dict):
+    experiment = ExperimentConfig(**args["experiment"])
+    if experiment.generate_sweep:
+        sweep_config = generate_sweep_config(TrainConfig.from_dict(args))
+        yaml.safe_dump(sweep_config, sys.stdout)
 
     else:
-        with wandb.init(
-            mode=config.wandb_mode,
-            config=dc.asdict(config) if not config.agent else None,
-        ) as run:
+        with wandb.init(config=None if experiment.agent else args):
+            del experiment
             config = TrainConfig.from_dict(wandb.config.as_dict())
             train = make_train(config)
-            output = jax.jit(train)(jr.key(seed))
+            output = jax.jit(train)(jr.key(config.experiment.seed))
             # with jax.profiler.trace(f"/tmp/{WANDB_PROJECT}-trace", create_perfetto_link=True):
             _, mean_eval_reward = jax.block_until_ready(output)
             mean_eval_reward = mean_eval_reward[mean_eval_reward != -jnp.inf]
         print(f"Done training. {mean_eval_reward=}")
+
+
+if __name__ == "__main__":
+    args = get_cli_args()
+    main(args)
