@@ -71,6 +71,7 @@ class CollectionConfig:
     num_envs: int  # more parallel data collection
     horizon: int  # also mcts max depth
     num_mcts_simulations: int  # stronger policy improvement
+    num_goals: int
 
 
 @dataclass(frozen=True)
@@ -124,6 +125,7 @@ class WorldModelRNN(eqx.Module):
     Takes (hidden, action) -> (hidden, reward).
     """
 
+    num_goals: Integer[Array, ""]
     cell: eqx.nn.GRUCell
     reward_head: eqx.nn.MLP
 
@@ -132,13 +134,15 @@ class WorldModelRNN(eqx.Module):
         config: ArchConfig,
         num_actions: int,
         num_value_bins: int | Literal["scalar"],
+        num_goals: int,
         *,
         key: Key[Array, ""],
     ):
         key_cell, key_reward = jr.split(key)
+        self.num_goals = num_goals
         self.cell = eqx.nn.GRUCell(num_actions, config.rnn_size, key=key_cell)
         self.reward_head = eqx.nn.MLP(
-            config.rnn_size,
+            config.rnn_size + num_goals,
             num_value_bins,
             config.mlp_size,
             config.mlp_depth,
@@ -147,13 +151,17 @@ class WorldModelRNN(eqx.Module):
         )
 
     def step(
-        self, hidden: Float[Array, " rnn_size"], action: Integer[Array, ""]
+        self,
+        hidden: Float[Array, " rnn_size"],
+        action: Integer[Array, ""],
+        goal: Integer[Array, ""],
     ) -> tuple[Float[Array, " rnn_size"], Float[Array, " num_value_bins"]]:
         """Transitions to the next embedding and emits predicted reward."""
         # TODO handle continue predictor
         action = jax.nn.one_hot(action, self.cell.input_size)
         hidden = self.cell(action, hidden)
-        return hidden, self.reward_head(hidden)
+        goal = jax.nn.one_hot(goal, self.num_goals)
+        return hidden, self.reward_head(jnp.concat([hidden, goal]))
 
     def init_hidden(self):
         return jnp.zeros(self.cell.hidden_size)
@@ -175,12 +183,14 @@ class ActorCritic(eqx.Module):
         config: ArchConfig,
         num_actions: int,
         num_value_bins: int | Literal["scalar"],
+        num_goals: int,
         *,
         key: Key[Array, ""],
     ):
         key_policy, key_value = jr.split(key)
+        self.num_goals = num_goals
         self.policy_head = eqx.nn.MLP(
-            config.rnn_size,
+            config.rnn_size + num_goals,
             num_actions,
             config.mlp_size,
             config.mlp_depth,
@@ -188,7 +198,7 @@ class ActorCritic(eqx.Module):
             key=key_policy,
         )
         self.value_head = eqx.nn.MLP(
-            config.rnn_size,
+            config.rnn_size + num_goals,
             num_value_bins,
             config.mlp_size,
             config.mlp_depth,
@@ -196,9 +206,11 @@ class ActorCritic(eqx.Module):
             key=key_value,
         )
 
-    def __call__(self, hidden: Float[Array, " rnn_size"]):
+    def __call__(self, hidden: Float[Array, " rnn_size"], goal: Integer[Array, ""]):
         """Predict action and value logits from the hidden state."""
-        return Prediction(self.policy_head(hidden), self.value_head(hidden))
+        goal = jax.nn.one_hot(goal, self.num_goals)
+        input = jnp.concat([hidden, goal])
+        return Prediction(self.policy_head(input), self.value_head(input))
 
 
 class MuZeroNetwork(eqx.Module):
@@ -214,6 +226,7 @@ class MuZeroNetwork(eqx.Module):
         obs_size: int,
         num_actions: int,
         num_value_bins: int,
+        num_goals: int,
         *,
         key: Key[Array, ""],
     ):
@@ -230,25 +243,37 @@ class MuZeroNetwork(eqx.Module):
             config=config,
             num_actions=num_actions,
             num_value_bins=num_value_bins,
+            num_goals=num_goals,
             key=key_world_model,
         )
         self.actor_critic = ActorCritic(
             config=config,
             num_actions=num_actions,
             num_value_bins=num_value_bins,
+            num_goals=num_goals,
             key=key_actor_critic,
         )
 
-    def __call__(self, obs: Float[Array, " obs_size"], action: Integer[Array, " horizon"]):
+    def __call__(
+        self,
+        obs: Float[Array, " obs_size"],
+        action: Integer[Array, " horizon"],
+        goal: Integer[Array, ""],
+    ):
         return jax.lax.scan(
-            lambda hidden, action: self.step(hidden, action),
+            lambda hidden, action: self.step(hidden, action, goal),
             self.projection(obs),
             action,
         )
 
-    def step(self, hidden: Float[Array, " rnn_size"], action: Integer[Array, ""]):
-        pred = self.actor_critic(hidden)
-        hidden, reward = self.world_model.step(hidden, action)
+    def step(
+        self,
+        hidden: Float[Array, " rnn_size"],
+        action: Integer[Array, ""],
+        goal: Integer[Array, ""],
+    ):
+        pred = self.actor_critic(hidden, goal)
+        hidden, reward = self.world_model.step(hidden, action, goal)
         return hidden, (reward, pred)
 
 
@@ -393,6 +418,7 @@ def make_train(config: TrainConfig):
             obs_size=init_obs.shape[-1],
             num_actions=num_actions,
             num_value_bins=config.value.num_value_bins,
+            num_goals=config.collection.num_goals,
             key=key_net,
         )
         init_params, net_static = eqx.partition(init_net, eqx.is_inexact_array)

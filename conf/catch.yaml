@@ -10,6 +10,7 @@ collection:
   num_envs: 64
   horizon: 9
   num_mcts_simulations: 4
+  num_goals: 1
 
 value:
   num_value_bins: 7

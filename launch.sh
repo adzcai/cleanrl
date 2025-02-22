@@ -1,15 +1,11 @@
 #!/bin/bash
-#SBATCH --job-name          muzero
 #SBATCH --partition         gpu_requeue
-#SBATCH --array             1-4
-#SBATCH --nodes             1
-#SBATCH --ntasks-per-node   1
+#SBATCH --array             0-7
 #SBATCH --gpus              1
-#SBATCH --cpus-per-task     1
-#SBATCH --time              0-00:40
-#SBATCH --mem               2GB
-#SBATCH --output            out/%j.%a.out
-#SBATCH --error             out/%j.%a.err
+#SBATCH --time              0-00:30
+#SBATCH --mem               8GB
+#SBATCH --output            out/%x.%j.%2a.out
+#SBATCH --error             out/%x.%j.%2a.err
 
 nvidia-smi
 

@@ -199,7 +199,15 @@ def main(
     )
 
     if cfg.sweep:
-        wandb.sweep(as_sweep_config(cfg, file))
+        cfg = dict_to_dataclass(ConfigClass, cfg)
+        sweep_cfg = as_sweep_config(cfg, file)
+        sweep_id = wandb.sweep(sweep_cfg)
+        print(
+            "To launch a SLURM batch job:\n"
+            f"SWEEP_ID={sweep_id} sbatch --job-name {sweep_cfg['name']} launch.sh\n"
+            "Remember you can also pass sbatch arguments via the command line.\n"
+            "Run `man sbatch` for details."
+        )
     else:
         with wandb.init(config=None if cfg.agent else OmegaConf.to_object(cfg)):
             cfg = dict_to_dataclass(ConfigClass, wandb.config)

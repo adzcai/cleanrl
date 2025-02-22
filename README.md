@@ -25,7 +25,7 @@ export LDFLAGS="-L$(brew --prefix graphviz)/lib"
 You can run batch jobs by setting
 
 ```bash
-sbatch --account your_lab launch.sh
+python muzero.py conf/catch.yaml conf/catch_sweep.yaml sweep=True
 ```
 
-Remember you can also pass other arguments to sbatch via command line flags.
+This will output further instructions for executing the batch job.
