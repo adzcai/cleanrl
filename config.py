@@ -34,7 +34,6 @@ from jaxtyping import Key, Array
 
 # util
 import argparse
-from collections import defaultdict
 from pathlib import Path
 import dataclasses as dc
 
@@ -75,6 +74,9 @@ This will output a $SWEEP_ID. Then run
 
 to run one or more agents."""
 
+T = TypeVar("T")
+TConfig = TypeVar("TConfig", bound="Config")
+
 
 @dataclass(frozen=True)
 class ExperimentConfig:
@@ -102,77 +104,9 @@ class Config:
 
     experiment: ExperimentConfig
 
-    @classmethod
-    def from_dict(cls, args: dict):
-        """Construct a TrainConfig from the merged cli argument dictionary.
-
-        Args:
-            args (dict): The nested dictionary of cli args.
-
-        Returns:
-            TrainConfig: The args packaged into a TrainConfig dataclass.
-        """
-        config = {}
-        for field in dc.fields(cls):
-            if field.name not in args:
-                raise ValueError(f"Missing field {field.name}")
-            subcfg = args[field.name]
-            missing = {
-                subfield.name
-                for subfield in dc.fields(field.type)
-                if subfield.default == dc.MISSING and subfield.name not in subcfg
-            }
-            if missing:
-                raise ValueError(f"Missing subfields for {field.name}: {', '.join(missing)}")
-            config[field.name] = field.type(**subcfg)
-        config = cls(**config)
-        config.validate()
-        return config
-
-    def validate(self) -> None:
-        for field in dc.fields(self):
-            subcfg = getattr(self, field.name)
-            for subfield in dc.fields(field.type):
-                value = getattr(subcfg, subfield.name)
-                if isinstance(value, dict) and not self.experiment.sweep:
-                    raise ValueError(
-                        "Dictionary values should only be passed when generating a sweep configuration with --generate_sweep. "
-                        f"Found {value} at {field.name}.{subfield.name}"
-                    )
-
-    def as_sweep_config(self, file: str) -> dict:
-        """Generates the wandb sweep config. Does not upload to wandb."""
-        sweep_params = set()
-        parameters = {}
-        for field in dc.fields(self):
-            subcfg = getattr(self, field.name)
-            obj = {}
-            for subfield in dc.fields(field.type):
-                value = getattr(subcfg, subfield.name)
-                if isinstance(value, dict):
-                    sweep_params.add(subfield.name)
-                    obj[subfield.name] = value
-                else:
-                    obj[subfield.name] = {"value": value}
-            parameters[field.name] = dict(parameters=obj)  # wandb nested parameters
-
-        return {
-            "program": file,
-            "method": self.experiment.sweep_method,
-            "name": f"sweep {' '.join(sweep_params)}",
-            "metric": {"goal": "maximize", "name": "eval/mean_return"},
-            "parameters": parameters,
-            "command": [
-                r"${env}",
-                r"${interpreter}",
-                r"${program}",
-                r"--agent",
-            ],
-        }
-
 
 def get_cli_args(ConfigClass: type[Config], file: str) -> dict:
-    """Command line interface. Returns `None` if the `--agent` flag is passed."""
+    """Read the configuration specified by the configuration dataclass."""
     # construct parser. none of the arguments have default values to allow file composition
     parser = argparse.ArgumentParser(usage=CLI_DESCRIPTION.format(file=file))
 
@@ -184,7 +118,7 @@ def get_cli_args(ConfigClass: type[Config], file: str) -> dict:
     args = parser.parse_args()
 
     # read hierarchical structure into cfg_dict
-    cfg_dict = defaultdict(dict)
+    cfg_dict = {}
 
     # read from config files
     for cfg_path in map(Path, args.config_path):
@@ -195,18 +129,30 @@ def get_cli_args(ConfigClass: type[Config], file: str) -> dict:
                 cfg: dict = json.load(f)
             else:
                 raise ValueError("Only JSON and YAML config files supported. Got " + cfg_path)
-        for field_name, subcfg in cfg.items():
-            cfg_dict[field_name] |= subcfg
+        extend_dict(cfg_dict, cfg)
 
     # read from cli
-    for field in dc.fields(ConfigClass):
-        cfg_dict[field.name] |= {
-            subfield.name: value
-            for subfield in dc.fields(field.type)
-            if (value := getattr(args, subfield.name, None)) is not None
-        }
+    extend_dict(cfg_dict, unflatten(ConfigClass, args))
 
     return cfg_dict
+
+
+def extend_dict(a: dict, b: dict) -> None:
+    """Deeply overwrite a with b."""
+    for key, value in b.items():
+        if isinstance(value, dict):
+            a.setdefault(key, {})
+            extend_dict(a[key], value)
+        else:
+            a[key] = value
+
+
+def unflatten(cls: type[T], args: argparse.Namespace) -> dict:
+    out = {}
+    for field in dc.fields(cls):
+        if dc.is_dataclass(field.type):
+            unflatten(field.type, args)
+        out
 
 
 def add_field_to_parser(parser: argparse.ArgumentParser, field: dc.Field) -> None:
@@ -254,7 +200,54 @@ def add_field_to_parser(parser: argparse.ArgumentParser, field: dc.Field) -> Non
         )
 
 
-T = TypeVar("T", bound=Config)
+def dict_to_dataclass(cls: type[T], obj: dict) -> T:
+    """Deeply convert a structured dictionary to the corresponding dataclass instance."""
+    out = {}
+    for field in dc.fields(cls):
+        if field.name not in obj:
+            raise ValueError(f"Field {field.name} missing when constructing {cls}")
+        value = obj[field.name]
+        if dc.is_dataclass(field.type):
+            value = dict_to_dataclass(field.type, value)
+        out[field.name] = value
+    return cls(**out)
+
+
+def to_parameters(config: Config) -> tuple[set[str], dict]:
+    """Turn a config dataclass instance to a wandb sweep parameters dictionary."""
+    sweep_params = set()
+    parameters = {}
+    for field in dc.fields(config):
+        value = getattr(config, field.name)
+        if dc.is_dataclass(field.type):
+            swept, params = to_parameters(value)
+            sweep_params |= swept
+            value = dict(parameters=params)
+        elif isinstance(value, dict):
+            sweep_params.add(field.name)
+        else:
+            value = dict(value=value)
+        parameters[field.name] = value
+    return sweep_params, parameters
+
+
+def as_sweep_config(config: Config, file: str) -> dict:
+    """Generates the wandb sweep config. Does not upload to wandb."""
+    sweep_params, parameters = to_parameters(config)
+
+    return {
+        "program": file,
+        "method": config.experiment.sweep_method,
+        "name": f"sweep {' '.join(sweep_params)}",
+        "metric": {"goal": "maximize", "name": "eval/mean_return"},
+        "parameters": parameters,
+        "command": [
+            r"${env}",
+            r"${interpreter}",
+            r"${program}",
+            r"--agent",
+        ],
+    }
 
 
 def main(
@@ -272,13 +265,13 @@ def main(
     args = get_cli_args(ConfigClass, file)
     experiment = ExperimentConfig(**args["experiment"])
     if experiment.sweep:
-        sweep_config = ConfigClass.from_dict(args).as_sweep_config(file)
+        sweep_config = dict_to_dataclass(ConfigClass, args).as_sweep_config(file)
         yaml.safe_dump(sweep_config, sys.stdout)
         wandb.sweep(sweep_config)
     else:
         with wandb.init(config=None if experiment.agent else args):
             del experiment
-            config = ConfigClass.from_dict(wandb.config.as_dict())
+            config = dict_to_dataclass(ConfigClass, wandb.config.as_dict())
             train = make_train(config)
             output = jax.jit(train)(jr.key(config.experiment.seed))
             # with jax.profiler.trace(f"/tmp/{WANDB_PROJECT}-trace", create_perfetto_link=True):
