@@ -11,7 +11,7 @@ import wandb
 try:
     import pygraphviz
 except ImportError:
-    print("pygraphviz not installed")
+    pass
 
 # util
 import inspect
