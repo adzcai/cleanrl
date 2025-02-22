@@ -29,8 +29,7 @@ from matplotlib.axes import Axes
 import yaml
 
 # typing
-from typeguard import typechecked as typechecker
-from jaxtyping import Bool, Integer, Float, Key, Array, jaxtyped
+from jaxtyping import Bool, Integer, Float, Key, Array
 from typing import TYPE_CHECKING, Literal, NamedTuple, Annotated as Batched
 
 # util
@@ -305,7 +304,6 @@ class LossStatistics(NamedTuple):
     td_error: Float[Array, " horizon"]
 
 
-@jaxtyped(typechecker=typechecker)
 def make_train(config: TrainConfig):
     num_iters = config.collection.total_transitions // (
         config.collection.num_envs * config.collection.horizon

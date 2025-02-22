@@ -24,17 +24,14 @@ import jax.numpy as jnp
 # logging
 import sys
 import wandb
-import json
-import yaml
 
 # typing
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, Literal, TypeVar, get_args, get_origin
+from typing import TYPE_CHECKING, Any, TypeVar
 from jaxtyping import Key, Array
 
 # util
-import argparse
-from pathlib import Path
+from omegaconf import OmegaConf
 import dataclasses as dc
 
 if TYPE_CHECKING:
@@ -49,7 +46,7 @@ RUNNING
 To run the algorithm,
 create a yaml file matching the required config and run
 
-    python {file} $CONFIG_YAML
+    python {file} $CONFIG_YAML collection.total_transitions=100000  # etc
 
 WANDB
 -----
@@ -65,7 +62,7 @@ SWEEPS
 ------
 To run a wandb sweep, first execute
 
-    python {file} $CONFIG_YAML --sweep
+    python {file} $CONFIG_YAML experiment.sweep=True
 
 to start a new wandb sweep.
 This will output a $SWEEP_ID. Then run
@@ -83,8 +80,8 @@ class ExperimentConfig:
     """Command-line arguments."""
 
     seed: int = 0
-    config_path: tuple[str, ...] = dc.field(default=(), metadata={"nargs": "*"})
-    sweep_method: Literal["grid", "random", "bayes"] = "random"
+    num_seeds: int = 1
+    sweep_method: str = "random"  # omegaconf doesn't support Literal["grid", "random", "bayes"]
     sweep: bool = dc.field(
         default=False,
         metadata={"help": "Output a wandb sweep configuration yaml instead of executing the run."},
@@ -105,122 +102,20 @@ class Config:
     experiment: ExperimentConfig
 
 
-def get_cli_args(ConfigClass: type[Config], file: str) -> dict:
-    """Read the configuration specified by the configuration dataclass."""
-    # construct parser. none of the arguments have default values to allow file composition
-    parser = argparse.ArgumentParser(usage=CLI_DESCRIPTION.format(file=file))
+def to_wandb_sweep_parameters(config: Config) -> tuple[set[str], dict]:
+    """Turn a config dataclass instance to a wandb sweep parameters dictionary.
 
-    # add the ConfigClass to the parser (in groups)
-    for field in dc.fields(ConfigClass):
-        group_parser = parser.add_argument_group(field.type.__name__)
-        for subfield in dc.fields(field.type):
-            add_field_to_parser(group_parser, subfield)
-    args = parser.parse_args()
+    Args:
+        config (Config): The config to transform
 
-    # read hierarchical structure into cfg_dict
-    cfg_dict = {}
-
-    # read from config files
-    for cfg_path in map(Path, args.config_path):
-        with cfg_path.open() as f:
-            if cfg_path.suffix == ".yaml":
-                cfg: dict = yaml.safe_load(f)
-            elif cfg_path.suffix == ".json":
-                cfg: dict = json.load(f)
-            else:
-                raise ValueError("Only JSON and YAML config files supported. Got " + cfg_path)
-        extend_dict(cfg_dict, cfg)
-
-    # read from cli
-    extend_dict(cfg_dict, unflatten(ConfigClass, args))
-
-    return cfg_dict
-
-
-def extend_dict(a: dict, b: dict) -> None:
-    """Deeply overwrite a with b."""
-    for key, value in b.items():
-        if isinstance(value, dict):
-            a.setdefault(key, {})
-            extend_dict(a[key], value)
-        else:
-            a[key] = value
-
-
-def unflatten(cls: type[T], args: argparse.Namespace) -> dict:
-    out = {}
-    for field in dc.fields(cls):
-        if dc.is_dataclass(field.type):
-            unflatten(field.type, args)
-        out
-
-
-def add_field_to_parser(parser: argparse.ArgumentParser, field: dc.Field) -> None:
-    """Add a dataclass field to the cli argument parser based on its type.
-
-    Literal fields get translated to choices.
-    bools get translated to flags.
-    variable arguments get the proper type assigned.
+    Returns:
+        tuple[set[str], dict]: The parameters being swept and the sweep configuration dictionary.
     """
-    nargs = field.metadata.get("nargs", None)
-    help = field.metadata.get("help", None)
-    if get_origin(field.type) is Literal:
-        parser.add_argument(
-            "--" + field.name,
-            type=str,
-            choices=get_args(field.type),
-            nargs=nargs,
-            help=help,
-        )
-    elif field.type is bool:
-        parser.add_argument(
-            "--" + field.name,
-            # don't set default
-            action="store_const",
-            const=True,
-            help=help,
-        )
-    elif nargs in ["*", "+"]:
-        assert get_origin(field.type) is tuple
-        # assume tuple[tp, ...]
-        tp, _ = get_args(field.type)
-        # make config_path positional
-        parser.add_argument(
-            field.name,
-            type=tp,
-            nargs=nargs,
-            help=help,
-        )
-    else:
-        parser.add_argument(
-            "--" + field.name,
-            type=field.type if callable(field.type) and nargs is None else None,
-            nargs=nargs,
-            help=help,
-        )
-
-
-def dict_to_dataclass(cls: type[T], obj: dict) -> T:
-    """Deeply convert a structured dictionary to the corresponding dataclass instance."""
-    out = {}
-    for field in dc.fields(cls):
-        if field.name not in obj:
-            raise ValueError(f"Field {field.name} missing when constructing {cls}")
-        value = obj[field.name]
-        if dc.is_dataclass(field.type):
-            value = dict_to_dataclass(field.type, value)
-        out[field.name] = value
-    return cls(**out)
-
-
-def to_parameters(config: Config) -> tuple[set[str], dict]:
-    """Turn a config dataclass instance to a wandb sweep parameters dictionary."""
-    sweep_params = set()
-    parameters = {}
+    sweep_params, parameters = set(), dict()
     for field in dc.fields(config):
         value = getattr(config, field.name)
         if dc.is_dataclass(field.type):
-            swept, params = to_parameters(value)
+            swept, params = to_wandb_sweep_parameters(value)
             sweep_params |= swept
             value = dict(parameters=params)
         elif isinstance(value, dict):
@@ -233,8 +128,7 @@ def to_parameters(config: Config) -> tuple[set[str], dict]:
 
 def as_sweep_config(config: Config, file: str) -> dict:
     """Generates the wandb sweep config. Does not upload to wandb."""
-    sweep_params, parameters = to_parameters(config)
-
+    sweep_params, parameters = to_wandb_sweep_parameters(config)
     return {
         "program": file,
         "method": config.experiment.sweep_method,
@@ -245,14 +139,27 @@ def as_sweep_config(config: Config, file: str) -> dict:
             r"${env}",
             r"${interpreter}",
             r"${program}",
-            r"--agent",
+            r"experiment.agent=True",
         ],
     }
 
 
+def dict_to_dataclass(cls: type[T], obj: dict) -> T:
+    """Deeply convert a structured dictionary to the corresponding dataclass instance."""
+    out = {}
+    for field in dc.fields(cls):
+        if field.name not in obj and field.default == dc.MISSING:
+            raise ValueError(f"Field {field.name} missing when constructing {cls}")
+        value = obj[field.name]
+        if dc.is_dataclass(field.type):
+            value = dict_to_dataclass(field.type, value)
+        out[field.name] = value
+    return cls(**out)
+
+
 def main(
-    ConfigClass: type[T],
-    make_train: Callable[[T], Callable[[Key[Array, ""]], Any]],
+    ConfigClass: type[TConfig],
+    make_train: Callable[[TConfig], Callable[[Key[Array, ""]], Any]],
     file: str,
 ) -> None:
     """Merge configurations from yaml files and cli and pass it to `make_train`.
@@ -262,19 +169,28 @@ def main(
         make_train (Callable[[T], Callable[[Key, ()], Any]]): Returns a jittable `train` function that accepts the merged configuration.
         file (str): The file that `main` is being called from (for generating sweep config).
     """
-    args = get_cli_args(ConfigClass, file)
-    experiment = ExperimentConfig(**args["experiment"])
-    if experiment.sweep:
-        sweep_config = dict_to_dataclass(ConfigClass, args).as_sweep_config(file)
-        yaml.safe_dump(sweep_config, sys.stdout)
-        wandb.sweep(sweep_config)
+    # merge configuration
+    cfg_paths, cli_args = [], []
+    for arg in sys.argv[1:]:
+        if arg in ["-h", "--help"]:
+            print(CLI_DESCRIPTION.format(file=file))
+            sys.exit(0)
+        (cli_args if "=" in arg else cfg_paths).append(arg)
+    cfg: TConfig = OmegaConf.merge(
+        OmegaConf.structured(Config(experiment=ExperimentConfig())),
+        *map(OmegaConf.load, cfg_paths),
+        OmegaConf.from_cli(cli_args),
+    )
+
+    if cfg.experiment.sweep:
+        wandb.sweep(as_sweep_config(cfg, file))
     else:
-        with wandb.init(config=None if experiment.agent else args):
-            del experiment
-            config = dict_to_dataclass(ConfigClass, wandb.config.as_dict())
-            train = make_train(config)
-            output = jax.jit(train)(jr.key(config.experiment.seed))
-            # with jax.profiler.trace(f"/tmp/{WANDB_PROJECT}-trace", create_perfetto_link=True):
-            _, mean_eval_reward = jax.block_until_ready(output)
+        with wandb.init(config=None if cfg.experiment.agent else OmegaConf.to_object(cfg)):
+            cfg = dict_to_dataclass(ConfigClass, wandb.config)
+            train = make_train(cfg)
+            keys = jr.split(jr.key(cfg.experiment.seed), cfg.experiment.num_seeds)
+            # with jax.profiler.trace(f"/tmp/{os.environ['WANDB_PROJECT']}-trace", create_perfetto_link=True):
+            outputs = jax.jit(jax.vmap(train))(keys)
+            _, mean_eval_reward = jax.block_until_ready(outputs)
             mean_eval_reward = mean_eval_reward[mean_eval_reward != -jnp.inf]
         print(f"Done training. {mean_eval_reward=}")
