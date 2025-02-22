@@ -89,15 +89,17 @@ class ExperimentConfig:
     )
     agent: bool = dc.field(
         default=False,
-        metadata={
-            "help": "Flag that indicates whether the script is being run as an agent. "
-            "Loads config from wandb instead of cli."
-        },
+        metadata={"help": "Load config from wandb instead of cli."},
     )
 
 
 @dataclass(frozen=True)
 class Config:
+    """Parent dataclass for configuration options.
+
+    Inherit from this in each algorithm file and add algorithm-specific configurations.
+    """
+
     experiment: ExperimentConfig
 
     @classmethod
@@ -190,18 +192,18 @@ def get_cli_args(ConfigClass: type[Config], file: str) -> dict:
             if cfg_path.suffix == ".yaml":
                 cfg: dict = yaml.safe_load(f)
             elif cfg_path.suffix == ".json":
-                cfg = json.load(f)
+                cfg: dict = json.load(f)
             else:
                 raise ValueError("Only JSON and YAML config files supported. Got " + cfg_path)
-        for k, subcfg in cfg.items():
-            cfg_dict[k] |= subcfg
+        for field_name, subcfg in cfg.items():
+            cfg_dict[field_name] |= subcfg
 
     # read from cli
     for field in dc.fields(ConfigClass):
         cfg_dict[field.name] |= {
-            subfield.name: subcfg
+            subfield.name: value
             for subfield in dc.fields(field.type)
-            if (subcfg := getattr(args, subfield.name, None)) is not None
+            if (value := getattr(args, subfield.name, None)) is not None
         }
 
     return cfg_dict
@@ -259,14 +261,20 @@ def main(
     ConfigClass: type[T],
     make_train: Callable[[T], Callable[[Key[Array, ""]], Any]],
     file: str,
-):
+) -> None:
+    """Merge configurations from yaml files and cli and pass it to `make_train`.
+
+    Args:
+        ConfigClass (type[T]): The dataclass describing the configuration options.
+        make_train (Callable[[T], Callable[[Key, ()], Any]]): Returns a jittable `train` function that accepts the merged configuration.
+        file (str): The file that `main` is being called from (for generating sweep config).
+    """
     args = get_cli_args(ConfigClass, file)
     experiment = ExperimentConfig(**args["experiment"])
     if experiment.sweep:
         sweep_config = ConfigClass.from_dict(args).as_sweep_config(file)
         yaml.safe_dump(sweep_config, sys.stdout)
-        sweep_id = wandb.sweep(sweep_config)
-        del sweep_id  # wandb prints
+        wandb.sweep(sweep_config)
     else:
         with wandb.init(config=None if experiment.agent else args):
             del experiment

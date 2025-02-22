@@ -894,7 +894,9 @@ def make_train(config: TrainConfig):
             bootstrapped_returns=aux.bootstrapped_return,
             video=jax.vmap(visualize_catch, (None, 0))(
                 obs_shape, sampled_trajectories.rollout_state.env_state
-            ),
+            )
+            if config.collection.env_name == "Catch-bsuite"
+            else None,
             prefix="visualize",
             priorities=batch.priority,
         )
