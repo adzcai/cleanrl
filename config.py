@@ -1,11 +1,42 @@
-"""Boilerplate for running jobs and merging configs.
+"""See below for arguments and usage examples.
 
-Good old argparse does the job.
-OmegaConf or hydra feels like overkill.
+RUNNING
+-------
+To run the algorithm,
+create a yaml file matching the required config and run
 
-This file defines `main`,
-which is meant to be imported into other files.
-For example, in `muzero.py`,
+    python {file} $CONFIG_YAML total_transitions=100000  # other parameters etc
+
+You can also pass multiple yamls to be merged (later ones take precedence)
+
+    python {file} train.yaml debug.yaml
+
+WANDB
+-----
+We do not provide explicit commands for configuring wandb.
+You can control wandb using its environment variables (https://docs.wandb.ai/guides/track/environment-variables/)
+or by running
+
+    wandb init --project $PROJECT --entity $ENTITY
+
+before launching any sweeps or agents.
+
+SWEEPS
+------
+To run a wandb sweep, first execute
+
+    python {file} $CONFIG_YAML sweep=True
+
+to start a new wandb sweep. This will output a $SWEEP_ID. Then run
+
+    wandb agent $SWEEP_ID --count $COUNT
+
+to run one or more agents.
+
+LIBRARY USAGE
+-------------
+This file defines a `main` function that is meant to be imported into other files.
+For example, in your algorithm file,
 
     from config import Config, main
 
@@ -13,8 +44,12 @@ For example, in `muzero.py`,
     class TrainConfig(Config):
         ...
 
+    def make_train(config: TrainConfig):
+        ...
+
     if __name__ == "__main__":
-        main(TrainConfig, make_train, Path(__file__).name)"""
+        main(TrainConfig, make_train, Path(__file__).name)
+"""
 
 # jax
 import jax
@@ -39,57 +74,8 @@ if TYPE_CHECKING:
 else:
     from chex import dataclass
 
-CLI_DESCRIPTION = """See below for arguments and usage examples.
-
-RUNNING
--------
-To run the algorithm,
-create a yaml file matching the required config and run
-
-    python {file} $CONFIG_YAML collection.total_transitions=100000  # etc
-
-WANDB
------
-We do not provide explicit commands for configuring wandb.
-You can control wandb using its environment variables (https://docs.wandb.ai/guides/track/environment-variables/)
-or by running
-
-    wandb init --project $PROJECT --entity $ENTITY
-
-before launching any sweeps or agents.
-
-SWEEPS
-------
-To run a wandb sweep, first execute
-
-    python {file} $CONFIG_YAML experiment.sweep=True
-
-to start a new wandb sweep.
-This will output a $SWEEP_ID. Then run
-
-    wandb agent $SWEEP_ID --count $COUNT
-
-to run one or more agents."""
-
 T = TypeVar("T")
 TConfig = TypeVar("TConfig", bound="Config")
-
-
-@dataclass(frozen=True)
-class ExperimentConfig:
-    """Command-line arguments."""
-
-    seed: int = 0
-    num_seeds: int = 1
-    sweep_method: str = "random"  # omegaconf doesn't support Literal["grid", "random", "bayes"]
-    sweep: bool = dc.field(
-        default=False,
-        metadata={"help": "Output a wandb sweep configuration yaml instead of executing the run."},
-    )
-    agent: bool = dc.field(
-        default=False,
-        metadata={"help": "Load config from wandb instead of cli."},
-    )
 
 
 @dataclass(frozen=True)
@@ -99,7 +85,25 @@ class Config:
     Inherit from this in each algorithm file and add algorithm-specific configurations.
     """
 
-    experiment: ExperimentConfig
+    seed: int
+    num_seeds: int
+    sweep_method: str  # omegaconf doesn't support Literal["grid", "random", "bayes"]
+    sweep: bool = dc.field(
+        metadata={"help": "Output a wandb sweep configuration yaml instead of executing the run."},
+    )
+    agent: bool = dc.field(
+        metadata={"help": "Load config from wandb instead of cli."},
+    )
+
+
+# outside the class to allow subclasses to have arguments without defaults
+DEFAULT_CONFIG = Config(
+    seed=0,
+    num_seeds=1,
+    sweep_method="random",
+    sweep=False,
+    agent=False,
+)
 
 
 def to_wandb_sweep_parameters(config: Config) -> tuple[set[str], dict]:
@@ -131,21 +135,32 @@ def as_sweep_config(config: Config, file: str) -> dict:
     sweep_params, parameters = to_wandb_sweep_parameters(config)
     return {
         "program": file,
-        "method": config.experiment.sweep_method,
-        "name": f"sweep {' '.join(sweep_params)}",
+        "method": config.sweep_method,
+        "name": f"{file} sweep {' '.join(sweep_params)}",
         "metric": {"goal": "maximize", "name": "eval/mean_return"},
         "parameters": parameters,
         "command": [
             r"${env}",
             r"${interpreter}",
             r"${program}",
-            r"experiment.agent=True",
+            r"agent=True",
         ],
     }
 
 
 def dict_to_dataclass(cls: type[T], obj: dict) -> T:
-    """Deeply convert a structured dictionary to the corresponding dataclass instance."""
+    """Cast a dictionary to a dataclass instance.
+
+    Args:
+        cls (type[T]): The dataclass to cast to.
+        obj (dict): The dictionary matching the dataclass fields.
+
+    Raises:
+        ValueError: If any required arguments are missing.
+
+    Returns:
+        T: The dataclass instance.
+    """
     out = {}
     for field in dc.fields(cls):
         if field.name not in obj and field.default == dc.MISSING:
@@ -173,22 +188,23 @@ def main(
     cfg_paths, cli_args = [], []
     for arg in sys.argv[1:]:
         if arg in ["-h", "--help"]:
-            print(CLI_DESCRIPTION.format(file=file))
+            print(__doc__.format(file=file))
             sys.exit(0)
         (cli_args if "=" in arg else cfg_paths).append(arg)
     cfg: TConfig = OmegaConf.merge(
-        OmegaConf.structured(Config(experiment=ExperimentConfig())),
+        # using `structured` prevents addition of ConfigClass fields
+        OmegaConf.create(dc.asdict(DEFAULT_CONFIG)),
         *map(OmegaConf.load, cfg_paths),
         OmegaConf.from_cli(cli_args),
     )
 
-    if cfg.experiment.sweep:
+    if cfg.sweep:
         wandb.sweep(as_sweep_config(cfg, file))
     else:
-        with wandb.init(config=None if cfg.experiment.agent else OmegaConf.to_object(cfg)):
+        with wandb.init(config=None if cfg.agent else OmegaConf.to_object(cfg)):
             cfg = dict_to_dataclass(ConfigClass, wandb.config)
             train = make_train(cfg)
-            keys = jr.split(jr.key(cfg.experiment.seed), cfg.experiment.num_seeds)
+            keys = jr.split(jr.key(cfg.seed), cfg.num_seeds)
             # with jax.profiler.trace(f"/tmp/{os.environ['WANDB_PROJECT']}-trace", create_perfetto_link=True):
             outputs = jax.jit(jax.vmap(train))(keys)
             _, mean_eval_reward = jax.block_until_ready(outputs)
