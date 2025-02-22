@@ -7,9 +7,9 @@ Navigate to this directory and run
 uv sync
 ```
 
-You need to install graphviz to make the MCTS visualizations. On a mac:
+You need to install graphviz to make the MCTS visualizations. On Mac,
 
-```
+```bash
 brew install graphviz
 ```
 
@@ -19,3 +19,13 @@ You may also need to tell compilers and linkers about its path before running `u
 export CFLAGS="-I$(brew --prefix graphviz)/include"
 export LDFLAGS="-L$(brew --prefix graphviz)/lib"
 ```
+
+# Batch jobs
+
+You can run batch jobs by setting
+
+```bash
+sbatch --account your_lab launch.sh
+```
+
+Remember you can also pass other arguments to sbatch via command line flags.

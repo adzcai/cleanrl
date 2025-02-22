@@ -1,3 +1,21 @@
+"""Boilerplate for running jobs and merging configs.
+
+Good old argparse does the job.
+OmegaConf or hydra feels like overkill.
+
+This file defines `main`,
+which is meant to be imported into other files.
+For example, in `muzero.py`,
+
+    from config import Config, main
+
+    @dataclass(frozen=True)
+    class TrainConfig(Config):
+        ...
+
+    if __name__ == "__main__":
+        main(TrainConfig, make_train, Path(__file__).name)"""
+
 # jax
 import jax
 import jax.random as jr
@@ -24,6 +42,38 @@ if TYPE_CHECKING:
     from dataclasses import dataclass
 else:
     from chex import dataclass
+
+CLI_DESCRIPTION = """See below for arguments and usage examples.
+
+RUNNING
+-------
+To run the algorithm,
+create a yaml file matching the required config and run
+
+    python {file} $CONFIG_YAML
+
+WANDB
+-----
+We do not provide explicit commands for configuring wandb.
+You can control wandb using its environment variables (https://docs.wandb.ai/guides/track/environment-variables/)
+or by running
+
+    wandb init --project $PROJECT --entity $ENTITY
+
+before launching any sweeps or agents.
+
+SWEEPS
+------
+To run a wandb sweep, first execute
+
+    python {file} $CONFIG_YAML --sweep
+
+to start a new wandb sweep.
+This will output a $SWEEP_ID. Then run
+
+    wandb agent $SWEEP_ID --count $COUNT
+
+to run one or more agents."""
 
 
 @dataclass(frozen=True)
@@ -117,39 +167,6 @@ class Config:
                 r"--agent",
             ],
         }
-
-
-CLI_DESCRIPTION = """See below for arguments and usage examples.
-
-RUNNING
--------
-To run the algorithm,
-create a yaml file matching the required config and run
-
-    python {file} $CONFIG_YAML
-
-WANDB
------
-We do not provide explicit commands for configuring wandb.
-You can control wandb using its environment variables (https://docs.wandb.ai/guides/track/environment-variables/)
-or by running
-
-    wandb init --project $PROJECT --entity $ENTITY
-
-before launching any sweeps or agents.
-
-SWEEPS
-------
-To run a wandb sweep, first execute
-
-    python {file} $CONFIG_YAML --sweep
-
-to start a new wandb sweep.
-This will output a $SWEEP_ID. Then run
-
-    wandb agent $SWEEP_ID --count $COUNT
-
-to run one or more agents."""
 
 
 def get_cli_args(ConfigClass: type[Config], file: str) -> dict:
@@ -248,7 +265,8 @@ def main(
     if experiment.sweep:
         sweep_config = ConfigClass.from_dict(args).as_sweep_config(file)
         yaml.safe_dump(sweep_config, sys.stdout)
-        wandb.sweep(sweep_config)
+        sweep_id = wandb.sweep(sweep_config)
+        del sweep_id  # wandb prints
     else:
         with wandb.init(config=None if experiment.agent else args):
             del experiment

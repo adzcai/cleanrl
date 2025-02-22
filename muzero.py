@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING, Literal, NamedTuple, Annotated as Batched
 # util
 import dataclasses as dc
 import functools as ft
+from pathlib import Path
 from config import Config, main
 from log_util import (
     exec_loop,
@@ -1068,4 +1069,4 @@ def make_train(config: TrainConfig):
 
 
 if __name__ == "__main__":
-    main(TrainConfig, make_train, "muzero.py")
+    main(TrainConfig, make_train, Path(__file__).name)
