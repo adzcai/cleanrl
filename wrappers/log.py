@@ -1,64 +1,45 @@
-# jax
 import jax
 import jax.numpy as jnp
-
 import gymnax.environments.environment as gymenv
 
-# typing
-from jaxtyping import Bool, Real, UInt, Key, Float, Array
-from typing import TYPE_CHECKING, Any, Generic, NamedTuple, Union
+from typing import TYPE_CHECKING
+from jaxtyping import Real, UInt, Key, Float, Array
+from wrappers.common import TObs, TBaseState, Timestep, Wrapper, WrapperState
+import dataclasses as dc
 
 if TYPE_CHECKING:
     from dataclasses import dataclass
 else:
     from chex import dataclass
 
-# util
-import dataclasses as dc
-
 
 @dataclass(frozen=True)
-class LogWrapperState(Generic[gymenv.TEnvState]):
+class LogWrapperState(WrapperState[TBaseState]):
     current_return: Float[Array, ""]
     current_length: Float[Array, ""]
     current_index: UInt[Array, ""]
     episode_returns: Float[Array, " num_episodes"]
     episode_lengths: UInt[Array, " num_episodes"]
-    _env_state: gymenv.TEnvState
 
     def average_return(self):
         return jnp.sum(self.episode_returns, axis=-1) / self.current_index
 
-    def __getattr__(self, name):
-        return getattr(self._env_state, name)
 
-
-class Timestep(NamedTuple, Generic[gymenv.TEnvState]):
-    obs: Float[Array, " obs_size"]
-    env_state: gymenv.TEnvState
-    reward: Float[Array, ""]
-    done: Bool[Array, ""]
-    info: dict[Any, Any]
-
-
-class LogWrapper:
+class LogWrapper(Wrapper[TObs, TBaseState, LogWrapperState[TBaseState], gymenv.TEnvParams]):
     """Log interactions and episode rewards."""
+
+    _num_episodes: int
 
     def __init__(
         self,
-        env: gymenv.Environment[gymenv.TEnvState, gymenv.TEnvParams],
+        env: gymenv.Environment[TBaseState, gymenv.TEnvParams],
         num_episodes: int,
     ):
-        self._env = env
+        super().__init__(env)
         self._num_episodes = num_episodes
 
-    def __getattr__(self, name):
-        return getattr(self._env, name)
-
-    def reset(
-        self, key: Key[Array, ""], params: gymenv.TEnvParams
-    ) -> tuple[Float[Array, " obs_size"], gymenv.TEnvState]:
-        obs, env_state = self._env.reset(key, params)
+    def reset(self, key: Key[Array, ""], params: gymenv.TEnvParams) -> tuple[TObs, TBaseState]:
+        obs, env_state = super().reset(key, params)
         env_state = LogWrapperState(
             current_return=jnp.zeros((), float),
             current_length=jnp.zeros((), jnp.uint32),
@@ -72,11 +53,11 @@ class LogWrapper:
     def step(
         self,
         key: Key[Array, ""],
-        state: LogWrapperState[gymenv.TEnvState],
-        action: Union[int, float, Real[Array, ""]],
+        state: LogWrapperState[TBaseState],
+        action: int | float | Real[Array, ""],
         params: gymenv.TEnvParams,
-    ) -> Timestep[LogWrapperState[gymenv.TEnvState]]:
-        timestep = Timestep(*self._env.step(key, state._env_state, action, params))
+    ) -> Timestep[TObs, LogWrapperState[TBaseState]]:
+        timestep = super().step(key, state, action, params)
 
         env_state = jax.lax.cond(
             timestep.done,
