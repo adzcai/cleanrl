@@ -52,5 +52,8 @@ class Wrapper(Generic[TObs, TBaseState, TWrapperState, gymenv.TEnvParams]):
     ) -> Timestep[TObs, TWrapperState]:
         return Timestep(*self._env.step(key, state._env_state, action, params))
 
+    def observation_space(self, params: gymenv.TEnvParams):
+        return self._env.observation_space(params)
+
     def __getattr__(self, name):
         return getattr(self._env, name)

@@ -1,11 +1,12 @@
 arch:
+  kind: mlp
   rnn_size: 128
   mlp_size: 64
   mlp_depth: 1
-  activation: "relu"
+  activation: relu
 
 collection:
-  env_name: "Catch-bsuite"
+  env_name: Catch-bsuite
   total_transitions: 200000
   num_envs: 64
   horizon: 9

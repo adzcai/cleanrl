@@ -18,7 +18,8 @@ import gymnax
 import gymnax.environments.environment as gymenv
 from prioritized_buffer import PrioritizedBuffer, BufferState
 from gymnax.wrappers import FlattenObservationWrapper
-from wrappers import LogWrapper, LogWrapperState
+from wrappers.goal import GoalObs, GoalWrapper
+from wrappers.log import LogWrapper, LogWrapperState
 
 # logging
 import sys
@@ -29,10 +30,11 @@ from matplotlib.axes import Axes
 import yaml
 
 # typing
-from jaxtyping import Bool, Integer, Float, Key, Array
+from jaxtyping import Bool, UInt, Integer, Float, Key, Array
 from typing import TYPE_CHECKING, Literal, NamedTuple, Annotated as Batched
 
 # util
+import warnings
 import dataclasses as dc
 import functools as ft
 from pathlib import Path
@@ -53,11 +55,16 @@ else:
 
 matplotlib.use("agg")  # enable plotting inside jax callback
 
+Obs = GoalObs[Float[Array, " *obs_size"]]
+
+# warnings.filterwarnings("error")  # turn warnings into errors
+
 
 @dataclass(frozen=True)
 class ArchConfig:
     """Network architecture"""
 
+    kind: Literal["mlp", "cnn"]
     rnn_size: int
     mlp_size: int
     mlp_depth: int
@@ -117,6 +124,7 @@ class TrainConfig(Config):
     bootstrap: BootstrapConfig
     optim: OptimConfig
     eval: EvalConfig
+    env_kwargs: dict = dc.field(default_factory=dict)
 
 
 class WorldModelRNN(eqx.Module):
@@ -175,6 +183,7 @@ class Prediction(NamedTuple):
 class ActorCritic(eqx.Module):
     """Parameterizes the actor-critic network."""
 
+    num_goals: Integer[Array, ""]
     policy_head: eqx.nn.MLP
     value_head: eqx.nn.MLP
 
@@ -223,7 +232,7 @@ class MuZeroNetwork(eqx.Module):
     def __init__(
         self,
         config: ArchConfig,
-        obs_size: int,
+        obs_size: tuple[int, ...],
         num_actions: int,
         num_value_bins: int,
         num_goals: int,
@@ -232,13 +241,33 @@ class MuZeroNetwork(eqx.Module):
     ):
         key_projection, key_world_model, key_actor_critic = jr.split(key, 3)
 
-        self.projection = eqx.nn.MLP(
-            in_size=obs_size,
-            out_size=config.rnn_size,
-            width_size=config.mlp_size,
-            depth=config.mlp_depth,
-            key=key_projection,
-        )
+        if config.kind == "mlp":
+            self.projection = eqx.nn.MLP(
+                in_size=obs_size[0],
+                out_size=config.rnn_size,
+                width_size=config.mlp_size,
+                depth=config.mlp_depth,
+                key=key_projection,
+            )
+        elif config.kind == "cnn":
+            key_cnn, key_linear = jr.split(key)
+            # (C, H, W)
+            cnn = eqx.nn.Conv2d(
+                in_channels=obs_size,
+                out_channels=config.mlp_size,
+                kernel_size=3,
+                key=key_cnn,
+            )
+            flat_size = cnn(jnp.empty(obs_size)).size
+            self.projection = eqx.nn.Sequential(
+                [
+                    cnn,
+                    eqx.nn.Lambda(jnp.ravel),
+                    eqx.nn.Linear(
+                        in_features=flat_size, out_features=config.rnn_size, key=key_linear
+                    ),
+                ]
+            )
         self.world_model = WorldModelRNN(
             config=config,
             num_actions=num_actions,
@@ -256,13 +285,12 @@ class MuZeroNetwork(eqx.Module):
 
     def __call__(
         self,
-        obs: Float[Array, " obs_size"],
+        obs: Obs,
         action: Integer[Array, " horizon"],
-        goal: Integer[Array, ""],
     ):
         return jax.lax.scan(
-            lambda hidden, action: self.step(hidden, action, goal),
-            self.projection(obs),
+            lambda hidden, action: self.step(hidden, action, obs.goal),
+            self.projection(obs.obs),
             action,
         )
 
@@ -280,7 +308,7 @@ class MuZeroNetwork(eqx.Module):
 class RolloutState(NamedTuple):
     """Carried when rolling out the environment."""
 
-    obs: Float[Array, " obs_size"]
+    obs: Obs
     env_state: gymnax.EnvState
     initial: Bool[Array, ""]
 
@@ -337,13 +365,19 @@ def make_train(config: TrainConfig):
     num_grad_updates = num_iters * config.optim.num_minibatches
     eval_freq = num_iters // config.eval.num_evals
 
-    env, env_params = gymnax.make(config.collection.env_name)
-    env_params = env_params.replace(max_steps_in_episode=max_horizon)  # don't truncate
+    env, env_params = gymnax.make(config.collection.env_name, **config.env_kwargs)
+    # env_params = env_params.replace(max_steps_in_episode=max_horizon)  # don't truncate
     obs_shape = env.observation_space(env_params).shape  # for visualization
     action_space = env.action_space(env_params)
     num_actions = action_space.n
     action_dtype = action_space.dtype
-    env: gymenv.Environment = LogWrapper(FlattenObservationWrapper(env), num_episodes=num_iters)
+    env: gymenv.Environment = GoalWrapper(
+        LogWrapper(
+            FlattenObservationWrapper(env),
+            num_episodes=num_iters,
+        ),
+        num_goals=config.collection.num_goals,
+    )
 
     env_reset_batch = jax.vmap(env.reset, in_axes=(0, None))  # map over key
     env_step_batch = jax.vmap(env.step, in_axes=(0, 0, 0, None))  # map over key, state, action
@@ -415,7 +449,7 @@ def make_train(config: TrainConfig):
         # initialize all state
         init_net = MuZeroNetwork(
             config=config.arch,
-            obs_size=init_obs.shape[-1],
+            obs_size=init_obs.obs.shape[1:],
             num_actions=num_actions,
             num_value_bins=config.value.num_value_bins,
             num_goals=config.collection.num_goals,
@@ -435,7 +469,7 @@ def make_train(config: TrainConfig):
                 rollout_state=tree_slice(init_rollout_states, 0),
                 action=env.action_space(env_params).sample(jr.key(0)),
                 reward=jnp.empty((), init_hiddens.dtype),
-                pred=init_net.actor_critic(init_hiddens[0]),
+                pred=init_net.actor_critic(init_hiddens[0], init_env_states.goal[0]),
                 mcts_probs=jnp.empty(num_actions, init_hiddens.dtype),
             )
         )
@@ -652,8 +686,9 @@ def make_train(config: TrainConfig):
         key: Key[Array, ""],
     ):
         """Take a single action via MCTS with the world model."""
-        init_hiddens = jax.vmap(net.projection)(rollout_states.obs)
-        preds = jax.vmap(net.actor_critic)(init_hiddens)
+        init_hiddens = jax.vmap(net.projection)(rollout_states.obs.obs)
+        goals = rollout_states.obs.goal
+        preds = jax.vmap(net.actor_critic)(init_hiddens, goals)
 
         root = mctx.RootFnOutput(
             prior_logits=preds.policy_logits,
@@ -671,8 +706,8 @@ def make_train(config: TrainConfig):
             hiddens: Float[Array, " num_envs rnn_size"],
         ):
             """Returns the logits and value for the newly created node."""
-            hiddens, rewards = jax.vmap(net.world_model.step)(hiddens, actions)
-            preds = jax.vmap(net.actor_critic)(hiddens)
+            hiddens, rewards = jax.vmap(net.world_model.step)(hiddens, actions, goals)
+            preds = jax.vmap(net.actor_critic)(hiddens, goals)
             return mctx.RecurrentFnOutput(
                 reward=logits_to_value(rewards),
                 # TODO termination
@@ -849,14 +884,16 @@ def make_train(config: TrainConfig):
             key_action, key_step, key_mcts = jr.split(key, 3)
 
             @ft.partial(jax.value_and_grad, has_aux=True)
-            def predict(obs: Float[Array, " obs_size"]):
+            def predict(obs: Float[Array, " *obs_size"], goal: UInt[Array, ""]):
                 """Differentiate with respect to value to obtain saliency map."""
                 hidden = net.projection(obs)
-                pred = net.actor_critic(hidden)
+                pred = net.actor_critic(hidden, goal)
                 value = logits_to_value(pred.value_logits[jnp.newaxis])[0]
                 return value, pred.policy_logits
 
-            (_, policy_logits), obs_grads = jax.vmap(predict)(rollout_states.obs)
+            (_, policy_logits), obs_grads = jax.vmap(predict)(
+                rollout_states.obs.obs, rollout_states.obs.goal
+            )
             actions = jr.categorical(key_action, logits=policy_logits, axis=-1)
             obs, env_states, rewards, initials, infos = env_step_batch(
                 jr.split(key_step, num_envs), rollout_states.env_state, actions, env_params
