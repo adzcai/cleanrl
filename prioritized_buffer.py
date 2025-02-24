@@ -1,18 +1,16 @@
 """A prioritized buffer for replay."""
 
-# jax
+import dataclasses as dc
+from typing import TYPE_CHECKING
+from typing import Annotated as Batched
+from typing import Generic, TypeVar
+
 import jax
 import jax.numpy as jnp
 import jax.random as jr
+from jaxtyping import Array, Float, Key, PyTree, UInt
 
-# typing
-from jaxtyping import UInt, Key, Float, Array, PyTree
-from typing import TYPE_CHECKING, Generic, TypeVar, Annotated as Batched
-
-# util
-import dataclasses as dc
-import functools as ft
-from log_util import tree_slice, exec_callback
+from log_util import exec_callback, tree_slice
 
 if TYPE_CHECKING:
     from dataclasses import dataclass

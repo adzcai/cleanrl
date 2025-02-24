@@ -1,59 +1,71 @@
 """Base classes for gymnax environment wrappers."""
 
-import gymnax.environments.environment as gymenv
-from jaxtyping import Bool, Real, Key, Float, Array
-from typing import TYPE_CHECKING, Any, Generic, NamedTuple, TypeVar, Union
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, Generic, NamedTuple, TypeVar
+
+import gymnax.environments.spaces as spaces
+from jaxtyping import Array, Bool, Float, Key, UInt
+from typeguard import typechecked
 
 if TYPE_CHECKING:
     from dataclasses import dataclass
 else:
     from chex import dataclass
 
-# generics to distinguish base environment state and wrapper state
-# use gymenv.TEnvState for general
-TBaseState = TypeVar("TBaseEnvState", bound=gymenv.EnvState)
-TWrapperState = TypeVar("TWrapperState", bound="WrapperState")
-TObs = TypeVar("Obs")
+TEnvState = TypeVar("TEnvState")
+TObs = TypeVar("TObs")
+TAction = TypeVar("TAction")
+TEnvParams = TypeVar("TEnvParams")
 
 
-class Timestep(NamedTuple, Generic[TObs, gymenv.TEnvState]):
+class Timestep(NamedTuple, Generic[TObs, TEnvState]):
+    """A single interaction timestep.
+
+    Implemented as a NamedTuple to allow for destructuring:
+
+        Timestep(*env.step(key, state, action, params))
+
+    Attributes:
+        obs (TObs): The observation of env_state.
+        env_state (TEnvState): The updated state of the environment.
+        reward (Float[Array, ""]): The reward received after taking an action.
+        done (Bool ()): Indicates that the episode has ended.
+        info (dict[str, Any]): Additional information from the environment.
+    """
+
     obs: TObs
-    env_state: gymenv.TEnvState
+    env_state: TEnvState
     reward: Float[Array, ""]
     done: Bool[Array, ""]
-    info: dict[Any, Any]
+    info: dict[str, Any]
+
+
+@typechecked
+@dataclass(frozen=True)
+class Environment(Generic[TObs, TEnvState, TAction, TEnvParams]):
+    """An interface for an interactive environment."""
+
+    reset: Callable[[Key[Array, ""], TEnvParams], tuple[TObs, TEnvState]]
+    step: Callable[[Key[Array, ""], TEnvState, TAction, TEnvParams], Timestep[TObs, TEnvState]]
+    action_space: Callable[[TEnvParams], spaces.Space]
+    observation_space: Callable[[TEnvParams], spaces.Space]
+    goal_space: Callable[[TEnvParams], spaces.Space]
+
+
+class GoalObs(NamedTuple, Generic[TObs]):
+    """A tuple of the environment observation and the integer goal."""
+
+    obs: TObs
+    goal: UInt[Array, ""]
 
 
 @dataclass(frozen=True)
-class WrapperState(Generic[TBaseState]):
-    _env_state: TBaseState
+class WrapperState(Generic[TEnvState]):
+    """Base class for wrapping an existing environment's state.
+
+    Delegates property lookups to the base state."""
+
+    _env_state: TEnvState
 
     def __getattr__(self, name):
         return getattr(self._env_state, name)
-
-
-class Wrapper(Generic[TObs, TBaseState, TWrapperState, gymenv.TEnvParams]):
-    """Base class for environment wrappers."""
-
-    _env: gymenv.Environment[TBaseState, gymenv.TEnvParams]
-
-    def __init__(self, env: gymenv.Environment[TBaseState, gymenv.TEnvParams]):
-        self._env = env
-
-    def reset(self, key: Key[Array, ""], params: gymenv.TEnvParams) -> tuple[TObs, TBaseState]:
-        return self._env.reset(key, params)
-
-    def step(
-        self,
-        key: Key[Array, ""],
-        state: TWrapperState,
-        action: Union[int, float, Real[Array, ""]],
-        params: gymenv.TEnvParams,
-    ) -> Timestep[TObs, TWrapperState]:
-        return Timestep(*self._env.step(key, state._env_state, action, params))
-
-    def observation_space(self, params: gymenv.TEnvParams):
-        return self._env.observation_space(params)
-
-    def __getattr__(self, name):
-        return getattr(self._env, name)

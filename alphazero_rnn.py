@@ -8,46 +8,32 @@
 6. Evaluation function
 """
 
-# jax
-import jax
-import jax.numpy as jnp
-import jax.random as jr
+import functools as ft
+import sys
+from typing import Annotated as Batched
+from typing import Literal, NamedTuple
 
-# jax ecosystem
 import chex
 import distrax
 import equinox as eqx
-import optax
-
-# rl
-import rlax
-import mctx
 import flashbax as fbx
 import gymnax
-from gymnax.wrappers import FlattenObservationWrapper
-
-# logging
-import wandb
+import jax
+import jax.numpy as jnp
+import jax.random as jr
 import matplotlib
 import matplotlib.pyplot as plt
-from matplotlib.axes import Axes
-import sys
+import mctx
+import optax
+import rlax
 import yaml
-
-# typing
+from gymnax.wrappers import FlattenObservationWrapper
+from jaxtyping import Array, Bool, Float, Integer, Key, jaxtyped
+from matplotlib.axes import Axes
 from typeguard import typechecked as typechecker
-from jaxtyping import Bool, Integer, Float, Key, Array, jaxtyped
-from typing import Literal, NamedTuple, Annotated as Batched
 
-# util
-import functools as ft
-from log_util import (
-    exec_loop,
-    get_norm_data,
-    log_values,
-    tree_slice,
-    visualize_catch,
-)
+import wandb
+from log_util import exec_loop, get_norm_data, log_values, tree_slice, visualize_catch
 
 matplotlib.use("agg")  # enable plotting inside jax callback
 

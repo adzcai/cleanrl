@@ -1,27 +1,22 @@
-# jax
+import inspect
+import sys
+from typing import Annotated as Batched
+from typing import Callable, TypeVar
+
 import jax
 import jax.numpy as jnp
 import jax.random as jr
 import mctx
+import yaml
+from gymnax.environments.bsuite.catch import EnvState as CatchEnvState
+from jaxtyping import Array, Bool, Float, Key, PyTree
 
-
-# visualization
 import wandb
 
 try:
     import pygraphviz
 except ImportError:
     pass
-
-# util
-import inspect
-import sys
-import yaml
-
-# typing
-from jaxtyping import Bool, Float, Array, Key, PyTree
-from typing import Annotated as Batched, Callable, TypeVar
-from gymnax.environments.bsuite.catch import EnvState as CatchEnvState
 
 
 def get_norm_data(tree: PyTree[Float[Array, "..."]], prefix: str):
@@ -92,11 +87,12 @@ def exec_loop(init: Carry, length: int, key: Key[Array, ""], cond: Bool[Array, "
 
 
 def visualize_catch(
-    obs_shape: tuple[int, int],
     env_states: Batched[CatchEnvState, "horizon"],
     maps: Float[Array, "horizon obs_size"] | None = None,
 ) -> Float[Array, "horizon channel height width"]:
     """Turn a sequence of Catch environment states into a wandb.Video matrix."""
+
+    obs_shape = (10, 5)
 
     horizon = env_states.time.size
     horizon_grid = jnp.arange(horizon)

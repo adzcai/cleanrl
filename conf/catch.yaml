@@ -5,13 +5,16 @@ arch:
   mlp_depth: 1
   activation: relu
 
-collection:
+env:
   env_name: Catch-bsuite
+  env_source: gymnax
+  horizon: 9
+
+collection:
   total_transitions: 200000
   num_envs: 64
-  horizon: 9
+  mcts_depth: ${env.horizon}
   num_mcts_simulations: 4
-  num_goals: 1
 
 value:
   num_value_bins: 7

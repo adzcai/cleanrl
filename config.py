@@ -51,23 +51,18 @@ For example, in your algorithm file,
         main(TrainConfig, make_train, Path(__file__).name)
 """
 
-# jax
-import jax
-import jax.random as jr
-import jax.numpy as jnp
-
-# logging
+import dataclasses as dc
 import sys
-import wandb
-
-# typing
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, TypeVar, get_origin
-from jaxtyping import Key, Array
 
-# util
+import jax
+import jax.numpy as jnp
+import jax.random as jr
+from jaxtyping import Array, Key
 from omegaconf import OmegaConf
-import dataclasses as dc
+
+import wandb
 
 if TYPE_CHECKING:
     from dataclasses import dataclass
@@ -164,17 +159,14 @@ def dict_to_dataclass(cls: type[T], obj: dict) -> T:
     """
     out = {}
     for field in dc.fields(cls):
-        if (
-            field.name not in obj
-            and field.default is dc.MISSING
-            and field.default_factory is dc.MISSING
-        ):
+        if field.name in obj:
+            value = obj[field.name]
+        elif field.default is not dc.MISSING:
+            value = field.default
+        elif field.default_factory is not dc.MISSING:
+            value = field.default_factory()
+        else:
             raise ValueError(f"Field {field.name} missing when constructing {cls}")
-        # check for defaults
-        value = obj.get(
-            field.name,
-            field.default if field.default is not dc.MISSING else field.default_factory(),
-        )
         if dc.is_dataclass(field.type):
             value = dict_to_dataclass(field.type, value)
         out[field.name] = value
