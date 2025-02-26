@@ -40,3 +40,4 @@ eval:
   warnings: False
   num_evals: 8
   num_eval_envs: 2
+  eval_horizon: 20

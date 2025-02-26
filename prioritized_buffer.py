@@ -1,7 +1,6 @@
 """A prioritized buffer for replay."""
 
 import dataclasses as dc
-from typing import TYPE_CHECKING
 from typing import Annotated as Batched
 from typing import Generic, TypeVar
 
@@ -10,39 +9,34 @@ import jax.numpy as jnp
 import jax.random as jr
 from jaxtyping import Array, Float, Key, PyTree, UInt
 
-from log_util import exec_callback, tree_slice
+from log_util import dataclass, exec_callback, tree_slice
 
-if TYPE_CHECKING:
-    from dataclasses import dataclass
-else:
-    from chex import dataclass
-
-Experience = TypeVar("Experience", bound=PyTree[Array])
+TExperience = TypeVar("TExperience", bound=PyTree[Array])
 
 
-@dataclass(frozen=True)
+@dataclass
 class SumTreeState:
     nodes: Float[Array, " max_size"]
     max_priority: Float[Array, ""]  # new trajectories are assigned max priority
     step: UInt[Array, ""]  # calibrate every some updates
 
 
-@dataclass(frozen=True)
-class BufferState(Generic[Experience]):
-    data: Batched[Experience, " batch_size max_time"]
+@dataclass
+class BufferState(Generic[TExperience]):
+    data: Batched[TExperience, " batch_size max_time"]
     pos: UInt[Array, ""]
     priority_state: SumTreeState
 
 
-@dataclass(frozen=True)
-class Sample(Generic[Experience]):
-    experience: Batched[Experience, " n horizon"]
-    idx: UInt[Array, " n"]
-    priority: Float[Array, " n"]
+@dataclass
+class Sample(Generic[TExperience]):
+    experience: Batched[TExperience, "horizon"]
+    idx: UInt[Array, ""]
+    priority: Float[Array, ""]
 
 
-@dataclass(frozen=True)
-class PrioritizedBuffer(Generic[Experience]):
+@dataclass
+class PrioritizedBuffer(Generic[TExperience]):
     """A buffer that contains experiences and priority weights.
 
     We use "idx" to refer to the flattened index (across batches)
@@ -64,7 +58,7 @@ class PrioritizedBuffer(Generic[Experience]):
             priority_tree=SumTree.new(batch_size * max_time),
         )
 
-    def init(self, experience: Experience) -> BufferState[Experience]:
+    def init(self, experience: TExperience) -> BufferState[TExperience]:
         """Initialize buffer from a dummy experience."""
         data = jax.tree.map(
             lambda x: jnp.empty_like(x, shape=(self.batch_size, self.max_time, *x.shape)),
@@ -79,9 +73,9 @@ class PrioritizedBuffer(Generic[Experience]):
 
     def add(
         self,
-        state: BufferState[Experience],
-        experience: Batched[Experience, "batch_size horizon"],
-    ) -> BufferState[Experience]:
+        state: BufferState[TExperience],
+        experience: Batched[TExperience, "batch_size horizon"],
+    ) -> BufferState[TExperience]:
         """Add a batch of trajectories.
 
         Args:
@@ -115,17 +109,17 @@ class PrioritizedBuffer(Generic[Experience]):
 
     def set_priorities(
         self,
-        state: BufferState[Experience],
+        state: BufferState[TExperience],
         idx: UInt[Array, " batch_size"],
         priorities: Float[Array, " batch_size"],
-    ) -> BufferState[Experience]:
+    ) -> BufferState[TExperience]:
         """Set priorities for a batch of trajectories."""
         priority_state = self.priority_tree.update(state.priority_state, idx, priorities)
         return dc.replace(state, priority_state=priority_state)
 
     def sample(
-        self, state: BufferState[Experience], key: Key[Array, ""], debug=False
-    ) -> Batched[Sample[Experience], "horizon"]:
+        self, state: BufferState[TExperience], debug=False, *, key: Key[Array, ""]
+    ) -> Batched[Sample[TExperience], "horizon"]:
         """Sample a trajectory from the buffer."""
         key_sample, key_fallback = jr.split(key)
         idx, priority = self.priority_tree.sample(state.priority_state, key_sample, debug=debug)
@@ -145,7 +139,7 @@ class PrioritizedBuffer(Generic[Experience]):
             priority=priority,
         )
 
-    def available_pos(self, state: BufferState[Experience]) -> int:
+    def available_pos(self, state: BufferState[TExperience]) -> int:
         """The number of available initial positions (along the horizon axis).
 
         i.e. (randint(0, available_pos) + range(horizon)) % max_time
@@ -153,14 +147,14 @@ class PrioritizedBuffer(Generic[Experience]):
         """
         return jnp.minimum(state.pos, self.max_time) - self.horizon + 1
 
-    def num_available(self, state: BufferState[Experience]) -> int:
+    def num_available(self, state: BufferState[TExperience]) -> int:
         """The number of possible trajectories (overlapping and across batch)."""
         size = self.batch_size * self.available_pos(state)
         # could also count nonzero in self.priority_tree.nodes[(1 << self.priority_tree.depth) - 1 :]
         return size
 
 
-@dataclass(frozen=True)
+@dataclass
 class SumTree:
     """Contains the priorities in a sum tree.
 

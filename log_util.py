@@ -1,17 +1,24 @@
+import dataclasses as dc
+import functools as ft
 import inspect
 import sys
+from typing import TYPE_CHECKING
 from typing import Annotated as Batched
 from typing import Callable, TypeVar
 
+import chex
 import jax
 import jax.numpy as jnp
 import jax.random as jr
 import mctx
 import yaml
+from beartype import beartype as typechecker
 from gymnax.environments.bsuite.catch import EnvState as CatchEnvState
-from jaxtyping import Array, Bool, Float, Key, PyTree
+from jaxtyping import Array, Bool, Float, Key, PyTree, jaxtyped
 
 import wandb
+
+T = TypeVar("T")
 
 try:
     import pygraphviz
@@ -19,7 +26,18 @@ except ImportError:
     pass
 
 
-def get_norm_data(tree: PyTree[Float[Array, "..."]], prefix: str):
+if TYPE_CHECKING:
+    from dataclasses import dataclass
+else:
+
+    def dataclass(cls=None, /, frozen=True, **kwargs):
+        """Typecheck all dataclass fields"""
+        if cls is None:
+            return ft.partial(dataclass, **kwargs)
+        return jaxtyped(typechecker=typechecker)(chex.dataclass(cls, **kwargs))
+
+
+def get_norm_data(tree: PyTree[Float[Array, " ..."]], prefix: str):
     """For logging norms of pytree leaves."""
     return {
         f"{prefix}{jax.tree_util.keystr(keys)}": jnp.sqrt(jnp.mean(jnp.square(ary)))
@@ -86,15 +104,20 @@ def exec_loop(init: Carry, length: int, key: Key[Array, ""], cond: Bool[Array, "
     return decorator
 
 
+def visualize(env_name: str):
+    if env_name in ["Catch-bsuite"]:
+        ...
+
+
 def visualize_catch(
     env_states: Batched[CatchEnvState, "horizon"],
-    maps: Float[Array, "horizon obs_size"] | None = None,
-) -> Float[Array, "horizon channel height width"]:
+    maps: Float[Array, " horizon obs_size"] | None = None,
+) -> Float[Array, " horizon channel height width"]:
     """Turn a sequence of Catch environment states into a wandb.Video matrix."""
 
     obs_shape = (10, 5)
 
-    horizon = env_states.time.size
+    horizon = env_states.paddle_x.size
     horizon_grid = jnp.arange(horizon)
     video_shape = (horizon, 3, *obs_shape)
 
@@ -111,7 +134,7 @@ def visualize_catch(
     video = (
         maps.at[horizon_grid, :, env_states.ball_y, env_states.ball_x]
         .set(jnp.array([255, 0, 0], dtype=jnp.uint8))
-        .at[horizon_grid, :, env_states.paddle_y, env_states.paddle_x]
+        .at[horizon_grid, :, obs_shape[0] - 1, env_states.paddle_x]
         .set(jnp.array([0, 255, 0], dtype=jnp.uint8))
     )
 
@@ -187,3 +210,32 @@ def convert_tree_to_graph(
                 graph.add_edge(node_i, children_i, label=edge_to_str(node_i, a_i))
 
     return graph
+
+
+def dict_to_dataclass(cls: type[T], obj: dict) -> T:
+    """Cast a dictionary to a dataclass instance.
+
+    Args:
+        cls (type[T]): The dataclass to cast to.
+        obj (dict): The dictionary matching the dataclass fields.
+
+    Raises:
+        ValueError: If any required arguments are missing.
+
+    Returns:
+        T: The dataclass instance.
+    """
+    out = {}
+    for field in dc.fields(cls):
+        if field.name in obj:
+            value = obj[field.name]
+        elif field.default is not dc.MISSING:
+            value = field.default
+        elif field.default_factory is not dc.MISSING:
+            value = field.default_factory()
+        else:
+            raise ValueError(f"Field {field.name} missing when constructing {cls}")
+        if dc.is_dataclass(field.type):
+            value = dict_to_dataclass(field.type, value)
+        out[field.name] = value
+    return cls(**out)

@@ -1,12 +1,10 @@
 """Wrapper for multitask environments."""
 
-import dataclasses as dc
-from typing import TYPE_CHECKING
-
 import jax.numpy as jnp
 from gymnax.environments import spaces
-from jaxtyping import Array, Key, UInt
+from jaxtyping import Array, Integer, Key
 
+from log_util import dataclass
 from wrappers.common import (
     Environment,
     GoalObs,
@@ -15,20 +13,15 @@ from wrappers.common import (
     TEnvState,
     Timestep,
     TObs,
-    WrapperState,
+    Wrapper,
 )
 
-if TYPE_CHECKING:
-    from dataclasses import dataclass
-else:
-    from chex import dataclass
 
-
-@dataclass(frozen=True)
-class GoalState(WrapperState[TEnvState]):
+@dataclass
+class GoalState(Wrapper[TEnvState]):
     """Environment state wrapper that adds an integer goal."""
 
-    goal: UInt[Array, ""]
+    goal: Integer[Array, ""]
 
 
 def goal_wrapper(
@@ -39,28 +32,25 @@ def goal_wrapper(
     Sets there to be a singleton goal.
     """
 
-    def reset(key: Key[Array, ""], params: TEnvParams):
-        obs, env_state = env.reset(key, params)
-        goal = jnp.zeros((), jnp.uint32)
+    def reset(params: TEnvParams, *, key: Key[Array, ""]):
+        obs, state = env.reset(params, key=key)
+        goal = jnp.zeros((), int)
         obs = GoalObs(obs=obs, goal=goal)
-        env_state = GoalState(_env_state=env_state, goal=goal)
-        return obs, env_state
+        state = GoalState(_inner=state, goal=goal)
+        return obs, state
 
     def step(
-        key: Key[Array, ""],
-        state: GoalState[TEnvState],
-        action: TAction,
-        params: TEnvParams,
+        state: GoalState[TEnvState], action: TAction, params: TEnvParams, *, key: Key[Array, ""]
     ) -> Timestep[GoalObs[TObs], GoalState[TEnvState]]:
         """Persist the goal throughout a rollout."""
-        timestep = env.step(key, state._env_state, action, params)
+        timestep = env.step(state._inner, action, params, key=key)
         # keep the goal
         obs = GoalObs(obs=timestep.obs, goal=state.goal)
-        env_state = GoalState(_env_state=timestep.env_state, goal=state.goal)
-        return timestep._replace(obs=obs, env_state=env_state)
+        state = GoalState(_inner=timestep.state, goal=state.goal)
+        return timestep._replace(obs=obs, state=state)
 
     def observation_space(params: TEnvParams):
         space = env.observation_space(params)
         return spaces.Tuple([space, spaces.Discrete(1)])
 
-    return dc.replace(env, step=step, reset=reset, observation_space=observation_space)
+    return env.wrap(step=step, reset=reset, observation_space=observation_space)

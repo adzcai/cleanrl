@@ -4,9 +4,8 @@ import dataclasses as dc
 import functools as ft
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING
 from typing import Annotated as Batched
-from typing import Generic, Literal, NamedTuple
+from typing import Any, Generic, Literal, NamedTuple
 
 import chex
 import distrax
@@ -23,12 +22,12 @@ import mctx
 import optax
 import rlax
 import yaml
+from beartype import beartype as typechecker
 from jaxtyping import Array, Bool, Float, Integer, Key, UInt, jaxtyped
 from matplotlib.axes import Axes
-from typeguard import typechecked as typechecker
 
 import wandb
-from config import Config, main
+from config import ArchConfig, TrainConfig, main
 from log_util import (
     exec_loop,
     get_norm_data,
@@ -39,85 +38,13 @@ from log_util import (
 )
 from prioritized_buffer import BufferState, PrioritizedBuffer
 from wrappers.common import TEnvState, TObs
-from wrappers.env import EnvConfig, make_env
-from wrappers.goal import GoalObs
-from wrappers.log import LogWrapperState
-
-if TYPE_CHECKING:
-    from dataclasses import dataclass
-else:
-    from chex import dataclass
+from wrappers.goal_wrapper import GoalObs
+from wrappers.log import EnvState, Metrics
+from wrappers.make_env import make_env
 
 matplotlib.use("agg")  # enable plotting inside jax callback
 
 Obs = GoalObs[Float[Array, " *obs_size"]]
-
-# warnings.filterwarnings("error")  # turn warnings into errors
-
-
-@dataclass(frozen=True)
-class ArchConfig:
-    """Network architecture"""
-
-    kind: Literal["mlp", "cnn"]
-    rnn_size: int
-    mlp_size: int
-    mlp_depth: int
-    activation: str
-
-
-@dataclass(frozen=True)
-class CollectionConfig:
-    total_transitions: int
-    num_envs: int  # more parallel data collection
-    mcts_depth: int
-    num_mcts_simulations: int  # stronger policy improvement
-
-
-@dataclass(frozen=True)
-class ValueConfig:
-    num_value_bins: int | Literal["scalar"]
-    min_value: float
-    max_value: float
-
-
-@dataclass(frozen=True)
-class BootstrapConfig:
-    discount: float  # R2D2 standard
-    lambda_gae: float
-    target_update_freq: int  # in global iterations
-    target_update_size: float
-
-
-@dataclass(frozen=True)
-class OptimConfig:
-    num_minibatches: int  # number of gradient descent updates per iteration
-    batch_size: int  # reduce gradient variance
-    lr_init: float
-    max_grad_norm: float
-    value_coef: float  # scale the value loss
-    reward_coef: float  # scale the reward loss
-    priority_exponent: float  # prioritized replay
-
-
-@dataclass(frozen=True)
-class EvalConfig:
-    warnings: bool
-    num_evals: int
-    num_eval_envs: int
-
-
-@dataclass(frozen=True)
-class TrainConfig(Config):
-    """Training parameters."""
-
-    arch: ArchConfig
-    env: EnvConfig
-    collection: CollectionConfig
-    value: ValueConfig
-    bootstrap: BootstrapConfig
-    optim: OptimConfig
-    eval: EvalConfig
 
 
 class WorldModelRNN(eqx.Module):
@@ -312,9 +239,10 @@ class Transition(NamedTuple):
 
     rollout_state: RolloutState
     action: Integer[Array, ""]
-    reward: Float[Array, " "]
+    reward: Float[Array, ""]
     pred: Prediction
     mcts_probs: Float[Array, " num_actions"]
+    info: dict[str, Any]
 
 
 class ParamState(NamedTuple):
@@ -337,7 +265,7 @@ class IterState(NamedTuple):
 class LossStatistics(NamedTuple):
     """Quantities computed for the loss."""
 
-    loss: Float[Array, " "]
+    loss: Float[Array, ""]
     # policy
     mcts_entropy: Float[Array, " horizon"]
     policy_entropy: Float[Array, " horizon"]
@@ -360,13 +288,13 @@ def make_train(config: TrainConfig):
     eval_freq = num_iters // config.eval.num_evals
 
     # construct environment
-    env, env_params = make_env(config.env, num_episodes=num_iters)
+    env, env_params = make_env(config.env)
     action_space = env.action_space(env_params)
     num_actions = action_space.n
     action_dtype = action_space.dtype
 
-    env_reset_batch = jax.vmap(env.reset, in_axes=(0, None))  # map over key
-    env_step_batch = jax.vmap(env.step, in_axes=(0, 0, 0, None))  # map over key, state, action
+    env_reset_batch = jax.vmap(env.reset, in_axes=(None,))
+    env_step_batch = jax.vmap(env.step, in_axes=(0, 0, None))  # map over state and action
 
     lr = optax.cosine_decay_schedule(config.optim.lr_init, num_grad_updates)
     optim = optax.chain(
@@ -403,7 +331,7 @@ def make_train(config: TrainConfig):
                 value, config.value.min_value, config.value.max_value, config.value.num_value_bins
             )
 
-    def get_invalid_actions(env_state: gymnax.EnvState) -> Bool[Array, "num_actions"]:
+    def get_invalid_actions(env_state: gymnax.EnvState) -> Bool[Array, " num_actions"]:
         if env.name == "Catch-bsuite":
             catch_state: gymnax.environments.bsuite.catch.EnvState = env_state
             catch_env: gymnax.environments.bsuite.catch.Catch = env
@@ -429,9 +357,8 @@ def make_train(config: TrainConfig):
         print("=" * 25)
 
         init_obs, init_env_states = env_reset_batch(
-            jr.split(key_reset, config.collection.num_envs), env_params
+            env_params, key=jr.split(key_reset, config.collection.num_envs)
         )
-
         # initialize all state
         init_net = MuZeroNetwork(
             config=config.arch,
@@ -448,15 +375,20 @@ def make_train(config: TrainConfig):
         init_rollout_states = RolloutState(
             obs=init_obs,
             env_state=init_env_states,
-            initial=jnp.ones(config.collection.num_envs, jnp.bool),
+            initial=jnp.ones(config.collection.num_envs, bool),
+        )
+        dummy_action = env.action_space(env_params).sample(jr.key(0))
+        dummy_timestep = env.step(
+            tree_slice(init_env_states, 0), dummy_action, env_params, key=jr.key(0)
         )
         init_buffer_state = buffer.init(
             Transition(
                 rollout_state=tree_slice(init_rollout_states, 0),
-                action=env.action_space(env_params).sample(jr.key(0)),
-                reward=jnp.empty((), init_hiddens.dtype),
+                action=dummy_action,
+                reward=dummy_timestep.reward,
                 pred=init_net.actor_critic(init_hiddens[0], init_env_states.goal[0]),
                 mcts_probs=jnp.empty(num_actions, init_hiddens.dtype),
+                info=dummy_timestep.info,
             )
         )
 
@@ -490,12 +422,13 @@ def make_train(config: TrainConfig):
             )
             buffer_state = buffer.add(iter_state.param_state.buffer_state, trajectories)
 
-            env_states: Batched[LogWrapperState[TEnvState], "num_envs"] = rollout_states.env_state
-            mean_return = jnp.mean(
-                env_states.episode_returns[
-                    jnp.arange(config.collection.num_envs), env_states.current_index - 1
-                ]
+            metrics: Metrics = trajectories.info["metrics"]
+            done_mask = jnp.append(
+                trajectories.rollout_state.initial[:, 1:],
+                rollout_states.initial[:, jnp.newaxis],
+                axis=-1,
             )
+            mean_return = jnp.mean(metrics.episode_return, where=done_mask)
             log_values({"iter/step": iter_state.step, "iter/mean_return": mean_return})
 
             buffer_available = buffer.num_available(buffer_state) >= config.optim.batch_size
@@ -507,10 +440,10 @@ def make_train(config: TrainConfig):
                 cond=buffer_available,
             )
             def optimize_step(param_state: ParamState, key: Key[Array, ""]):
-                batch = jax.vmap(buffer.sample, in_axes=(None, 0, None))(
+                batch = jax.vmap(buffer.sample, in_axes=(None, None))(
                     param_state.buffer_state,
-                    jr.split(key, config.optim.batch_size),
                     config.eval.warnings,
+                    key=jr.split(key, config.optim.batch_size),
                 )
                 trajectories: Batched[Transition, "batch_size horizon"] = batch.experience
 
@@ -638,23 +571,24 @@ def make_train(config: TrainConfig):
 
             preds, outs = act_mcts(net, rollout_states, key_action)
             actions = outs.action.astype(action_dtype)
-            obs, env_states, rewards, initials, infos = env_step_batch(
-                jr.split(key_step, outs.action.shape[0]),
+            timesteps = env_step_batch(
                 rollout_states.env_state,
                 actions,
                 env_params,
+                key=jr.split(key_step, outs.action.shape[0]),
             )
             return RolloutState(
-                obs=obs,
-                env_state=env_states,
-                initial=initials,
+                obs=timesteps.obs,
+                env_state=timesteps.state,
+                initial=timesteps.done,
             ), Transition(
                 # contains the reward and network predictions computed from the rollout state
                 rollout_state=rollout_states,
                 action=actions,
-                reward=rewards,
+                reward=timesteps.reward,
                 pred=preds,
                 mcts_probs=outs.action_weights,
+                info=timesteps.info,
             )
 
         final_rollout_state, trajectories = rollout_step
@@ -718,7 +652,7 @@ def make_train(config: TrainConfig):
         trajectory: Batched[Transition, "horizon"],
     ) -> tuple[
         Batched[Prediction, "horizon horizon"],
-        Float[Array, "horizon horizon-1"],
+        Float[Array, " horizon horizon-1"],
     ]:
         """Abstracted out for plotting."""
         action_rolled, reward_rolled, initial_rolled = map(
@@ -728,7 +662,7 @@ def make_train(config: TrainConfig):
 
         _, (_, pred) = jax.vmap(net)(trajectory.rollout_state.obs, action_rolled)
         value = logits_to_value(pred.value_logits)
-        bootstrapped_return: Float[Array, "horizon horizon-1"] = jax.vmap(
+        bootstrapped_return: Float[Array, " horizon horizon-1"] = jax.vmap(
             rlax.lambda_returns, (0, 0, 0, None)
         )(
             reward_rolled[:, :-1],
@@ -845,7 +779,7 @@ def make_train(config: TrainConfig):
         *,
         num_envs: int,
         net_static: MuZeroNetwork,
-    ) -> Float[Array, " "]:
+    ) -> Float[Array, ""]:
         """Evaluate a batch of rollouts using the raw policy.
 
         Returns mean return across the batch.
@@ -855,8 +789,8 @@ def make_train(config: TrainConfig):
         net = eqx.combine(params, net_static)
 
         key_reset = jr.split(key_reset, num_envs)
-        obs, env_state = env_reset_batch(key_reset, env_params)
-        env_state: Batched[LogWrapperState[gymenv.TEnvState], "num_envs"]
+        obs, env_state = env_reset_batch(env_params, key=key_reset)
+        env_state: Batched[EnvState[gymenv.TEnvState], "num_envs"]
 
         init_rollout_states = RolloutState(
             obs=obs,
@@ -864,7 +798,7 @@ def make_train(config: TrainConfig):
             initial=jnp.ones(num_envs, dtype=bool),
         )
 
-        @exec_loop(init_rollout_states, config.env.horizon, key_rollout)
+        @exec_loop(init_rollout_states, config.eval.eval_horizon, key_rollout)
         def rollout_step(rollout_states: Batched[RolloutState, "num_envs"], key: Key[Array, ""]):
             key_action, key_step, key_mcts = jr.split(key, 3)
 
@@ -880,19 +814,22 @@ def make_train(config: TrainConfig):
                 rollout_states.obs.obs, rollout_states.obs.goal
             )
             actions = jr.categorical(key_action, logits=policy_logits, axis=-1)
-            obs, env_states, rewards, initials, infos = env_step_batch(
-                jr.split(key_step, num_envs), rollout_states.env_state, actions, env_params
+            timesteps = env_step_batch(
+                rollout_states.env_state, actions, env_params, key=jr.split(key_step, num_envs)
             )
 
             preds, outs = act_mcts(net, rollout_states, key_mcts)
 
-            return RolloutState(obs=obs, env_state=env_states, initial=initials), (
+            return RolloutState(
+                obs=timesteps.obs, env_state=timesteps.state, initial=timesteps.done
+            ), (
                 Transition(
                     rollout_state=rollout_states,
                     action=actions,
-                    reward=rewards,
+                    reward=timesteps.reward,
                     pred=preds,
                     mcts_probs=outs.action_weights,
+                    info=timesteps.info,
                 ),
                 obs_grads,
             )
@@ -911,21 +848,26 @@ def make_train(config: TrainConfig):
             trajectories,
             bootstrapped_returns[:, 0],
             jax.vmap(visualize_catch)(trajectories.rollout_state.env_state, obs_grads)
-            if config.env.env_name == "Catch-bsuite"
+            if config.env.env_name in ["Catch-bsuite", "MultiCatch"]
             else None,
             prefix="eval",
         )
 
-        env_states: Batched[LogWrapperState[gymenv.TEnvState], "num_envs"] = (
-            rollout_states.env_state
+        metrics: Batched[Metrics, "num_envs"] = trajectories.info["metrics"]
+        eval_return = jnp.mean(
+            metrics.episode_return,
+            where=jnp.append(
+                trajectories.rollout_state.initial[:, 1:],
+                rollout_states.initial[:, jnp.newaxis],
+                axis=-1,
+            ),
         )
-        eval_return = jnp.mean(env_states.average_return())
         log_values({"eval/mean_return": eval_return})
         jax.debug.print("eval mean return {}", eval_return)
 
         # debug training procedure
-        batch = jax.vmap(buffer.sample, in_axes=(None, 0))(
-            buffer_state, jr.split(key_sample, num_envs)
+        batch = jax.vmap(buffer.sample, in_axes=(None,))(
+            buffer_state, key=jr.split(key_sample, num_envs)
         )
         sampled_trajectories = batch.experience
         _, aux = loss_trajectory(params, target_params, sampled_trajectories, net_static)
@@ -937,7 +879,7 @@ def make_train(config: TrainConfig):
             ),
             bootstrapped_returns=aux.bootstrapped_return,
             video=jax.vmap(visualize_catch)(sampled_trajectories.rollout_state.env_state)
-            if config.env.env_name == "Catch-bsuite"
+            if config.env.env_name in ["Catch-bsuite", "MultiCatch"]
             else None,
             prefix="visualize",
             priorities=batch.priority,
@@ -1093,9 +1035,7 @@ def make_train(config: TrainConfig):
         ax.set_xticks(horizon, horizon)
         ax.set_ylim(config.value.min_value, config.value.max_value)
 
-    def plot_compare_dists(
-        ax: Axes, p0: Float[Array, " horizon n"], p1: Float[Array, " horizon n"]
-    ):
+    def plot_compare_dists(ax: Axes, p0: Float[Array, " horizon n"], p1: Float[Array, " horizon n"]):
         chex.assert_equal_shape([p0, p1])
         horizon, num_actions = p0.shape
         x = jnp.arange(horizon)

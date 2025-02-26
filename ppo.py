@@ -15,7 +15,7 @@ import wandb
 
 
 class NetworkOutput(NamedTuple):
-    logits: Float[Array, "num_actions"]
+    logits: Float[Array, " num_actions"]
     value_logits: float
 
 
@@ -51,7 +51,7 @@ class ParamsState(NamedTuple):
 
 
 class RolloutState(NamedTuple):
-    obs: Float[Array, "obs_size"]
+    obs: Float[Array, " obs_size"]
     env_state: gymnax.EnvState
 
 
@@ -225,8 +225,8 @@ def make_train(config: Config):
     def loss_trajectory(
         net: Network,
         trajectory: Transition,
-        advantages: Float[Array, "horizon"],
-        value_target_probs: Float[Array, "horizon num_value_bins"],
+        advantages: Float[Array, " horizon"],
+        value_target_probs: Float[Array, " horizon num_value_bins"],
     ):
         preds = jax.vmap(net)(trajectory.rollout_state.obs)
 

@@ -1,4 +1,3 @@
-import dataclasses as dc
 import functools as ft
 
 import jax
@@ -12,28 +11,23 @@ from wrappers.common import Environment, TAction, TEnvParams, TEnvState, TObs
 def auto_reset_wrapper(
     env: Environment[TObs, TEnvState, TAction, TEnvParams],
 ) -> Environment[TObs, TEnvState, TAction, TEnvParams]:
-    """Automatically reset the environment once a terminal state is reached.
+    """Automatically reset the environment after an episode.
 
-    Consider an (obs, env_state, reward, done, info).
-    Under this wrapper, if done is true,
-    obs and env_state correspond to an initial environment.
-    We skip the terminal state that was transitioned into.
+    If env.step returns a terminal state (done == True),
+    return an initial obs, state from env.reset.
+    Note that this means we never observe the actual terminal observation.
+    See `StepType`.
     """
 
-    def step(key: Key[Array, ""], env_state: TEnvState, action: TAction, params: TEnvParams):
-        """Auto-reset.
-
-        If env.step returns a terminal state (done == True),
-        return an initial obs, state from env.reset.
-        """
+    def step(state: TEnvState, action: TAction, params: TEnvParams, *, key: Key[Array, ""]):
         key_reset, key_step = jr.split(key)
-        obs_reset, state_reset = env.reset(key_reset, params)
-        timestep = env.step(key_step, env_state, action, params)
-        obs, env_state = jax.tree.map(
+        obs_reset, state_reset = env.reset(params, key=key_reset)
+        timestep = env.step(state, action, params, key=key_step)
+        obs, state = jax.tree.map(
             ft.partial(jnp.where, timestep.done),
             (obs_reset, state_reset),
-            (timestep.obs, timestep.env_state),
+            (timestep.obs, timestep.state),
         )
-        return timestep._replace(obs=obs, env_state=env_state)
+        return timestep._replace(obs=obs, state=state)
 
-    return dc.replace(env, step=step)
+    return env.wrap(step=step)

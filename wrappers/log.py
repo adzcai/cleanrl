@@ -1,90 +1,81 @@
-import dataclasses as dc
-from typing import TYPE_CHECKING
+import functools as ft
 
 import jax
 import jax.numpy as jnp
-from jaxtyping import Array, Float, Key, UInt
+from jaxtyping import Array, Float, Integer, Key
 
-from wrappers.common import (
-    Environment,
-    TAction,
-    TEnvParams,
-    TEnvState,
-    Timestep,
-    TObs,
-    WrapperState,
-)
-
-if TYPE_CHECKING:
-    from dataclasses import dataclass
-else:
-    from chex import dataclass
+from log_util import dataclass
+from wrappers.common import (Environment, T, TAction, TEnvParams, TEnvState,
+                             Timestep, TObs, Wrapper)
 
 
-@dataclass(frozen=True)
-class LogWrapperState(WrapperState[TEnvState]):
+@dataclass
+class Metrics:
+    """Stores episode length and return.
+
+    Properties:
+        current_return (Float ()): Cumulative return of the current episode (undiscounted).
+        current_length (Integer ()): Number of steps taken in current episode.
+        episode_return (Float ()): Returned episode return on termination.
+        episode_length (Integer ()): Returned episode length on termination.
+    """
+
     current_return: Float[Array, ""]
-    current_length: Float[Array, ""]
-    current_index: UInt[Array, ""]
-    episode_returns: Float[Array, " num_episodes"]
-    episode_lengths: UInt[Array, " num_episodes"]
+    current_length: Integer[Array, ""]
+    episode_return: Float[Array, ""]
+    episode_length: Integer[Array, ""]
 
-    def average_return(self):
-        return jnp.sum(self.episode_returns, axis=-1) / self.current_index
+
+@dataclass
+class EnvState(Wrapper[T]):
+    metrics: Metrics
 
 
 def log_wrapper(
     env: Environment[TObs, TEnvState, TAction, TEnvParams],
-    num_episodes: int,
-) -> Environment[TObs, LogWrapperState[TEnvState], TAction, TEnvParams]:
-    """Log interactions and episode rewards."""
+) -> Environment[TObs, EnvState[TEnvState], TAction, EnvState[TEnvParams]]:
+    """Log interactions and episode rewards.
 
-    def reset(key: Key[Array, ""], params: TEnvParams) -> tuple[TObs, TEnvState]:
-        obs, env_state = env.reset(key, params)
-        env_state = LogWrapperState(
-            _env_state=env_state,
-            current_return=jnp.zeros((), float),
-            current_length=jnp.zeros((), jnp.uint32),
-            current_index=jnp.zeros((), jnp.uint32),
-            episode_returns=jnp.zeros(num_episodes),
-            episode_lengths=jnp.zeros(num_episodes, jnp.uint32),
-        )
-        return obs, env_state
+    env, env_params = log_wrapper(env, env_params)
+    """
+
+    init_metrics = Metrics(
+        current_return=jnp.zeros((), float),
+        current_length=jnp.zeros((), int),
+        episode_return=jnp.zeros((), float),
+        episode_length=jnp.zeros((), int),
+    )
+
+    def reset(
+        params: EnvState[TEnvParams], *, key: Key[Array, ""]
+    ) -> tuple[TObs, EnvState[TEnvState]]:
+        obs, env_state = env.reset(params, key=key)
+        return obs, EnvState(_inner=env_state, metrics=init_metrics)
 
     def step(
-        key: Key[Array, ""],
-        state: LogWrapperState[TEnvState],
+        state: EnvState[TEnvState],
         action: TAction,
         params: TEnvParams,
-    ) -> Timestep[TObs, LogWrapperState[TEnvState]]:
-        timestep = env.step(key, state._env_state, action, params)
-
-        env_state = jax.lax.cond(
-            timestep.done,
-            # start new episode if done
-            lambda state, timestep: LogWrapperState(
-                _env_state=timestep.env_state,
-                current_return=jnp.zeros((), float),
-                current_length=jnp.zeros((), jnp.uint32),
-                current_index=state.current_index + 1,
-                episode_returns=state.episode_returns.at[state.current_index].set(
-                    state.current_return + timestep.reward
-                ),
-                episode_lengths=state.episode_lengths.at[state.current_index].set(
-                    state.current_length + 1
-                ),
-            ),
-            # otherwise update current state
-            lambda state, timestep: dc.replace(
-                state,
-                _env_state=timestep.env_state,
-                current_return=state.current_return + timestep.reward,
-                current_length=state.current_length + 1,
-            ),
-            state,
-            timestep,
+        *,
+        key: Key[Array, ""],
+    ) -> Timestep[TObs, EnvState[TEnvState]]:
+        timestep = env.step(state._inner, action, params, key=key)
+        updated_return = state.metrics.current_return + timestep.reward
+        updated_length = state.metrics.current_length + 1
+        done_metrics = Metrics(
+            current_return=init_metrics.current_return,
+            current_length=init_metrics.current_length,
+            episode_return=updated_return,
+            episode_length=updated_length,
         )
+        continue_metrics = Metrics(
+            current_return=updated_return,
+            current_length=updated_length,
+            episode_return=state.metrics.current_return,
+            episode_length=state.metrics.episode_length,
+        )
+        metrics = jax.tree.map(ft.partial(jnp.where, timestep.done), done_metrics, continue_metrics)
+        state = EnvState(_inner=timestep.state, metrics=metrics)
+        return timestep._replace(state=state, info=timestep.info | {"metrics": metrics})
 
-        return timestep._replace(env_state=env_state)
-
-    return dc.replace(env, reset=reset, step=step)
+    return env.wrap(reset=reset, step=step)

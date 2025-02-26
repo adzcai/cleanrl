@@ -40,7 +40,7 @@ For example, in your algorithm file,
 
     from config import Config, main
 
-    @dataclass(frozen=True)
+    @dataclass
     class TrainConfig(Config):
         ...
 
@@ -54,7 +54,7 @@ For example, in your algorithm file,
 import dataclasses as dc
 import sys
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, TypeVar, get_origin
+from typing import Any, Literal, TypeVar, get_origin
 
 import jax
 import jax.numpy as jnp
@@ -63,17 +63,14 @@ from jaxtyping import Array, Key
 from omegaconf import OmegaConf
 
 import wandb
+from log_util import dataclass, dict_to_dataclass
 
-if TYPE_CHECKING:
-    from dataclasses import dataclass
-else:
-    from chex import dataclass
-
-T = TypeVar("T")
 TConfig = TypeVar("TConfig", bound="Config")
 
+# warnings.filterwarnings("error")  # turn warnings into errors
 
-@dataclass(frozen=True)
+
+@dataclass
 class Config:
     """Parent dataclass for configuration options.
 
@@ -101,76 +98,90 @@ DEFAULT_CONFIG = Config(
 )
 
 
-def to_wandb_sweep_parameters(config: Config) -> tuple[set[str], dict]:
-    """Turn a config dataclass instance to a wandb sweep parameters dictionary.
+@dataclass
+class ArchConfig:
+    """Network architecture"""
 
-    Args:
-        config (Config): The config to transform
-
-    Returns:
-        tuple[set[str], dict]: The parameters being swept and the sweep configuration dictionary.
-    """
-    sweep_params, parameters = set(), dict()
-    for field in dc.fields(config):
-        value = getattr(config, field.name)
-        if dc.is_dataclass(field.type):
-            swept, params = to_wandb_sweep_parameters(value)
-            sweep_params |= swept
-            value = dict(parameters=params)
-        elif isinstance(value, dict) and get_origin(field.type) is not dict:
-            # swept parameter
-            sweep_params.add(field.name)
-        else:
-            value = dict(value=value)
-        parameters[field.name] = value
-    return sweep_params, parameters
+    kind: Literal["mlp", "cnn"]
+    rnn_size: int
+    mlp_size: int
+    mlp_depth: int
+    activation: str
 
 
-def as_sweep_config(config: Config, file: str) -> dict:
-    """Generates the wandb sweep config. Does not upload to wandb."""
-    sweep_params, parameters = to_wandb_sweep_parameters(config)
-    return {
-        "program": file,
-        "method": config.sweep_method,
-        "name": f"{file} sweep {' '.join(sweep_params)}",
-        "metric": {"goal": "maximize", "name": "eval/mean_return"},
-        "parameters": parameters,
-        "command": [
-            r"${env}",
-            r"${interpreter}",
-            r"${program}",
-            r"agent=True",
-        ],
-    }
+@dataclass
+class EnvConfig:
+    """Arguments to specify an environment."""
+
+    env_name: str
+    horizon: int
+    env_source: Literal["gymnax", "brax", "custom"] = "gymnax"
+    env_kwargs: dict[str, Any] = dc.field(default_factory=dict)
 
 
-def dict_to_dataclass(cls: type[T], obj: dict) -> T:
-    """Cast a dictionary to a dataclass instance.
+@dataclass
+class CollectionConfig:
+    """For episode rollouts."""
 
-    Args:
-        cls (type[T]): The dataclass to cast to.
-        obj (dict): The dictionary matching the dataclass fields.
+    total_transitions: int
+    num_envs: int  # more parallel data collection
+    mcts_depth: int
+    num_mcts_simulations: int  # stronger policy improvement
 
-    Raises:
-        ValueError: If any required arguments are missing.
 
-    Returns:
-        T: The dataclass instance.
-    """
-    out = {}
-    for field in dc.fields(cls):
-        if field.name in obj:
-            value = obj[field.name]
-        elif field.default is not dc.MISSING:
-            value = field.default
-        elif field.default_factory is not dc.MISSING:
-            value = field.default_factory()
-        else:
-            raise ValueError(f"Field {field.name} missing when constructing {cls}")
-        if dc.is_dataclass(field.type):
-            value = dict_to_dataclass(field.type, value)
-        out[field.name] = value
-    return cls(**out)
+@dataclass
+class ValueConfig:
+    """For parameterizing value function."""
+
+    num_value_bins: int | Literal["scalar"]
+    min_value: float
+    max_value: float
+
+
+@dataclass
+class BootstrapConfig:
+    """For bootstrapping with a target network."""
+
+    discount: float
+    lambda_gae: float
+    target_update_freq: int  # in global iterations
+    target_update_size: float
+
+
+@dataclass
+class OptimConfig:
+    """Optimization parameters"""
+
+    num_minibatches: int  # number of gradient descent updates per iteration
+    batch_size: int  # reduce gradient variance
+    lr_init: float
+    max_grad_norm: float
+    value_coef: float  # scale the value loss
+    reward_coef: float  # scale the reward loss
+    priority_exponent: float  # prioritized replay
+
+
+@dataclass
+class EvalConfig:
+    """Evaluation of the learned policy and value function."""
+
+    warnings: bool
+    eval_horizon: int
+    num_evals: int
+    num_eval_envs: int
+
+
+@dataclass
+class TrainConfig(Config):
+    """Training parameters."""
+
+    arch: ArchConfig
+    env: EnvConfig
+    collection: CollectionConfig
+    value: ValueConfig
+    bootstrap: BootstrapConfig
+    optim: OptimConfig
+    eval: EvalConfig
 
 
 def main(
@@ -219,3 +230,46 @@ def main(
             _, mean_eval_reward = jax.block_until_ready(outputs)
             mean_eval_reward = mean_eval_reward[mean_eval_reward != -jnp.inf]
         print(f"Done training. {mean_eval_reward=}")
+
+
+def as_sweep_config(config: Config, file: str) -> dict:
+    """Generates the wandb sweep config. Does not upload to wandb."""
+    sweep_params, parameters = to_wandb_sweep_parameters(config)
+    return {
+        "program": file,
+        "method": config.sweep_method,
+        "name": f"{file} sweep {' '.join(sweep_params)}",
+        "metric": {"goal": "maximize", "name": "eval/mean_return"},
+        "parameters": parameters,
+        "command": [
+            r"${env}",
+            r"${interpreter}",
+            r"${program}",
+            r"agent=True",
+        ],
+    }
+
+
+def to_wandb_sweep_parameters(config: Config) -> tuple[set[str], dict]:
+    """Turn a config dataclass instance to a wandb sweep parameters dictionary.
+
+    Args:
+        config (Config): The config to transform
+
+    Returns:
+        tuple[set[str], dict]: The parameters being swept and the sweep configuration dictionary.
+    """
+    sweep_params, parameters = set(), dict()
+    for field in dc.fields(config):
+        value = getattr(config, field.name)
+        if dc.is_dataclass(field.type):
+            swept, params = to_wandb_sweep_parameters(value)
+            sweep_params |= swept
+            value = dict(parameters=params)
+        elif isinstance(value, dict) and get_origin(field.type) is not dict:
+            # swept parameter
+            sweep_params.add(field.name)
+        else:
+            value = dict(value=value)
+        parameters[field.name] = value
+    return sweep_params, parameters

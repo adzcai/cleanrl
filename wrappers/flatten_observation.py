@@ -1,4 +1,3 @@
-import dataclasses as dc
 from typing import Annotated
 
 import jax
@@ -10,7 +9,7 @@ from wrappers.common import Environment, TAction, TEnvParams, TEnvState, TObs
 
 def _flatten(x: Array):
     """Flatten and preserve scalars."""
-    return jax.tree.map(lambda x: x if len(x.shape) == 0 else x.ravel(), x)
+    return jax.tree.map(lambda x: x if jnp.ndim(x) == 0 else x.ravel(), x)
 
 
 def flatten_observation_wrapper(
@@ -18,12 +17,12 @@ def flatten_observation_wrapper(
 ) -> Environment[Annotated[TObs, "flat"], TEnvState, TAction, TEnvParams]:
     """Flatten observations."""
 
-    def reset(key: Key[Array, ""], params: TEnvParams):
-        obs, state = env.reset(key, params)
+    def reset(params: TEnvParams, *, key: Key[Array, ""]):
+        obs, state = env.reset(params, key=key)
         return _flatten(obs), state
 
-    def step(key: Key[Array, ""], env_state: TEnvState, action: TAction, params: TEnvParams):
-        timestep = env.step(key, env_state, action, params)
+    def step(state: TEnvState, action: TAction, params: TEnvParams, *, key: Key[Array, ""]):
+        timestep = env.step(state, action, params, key=key)
         return timestep._replace(obs=_flatten(timestep.obs))
 
-    return dc.replace(env, reset=reset, step=step)
+    return env.wrap(reset=reset, step=step)

@@ -4,24 +4,19 @@ Source: github.com/deepmind/bsuite/blob/master/bsuite/environments/catch.py.
 """
 
 import dataclasses as dc
-from typing import TYPE_CHECKING
 
 import gymnax.environments.spaces as spaces
-import jax
 import jax.numpy as jnp
+import jax.random as jr
 from jaxtyping import Array, Float, Integer, Key
 
-from wrappers.common import Environment, GoalObs, Timestep
+from log_util import dataclass
+from wrappers.common import Environment, GoalObs, StepType, Timestep
 
-if TYPE_CHECKING:
-    from dataclasses import dataclass
-else:
-    from chex import dataclass
-
-Obs = Float[Array, "rows columns"]
+Obs = Float[Array, " rows columns"]
 
 
-@dataclass(frozen=True)
+@dataclass
 class EnvState:
     ball_x: Integer[Array, ""]
     ball_y: Integer[Array, ""]
@@ -30,19 +25,24 @@ class EnvState:
     goal: Integer[Array, ""]
 
 
+@dataclass
+class EnvParams:
+    rows: int = 10
+    columns: int = 5
+    num_goals: int = 2
+
+
 def make_multi_catch(
-    rows: int = 5,
-    columns: int = 5,
-    num_goals: int = 2,
-) -> tuple[Environment[GoalObs[Obs], EnvState, Integer[Array, ""], None], None]:
+    **kwargs,
+) -> tuple[Environment[GoalObs[Obs], EnvState, Integer[Array, ""], EnvParams], EnvParams]:
     """JAX Compatible version of Catch bsuite environment."""
 
-    def _get_obs(state: EnvState) -> GoalObs[Obs]:
+    def _get_obs(state: EnvState, params: EnvParams) -> GoalObs[Obs]:
         obs = (
-            jnp.zeros((rows, columns))
+            jnp.zeros((params.rows, params.columns))
             .at[state.ball_y, state.ball_x]
             .set(1.0)
-            .at[rows - 1, state.paddle_x]
+            .at[params.rows - 1, state.paddle_x]
             .set(1.0)
         )
         return GoalObs(
@@ -50,35 +50,36 @@ def make_multi_catch(
             goal=state.goal,
         )
 
-    def reset(key: Key[Array, ""], params: None) -> tuple[GoalObs[Obs], EnvState]:
+    def reset(params: EnvParams, *, key: Key[Array, ""]) -> tuple[GoalObs[Obs], EnvState]:
         """Randomly sample ball column, ball type, and goal."""
-        key_ball, key_type, key_goal = jax.random.split(key, 3)
+        key_ball, key_type, key_goal = jr.split(key, 3)
         state = EnvState(
-            ball_x=jax.random.randint(key_ball, (), 0, columns, int),
+            ball_x=jr.randint(key_ball, (), 0, params.columns, int),
             ball_y=jnp.zeros((), int),
-            paddle_x=jnp.asarray(columns // 2, int),
-            ball_type=jax.random.randint(key_type, (), 0, num_goals),
-            goal=jax.random.randint(key_goal, (), 0, num_goals),
+            paddle_x=jnp.asarray(params.columns // 2, int),
+            ball_type=jr.randint(key_type, (), 0, params.num_goals),
+            goal=jr.randint(key_goal, (), 0, params.num_goals),
         )
-        return _get_obs(state), state
+        return _get_obs(state, params), state
 
     def step(
-        key: Key[Array, ""],
         state: EnvState,
         action: Integer[Array, ""],
-        params: None,
+        params: EnvParams,
+        *,
+        key: Key[Array, ""],
     ) -> Timestep[GoalObs[Obs], EnvState]:
         """Perform single timestep state transition."""
 
         dx = action - 1  # [-1, 0, 1] = left, no-op, right
-        paddle_x = jnp.clip(state.paddle_x + dx, 0, columns - 1)
+        paddle_x = jnp.clip(state.paddle_x + dx, 0, params.columns - 1)
         new_state = dc.replace(
             state,
             ball_y=state.ball_y + 1,
             paddle_x=paddle_x,
         )
 
-        done = new_state.ball_y == rows - 1
+        done = new_state.ball_y == params.rows - 1
         missed = paddle_x != new_state.ball_x
         matched = state.goal == state.ball_type
         success = jnp.logical_xor(missed, matched)
@@ -86,26 +87,27 @@ def make_multi_catch(
 
         # Check number of steps in episode termination condition
         return Timestep(
-            _get_obs(new_state),
-            new_state,
-            reward,
-            done,
-            None,
+            obs=_get_obs(new_state, params),
+            state=new_state,
+            reward=reward,
+            step_type=jnp.where(done, StepType.TERMINATION, StepType.TRANSITION),
+            info={},
         )
 
-    def action_space(params: None) -> spaces.Discrete:
+    def action_space(params: EnvParams) -> spaces.Discrete:
         return spaces.Discrete(3)
 
-    def observation_space(params: None) -> spaces.Box:
-        return spaces.Box(0, 1, (rows, columns))
+    def observation_space(params: EnvParams) -> spaces.Box:
+        return spaces.Box(0, 1, (params.rows, params.columns))
 
-    def goal_space(params: None) -> spaces.Discrete:
+    def goal_space(params: EnvParams) -> spaces.Discrete:
         return spaces.Discrete(2)
 
     return Environment(
+        _inner=None,
         reset=reset,
         step=step,
         action_space=action_space,
         observation_space=observation_space,
         goal_space=goal_space,
-    ), None
+    ), EnvParams(**kwargs)

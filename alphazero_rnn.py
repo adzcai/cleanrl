@@ -8,15 +8,16 @@
 6. Evaluation function
 """
 
+import dataclasses as dc
 import functools as ft
 import sys
+from pathlib import Path
 from typing import Annotated as Batched
 from typing import Literal, NamedTuple
 
 import chex
 import distrax
 import equinox as eqx
-import flashbax as fbx
 import gymnax
 import jax
 import jax.numpy as jnp
@@ -27,76 +28,17 @@ import mctx
 import optax
 import rlax
 import yaml
-from gymnax.wrappers import FlattenObservationWrapper
+from beartype import beartype as typechecker
 from jaxtyping import Array, Bool, Float, Integer, Key, jaxtyped
 from matplotlib.axes import Axes
-from typeguard import typechecked as typechecker
 
 import wandb
+from config import ArchConfig, TrainConfig, main
 from log_util import exec_loop, get_norm_data, log_values, tree_slice, visualize_catch
+from prioritized_buffer import BufferState, PrioritizedBuffer
+from wrappers.make_env import make_env
 
 matplotlib.use("agg")  # enable plotting inside jax callback
-
-
-class Config(NamedTuple):
-    env_name: str = "Catch-bsuite"
-    # network architecture
-    rnn_size: int = 0  # 0 for no rnn
-    mlp_size: int = 32
-    mlp_depth: int = 2
-    activation: Literal["relu", "tanh"] = "relu"
-    # collection
-    total_transitions: int = 50_000
-    num_envs: int = 64  # more parallel data collection
-    horizon: int = 18  # also mcts max depth
-    # two-hot value
-    num_value_bins: int | Literal["scalar"] = 3
-    min_value: float = -1.0
-    max_value: float = 1.0
-    # search
-    num_mcts_simulations: int = 4  # stronger policy improvement
-    # bootstrapping
-    discount: float = 0.997  # R2D2 standard
-    bootstrap_n: int = 5
-    lambda_gae: float = 0.95
-    # optimization
-    num_minibatches: int = 6  # number of gradient descent steps per iteration
-    batch_size: int = 4  # reduce gradient variance
-    lr_init: float = 1e-2
-    max_grad_norm: float = 2 * jnp.pi
-    # prioritized replay
-    priority_exponent: float = 0.6
-    priority_td_norm_ord: float = 1.5  # norm of TD error
-    # target
-    target_update_freq: int = 4
-    target_update_size: float = 3 / 4
-    # loss
-    value_coef: float = 0.5  # scale the value loss
-    # evaluation
-    num_evals: int = 6
-    num_eval_envs: int = 1
-
-
-debug_config = Config(
-    rnn_size=1,
-    mlp_size=2,
-    mlp_depth=1,
-    total_transitions=100,
-    num_envs=1,
-    horizon=10,
-    num_value_bins="scalar",
-    min_value=-2.0,
-    max_value=2.0,
-    num_mcts_simulations=2,
-    bootstrap_n=2,
-    num_minibatches=2,
-    batch_size=2,
-    target_update_freq=4,
-    target_update_size=3 / 4,
-    value_coef=0.5,
-    num_evals=1,
-    num_eval_envs=1,
-)
 
 
 class Prediction(NamedTuple):
@@ -111,29 +53,28 @@ class ActorCriticRNN(eqx.Module):
 
     def __init__(
         self,
+        arch: ArchConfig,
         obs_size: int,
-        rnn_size: int,
-        mlp_size: int,
-        mlp_depth: int,
         num_actions: int,
         num_value_bins: int | Literal["scalar"],
-        activation: Literal["relu", "tanh"],
         *,
         key: Key[Array, ""],
     ):
         key_cell, key_policy, key_value = jr.split(key, 3)
 
-        activation = jax.nn.relu if activation == "relu" else jax.nn.tanh
+        activation = jax.nn.relu if arch.activation == "relu" else jax.nn.tanh
 
-        self.cell = eqx.nn.GRUCell(obs_size, rnn_size, key=key_cell) if rnn_size > 0 else None
+        self.cell = (
+            eqx.nn.GRUCell(obs_size, arch.rnn_size, key=key_cell) if arch.rnn_size > 0 else None
+        )
 
-        in_size = rnn_size if self.is_rnn else obs_size
+        in_size = arch.rnn_size if self.is_rnn else obs_size
 
         self.policy_head = eqx.nn.MLP(
-            in_size, num_actions, mlp_size, mlp_depth, activation, key=key_policy
+            in_size, num_actions, arch.mlp_size, arch.mlp_depth, activation, key=key_policy
         )
         self.value_head = eqx.nn.MLP(
-            in_size, num_value_bins, mlp_size, mlp_depth, activation, key=key_value
+            in_size, num_value_bins, arch.mlp_size, arch.mlp_depth, activation, key=key_value
         )
 
     def __call__(
@@ -199,25 +140,16 @@ class Transition(NamedTuple):
 
     rollout_state: RolloutState
     action: Integer[Array, ""]
-    reward: Float[Array, " "]
+    reward: Float[Array, ""]
     pred: Prediction
     mcts_probs: Float[Array, " num_actions"]
-
-
-BufferState = fbx.prioritised_trajectory_buffer.PrioritisedTrajectoryBufferState[Transition]
-TrajectorySample = fbx.prioritised_trajectory_buffer.PrioritisedTrajectoryBufferSample[Transition]
-TrajectoryBuffer = fbx.prioritised_trajectory_buffer.PrioritisedTrajectoryBuffer[
-    Transition,
-    BufferState,
-    TrajectorySample,
-]
 
 
 class ParamState(NamedTuple):
     """Carried during optimization."""
 
     params: ActorCriticRNN
-    buffer_state: BufferState
+    buffer_state: BufferState[Transition]
     opt_state: optax.OptState
 
 
@@ -233,7 +165,7 @@ class IterState(NamedTuple):
 class LossStatistics(NamedTuple):
     """Quantities computed for the loss."""
 
-    loss: Float[Array, " "]
+    loss: Float[Array, ""]
     # policy
     mcts_entropy: Float[Array, " horizon"]
     policy_entropy: Float[Array, " horizon"]
@@ -248,71 +180,67 @@ class LossStatistics(NamedTuple):
 
 
 @jaxtyped(typechecker=typechecker)
-def make_train(config: Config):
-    num_iters = config.total_transitions // (config.num_envs * config.horizon)
-    num_updates = num_iters * config.num_minibatches
-    eval_freq = num_iters // config.num_evals
+def make_train(config: TrainConfig):
+    num_iters = config.collection.total_transitions // (
+        config.collection.num_envs * config.env.horizon
+    )
+    num_updates = num_iters * config.optim.num_minibatches
+    eval_freq = num_iters // config.eval.num_evals
 
-    env, env_params = gymnax.make(config.env_name)
-    env_params = env_params.replace(max_steps_in_episode=config.total_transitions)  # don't truncate
+    env, env_params = make_env(config.env, goal=False)
+    env_params = env_params.replace(
+        max_steps_in_episode=config.collection.total_transitions
+    )  # don't truncate
     obs_shape = env.observation_space(env_params).shape  # for visualization
     num_actions = env.action_space(env_params).n
-    env: gymnax.environments.environment.Environment = FlattenObservationWrapper(env)
+    # env: gymnax.environments.environment.Environment = FlattenObservationWrapper(env)
 
-    env_reset_batch = jax.vmap(env.reset, in_axes=(0, None))  # map over key
-    env_step_batch = jax.vmap(env.step, in_axes=(0, 0, 0, None))  # map over key, state, action
+    env_reset_batch = jax.vmap(env.reset, in_axes=(None))  # map over key
+    env_step_batch = jax.vmap(env.step, in_axes=(0, 0, None))  # map over key, state, action
 
-    lr = optax.cosine_decay_schedule(config.lr_init, num_updates)
+    lr = optax.cosine_decay_schedule(config.optim.lr_init, num_updates)
     optim = optax.chain(
-        optax.clip_by_global_norm(config.max_grad_norm),
+        optax.clip_by_global_norm(config.optim.max_grad_norm),
         optax.adamw(lr),
     )
 
-    # ceil(batch_size / num_envs)
-    trajectories_per_batch = (config.batch_size - 1) // config.num_envs + 1
-    # save to dict for logging
-    buffer_args = dict(
-        add_batch_size=config.num_envs,
-        sample_batch_size=config.batch_size,
-        sample_sequence_length=config.horizon,
-        period=config.horizon // 2,  # avoid some correlations
-        min_length_time_axis=trajectories_per_batch * config.horizon,
-        max_length_time_axis=num_iters * config.horizon,  # keep all transitions
-        priority_exponent=config.priority_exponent,
+    buffer = PrioritizedBuffer.new(
+        batch_size=config.collection.num_envs,
+        max_time=num_iters * config.env.horizon,
+        horizon=config.env.horizon,
     )
-    buffer: TrajectoryBuffer = fbx.make_prioritised_trajectory_buffer(**buffer_args)
 
     def logits_to_value(
         value_logits: Float[Array, " horizon num_value_bins"],
     ) -> Float[Array, " horizon"]:
         """Convert from logits for two-hot encoding to scalar values."""
-        if config.num_value_bins == "scalar":
+        if config.value.num_value_bins == "scalar":
             return value_logits
         else:
             return rlax.transform_from_2hot(
                 jax.nn.softmax(value_logits, axis=-1),
-                config.min_value,
-                config.max_value,
-                config.num_value_bins,
+                config.value.min_value,
+                config.value.max_value,
+                config.value.num_value_bins,
             )
 
     def value_to_probs(
         value: Float[Array, " horizon"],
     ) -> Float[Array, " horizon num_value_bins"]:
         """Convert from scalar values to logits for two-hot encoding."""
-        if config.num_value_bins == "scalar":
+        if config.value.num_value_bins == "scalar":
             return value
         else:
             return rlax.transform_to_2hot(
                 value,
-                config.min_value,
-                config.max_value,
-                config.num_value_bins,
+                config.value.min_value,
+                config.value.max_value,
+                config.value.num_value_bins,
             )
 
     def get_invalid_actions(
         env_state: gymnax.EnvState,
-    ) -> Bool[Array, "num_actions"]:
+    ) -> Bool[Array, " num_actions"]:
         if env.name == "Catch-bsuite":
             catch_state: gymnax.environments.bsuite.catch.EnvState = env_state
             catch_env: gymnax.environments.bsuite.catch.Catch = env
@@ -334,35 +262,32 @@ def make_train(config: Config):
         key_reset, key_net, key_iter, key_evaluate = jr.split(key, 4)
 
         sys.stdout.write("Config\n" + "=" * 20 + "\n")
-        yaml.safe_dump(config._asdict(), sys.stdout)
-        sys.stdout.write("=" * 20 + "\n")
-        sys.stdout.write("Buffer arguments\n" + "=" * 20 + "\n")
-        yaml.safe_dump(buffer_args, sys.stdout)
+        yaml.safe_dump(dc.asdict(config), sys.stdout)
         sys.stdout.write("=" * 20 + "\n")
 
         init_obs, init_env_states = env_reset_batch(
-            jr.split(key_reset, config.num_envs), env_params
+            env_params,
+            key=jr.split(key_reset, config.collection.num_envs),
         )
 
         # initialize all state
         init_net = ActorCriticRNN(
+            arch=config.arch,
             obs_size=init_obs.shape[-1],
-            rnn_size=config.rnn_size,
-            mlp_size=config.mlp_size,
-            mlp_depth=config.mlp_depth,
             num_actions=num_actions,
-            num_value_bins=config.num_value_bins,
-            activation=config.activation,
+            num_value_bins=config.value.num_value_bins,
             key=key_net,
         )
         init_params, net_static = eqx.partition(init_net, eqx.is_inexact_array)
-        init_hiddens = jnp.broadcast_to(init_net.init_hidden(), (config.num_envs, config.rnn_size))
+        init_hiddens = jnp.broadcast_to(
+            init_net.init_hidden(), (config.collection.num_envs, config.arch.rnn_size)
+        )
         init_rollout_states = RolloutState(
             obs=init_obs,
             unobs=Unobs(
                 env_state=init_env_states,
                 hidden=init_hiddens,
-                initial=jnp.ones(config.num_envs, jnp.bool),
+                initial=jnp.ones(config.collection.num_envs, jnp.bool),
             ),
         )
         init_buffer_state = buffer.init(
@@ -405,16 +330,20 @@ def make_train(config: Config):
             )
             log_values({"iter/step": iter_state.step, "iter/mean_return": mean_return})
 
-            buffer_available = buffer.can_sample(buffer_state)
+            buffer_available = buffer.num_available(buffer_state) >= config.optim.batch_size
 
             @exec_loop(
                 iter_state.param_state._replace(buffer_state=buffer_state),
-                config.num_minibatches,
+                config.optim.num_minibatches,
                 key_optim,
                 cond=buffer_available,
             )
             def optimize_step(param_state: ParamState, key: Key[Array, ""]):
-                batch = buffer.sample(param_state.buffer_state, key)
+                batch = jax.vmap(buffer.sample, (None, None))(
+                    param_state.buffer_state,
+                    config.eval.warnings,
+                    key=jr.split(key, config.optim.batch_size),
+                )
                 trajectories: Batched[Transition, "batch_size horizon"] = batch.experience
 
                 @ft.partial(jax.value_and_grad, has_aux=True)
@@ -425,7 +354,7 @@ def make_train(config: Config):
                         eqx.combine(iter_state.target_params, net_static),
                         trajectories,
                     )
-                    chex.assert_shape(losses, (config.batch_size,))
+                    chex.assert_shape(losses, (config.optim.batch_size,))
                     # TODO add importance reweighting
                     return jnp.mean(losses), aux
 
@@ -439,8 +368,8 @@ def make_train(config: Config):
                 # prioritize trajectories with high TD error
                 buffer_state = buffer.set_priorities(
                     param_state.buffer_state,
-                    batch.indices,
-                    jnp.linalg.vector_norm(aux.td_error, axis=-1, ord=config.priority_td_norm_ord),
+                    batch.idx,
+                    jnp.mean(jnp.abs(aux.td_error), axis=-1),
                 )
 
                 log_values(
@@ -459,8 +388,8 @@ def make_train(config: Config):
 
             target_params = jax.tree.map(
                 lambda new, old: jnp.where(
-                    iter_state.step % config.target_update_freq == 0,
-                    optax.incremental_update(new, old, config.target_update_size),
+                    iter_state.step % config.bootstrap.target_update_freq == 0,
+                    optax.incremental_update(new, old, config.bootstrap.target_update_size),
                     old,
                 ),
                 param_state.params,
@@ -472,7 +401,7 @@ def make_train(config: Config):
                 (iter_state.step % eval_freq == 0) & buffer_available,
                 ft.partial(
                     evaluate,
-                    num_envs=config.num_eval_envs,
+                    num_envs=config.eval.num_eval_envs,
                     net_static=net_static,
                 ),
                 lambda *_: jnp.nan,
@@ -487,8 +416,8 @@ def make_train(config: Config):
                 "step {}/{}. seen {}/{} transitions. mean return {}",
                 iter_state.step,
                 num_iters,
-                iter_state.step * config.num_envs * config.horizon,
-                config.total_transitions,
+                iter_state.step * config.collection.num_envs * config.env.horizon,
+                config.collection.total_transitions,
                 mean_return,
             )
 
@@ -507,29 +436,29 @@ def make_train(config: Config):
         init_rollout_state: Batched[RolloutState, "num_envs"],
         key: Key[Array, ""],
     ) -> tuple[Batched[RolloutState, "num_envs"], Batched[Transition, "num_envs horizon"]]:
-        @exec_loop(init_rollout_state, config.horizon, key)
+        @exec_loop(init_rollout_state, config.env.horizon, key)
         def rollout_step(rollout_states: Batched[RolloutState, "num_envs"], key: Key[Array, ""]):
             key_action, key_step = jr.split(key)
 
             hiddens, preds, out = act_mcts(net, rollout_states, key_action)
-            obs, env_states, rewards, is_initials, infos = env_step_batch(
-                jr.split(key_step, out.action.size),
+            timesteps = env_step_batch(
                 rollout_states.unobs.env_state,
                 out.action,
                 env_params,
+                key=jr.split(key_step, out.action.size),
             )
             return RolloutState(
-                obs=obs,
+                obs=timesteps.obs,
                 unobs=Unobs(
-                    env_state=env_states,
+                    env_state=timesteps.state,
                     hidden=hiddens,
-                    initial=is_initials,
+                    initial=timesteps.done,
                 ),
             ), Transition(
                 # contains the reward and network predictions computed from the rollout state
                 rollout_state=rollout_states,
                 action=out.action,
-                reward=rewards,
+                reward=timesteps.reward,
                 pred=preds,
                 mcts_probs=out.action_weights,
             )
@@ -564,7 +493,10 @@ def make_train(config: Config):
         ):
             """Returns the logits and value for the newly created node."""
             obs, env_states, rewards, is_initials, infos = env_step_batch(
-                jr.split(key, action.size), unobs.env_state, action, env_params
+                unobs.env_state,
+                action,
+                env_params,
+                key=jr.split(key, action.size),
             )
             hiddens, preds = jax.vmap(net.step)(unobs.hidden, obs, is_initials)
             return mctx.RecurrentFnOutput(
@@ -572,7 +504,7 @@ def make_train(config: Config):
                 # careful for off-by-one
                 # if new state is initial,
                 # preds.value_logits is for a new trajectory
-                discount=jnp.where(is_initials, 0.0, config.discount),
+                discount=jnp.where(is_initials, 0.0, config.bootstrap.discount),
                 prior_logits=preds.policy_logits,
                 value=logits_to_value(preds.value_logits),
             ), Unobs(env_state=env_states, hidden=hiddens, initial=is_initials)
@@ -582,9 +514,9 @@ def make_train(config: Config):
             rng_key=key,
             root=root,
             recurrent_fn=mcts_recurrent_fn,
-            num_simulations=config.num_mcts_simulations,
+            num_simulations=config.collection.num_mcts_simulations,
             invalid_actions=invalid_actions,
-            max_depth=config.horizon,
+            max_depth=config.env.horizon,
         )
 
         return hiddens, preds, out
@@ -600,10 +532,10 @@ def make_train(config: Config):
             # reward[0] is the reward obtained from acting in rollout_state[0]
             # is_initials[1] iff rollout_state[1] is part of new trajectory
             trajectory.reward[:-1],
-            jnp.where(unobs.initial[1:], 0.0, config.discount),
+            jnp.where(unobs.initial[1:], 0.0, config.bootstrap.discount),
             value[1:],
             # config.bootstrap_n,
-            config.lambda_gae,
+            config.bootstrap.lambda_gae,
         )
         return pred, return_
 
@@ -621,7 +553,7 @@ def make_train(config: Config):
         _, online_pred = net(init_hidden, obs, initial)
         chex.assert_shape(
             [trajectory.mcts_probs, online_pred.policy_logits],
-            (config.horizon, num_actions),
+            (config.env.horizon, num_actions),
         )
 
         # policy loss
@@ -633,7 +565,7 @@ def make_train(config: Config):
         # bootstrap from target network
         target_pred, bootstrapped_return = bootstrap(target_net, trajectory)
         online_values = logits_to_value(online_pred.value_logits)
-        if config.num_value_bins == "scalar":
+        if config.value.num_value_bins == "scalar":
             value_loss = rlax.l2_loss(online_values[:-1], bootstrapped_return)
         else:
             online_value_dist = distrax.Categorical(logits=online_pred.value_logits)
@@ -649,14 +581,13 @@ def make_train(config: Config):
                 ),
                 bootstrapped_returns=bootstrapped_return[jnp.newaxis],
                 video=visualize_catch(
-                    obs_shape,
                     trajectory.rollout_state.unobs.env_state,
                 ),
                 prefix="voir",
                 target_value_logits=target_pred.value_logits[jnp.newaxis],
             )
 
-        loss = jnp.mean(policy_loss) + config.value_coef * jnp.mean(value_loss)
+        loss = jnp.mean(policy_loss) + config.optim.value_coef * jnp.mean(value_loss)
         return loss, LossStatistics(
             loss=loss,
             # policy
@@ -680,7 +611,7 @@ def make_train(config: Config):
         *,
         num_envs: int,
         net_static: ActorCriticRNN,
-    ) -> Float[Array, " "]:
+    ) -> Float[Array, ""]:
         """Evaluate a batch of rollouts using the raw policy.
 
         Returns mean return across the batch.
@@ -689,20 +620,20 @@ def make_train(config: Config):
 
         net = eqx.combine(params, net_static)
 
-        obs, env_state = env_reset_batch(jr.split(key_reset, num_envs), env_params)
+        obs, env_state = env_reset_batch(env_params, key=jr.split(key_reset, num_envs))
 
         init_rollout_states = RolloutState(
             obs=obs,
             unobs=Unobs(
                 env_state=env_state,
-                hidden=jnp.broadcast_to(net.init_hidden(), (num_envs, config.rnn_size)),
+                hidden=jnp.broadcast_to(net.init_hidden(), (num_envs, config.arch.rnn_size)),
                 initial=jnp.zeros(num_envs, dtype=bool),
             ),
         )
 
         @exec_loop(
             init_rollout_states,
-            config.horizon,
+            config.env.horizon,
             key_rollout,
         )
         def rollout_step(rollout_states: Batched[RolloutState, "num_envs"], key: Key[Array, ""]):
@@ -724,27 +655,27 @@ def make_train(config: Config):
                 rollout_states.obs, rollout_states.unobs
             )
             actions = jr.categorical(key_action, logits=policy_logits, axis=-1)
-            obs, env_states, rewards, initials, infos = env_step_batch(
-                jr.split(key_step, num_envs),
+            timesteps = env_step_batch(
                 rollout_states.unobs.env_state,
                 actions,
                 env_params,
+                key=jr.split(key_step, num_envs),
             )
 
             _, preds, mcts_outs = act_mcts(net, rollout_states, key_mcts)
 
             return RolloutState(
-                obs=obs,
+                obs=timesteps.obs,
                 unobs=Unobs(
-                    env_state=env_states,
+                    env_state=timesteps.state,
                     hidden=hiddens,
-                    initial=initials,
+                    initial=timesteps.done,
                 ),
             ), (
                 Transition(
                     rollout_state=rollout_states,
                     action=actions,
-                    reward=rewards,
+                    reward=timesteps.reward,
                     pred=preds,
                     mcts_probs=mcts_outs.action_weights,
                 ),
@@ -764,8 +695,7 @@ def make_train(config: Config):
             visualize_callback,
             trajectories,
             bootstrapped_returns,
-            jax.vmap(visualize_catch, in_axes=(None, 0, 0))(
-                obs_shape,
+            jax.vmap(visualize_catch, in_axes=(0, 0))(
                 trajectories.rollout_state.unobs.env_state,
                 obs_grads,
             ),
@@ -794,8 +724,7 @@ def make_train(config: Config):
                     )
                 ),
                 bootstrapped_returns=aux.bootstrapped_return,
-                video=jax.vmap(visualize_catch, (None, 0))(
-                    obs_shape,
+                video=jax.vmap(visualize_catch, in_axes=(0,))(
                     sampled_trajectories.rollout_state.unobs.env_state,
                 ),
                 prefix="visualize",
@@ -817,7 +746,7 @@ def make_train(config: Config):
 
         fig_width = 3
         rows_per_env = 2
-        if config.num_value_bins != "scalar":
+        if config.value.num_value_bins != "scalar":
             rows_per_env += 1
         num_envs, horizon = trajectories.reward.shape
 
@@ -844,7 +773,7 @@ def make_train(config: Config):
                 trajectories.mcts_probs[i],
             )
 
-            if config.num_value_bins != "scalar":
+            if config.value.num_value_bins != "scalar":
                 ax_value: Axes = ax[rows_per_env * i + j]
                 j += 1
                 ax_value.set_title(f"Trajectory {i} Value and Bootstrapped")
@@ -868,7 +797,7 @@ def make_train(config: Config):
                 )
                 ax_stats.legend(loc="center left", bbox_to_anchor=(1, 0.5))
                 ax_policy.legend(loc="upper center", bbox_to_anchor=(0.5, 1.20), ncol=3)
-                if config.num_value_bins != "scalar":
+                if config.value.num_value_bins != "scalar":
                     ax_value.legend(loc="upper center", bbox_to_anchor=(0.5, 1.20), ncol=3)
 
         # separate figure for plotting video
@@ -950,13 +879,13 @@ def make_train(config: Config):
         mcts_dist = distrax.Categorical(probs=trajectory.mcts_probs)
         ax.plot(horizon, policy_dist.entropy(), "b:", label="policy entropy")
         ax.plot(horizon, mcts_dist.entropy(), "g:", label="MCTS entropy")
-        if config.num_value_bins != "scalar":
+        if config.value.num_value_bins != "scalar":
             value_dist = distrax.Categorical(logits=trajectory.pred.value_logits)
             ax.plot(horizon, value_dist.entropy(), "y:", label="value entropy")
 
         # loss
         ax.plot(horizon, policy_dist.kl_divergence(mcts_dist), "c--", label="policy / mcts kl")
-        if config.num_value_bins != "scalar":
+        if config.value.num_value_bins != "scalar":
             bootstrapped_dist = distrax.Categorical(probs=value_to_probs(bootstrapped_return))
             value_loss = bootstrapped_dist.kl_divergence(value_dist[:-1])
             ax.plot(horizon[:-1], value_loss, "r--", label="value / bootstrap kl")
@@ -965,11 +894,9 @@ def make_train(config: Config):
             ax.plot(horizon[:-1], value_loss, "r--", label="value / bootstrap l2")
 
         ax.set_xticks(horizon, horizon)
-        ax.set_ylim(config.min_value, config.max_value)
+        ax.set_ylim(config.value.min_value, config.value.max_value)
 
-    def plot_compare_dists(
-        ax: Axes, p0: Float[Array, " horizon n"], p1: Float[Array, " horizon n"]
-    ):
+    def plot_compare_dists(ax: Axes, p0: Float[Array, " horizon n"], p1: Float[Array, " horizon n"]):
         chex.assert_equal_shape([p0, p1])
         horizon, num_actions = p0.shape
         x = jnp.arange(horizon)
@@ -988,54 +915,4 @@ def make_train(config: Config):
 
 
 if __name__ == "__main__":
-    default_config = Config()
-    seed = 0
-
-    WANDB_PROJECT = "alphazero"
-
-    if len(sys.argv) >= 2:
-        if sys.argv[1] == "sweep":
-            num_runs = 6
-            config_values = jax.tree.map(lambda x: {"value": x}, default_config._asdict()) | {
-                "lr_init": {"min": 1e-5, "max": 1e-3},
-                "num_minibatches": {"values": [64, 128]},
-            }
-            sweep_config = {
-                "method": "random",
-                "metric": {"goal": "maximize", "name": "sweep/mean_reward"},
-                "parameters": config_values,
-            }
-
-            def run():
-                with wandb.init(project=WANDB_PROJECT):
-                    train = make_train(wandb.config)
-                    _, final_reward = jax.jit(train)(jr.key(seed))
-                    wandb.log({"sweep/mean_reward": final_reward})
-
-            sweep_id = (
-                sys.argv[2]
-                if len(sys.argv) >= 3
-                else wandb.sweep(sweep_config, project=WANDB_PROJECT)
-            )
-
-            wandb.agent(
-                sweep_id,
-                function=run,
-                project=WANDB_PROJECT,
-                count=num_runs,
-            )
-
-        elif sys.argv[1] == "debug":
-            train = make_train(debug_config)
-            with jax.disable_jit():
-                output = train(jr.key(seed))
-            jax.block_until_ready(output)
-    else:
-        train = make_train(default_config)
-        with wandb.init(project=WANDB_PROJECT, config=default_config._asdict()):
-            output = jax.jit(train)(jr.key(seed))
-            # with jax.profiler.trace(f"/tmp/{WANDB_PROJECT}-trace", create_perfetto_link=True):
-            _, mean_eval_reward = jax.block_until_ready(output)
-            sys.stdout.write(f"{mean_eval_reward=}\n")
-
-    sys.stdout.write("Done training\n")
+    main(TrainConfig, make_train, Path(__file__).name)
