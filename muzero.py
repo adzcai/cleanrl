@@ -1,7 +1,5 @@
 """Implementation of AlphaZero with a recurrent actor-critic network."""
 
-import dm_env.specs as specs
-
 import dataclasses as dc
 import functools as ft
 import sys
@@ -9,10 +7,11 @@ from pathlib import Path
 from typing import Annotated as Batched
 from typing import Generic, Literal, NamedTuple
 
-import gymnax
 import chex
 import distrax
+import dm_env.specs as specs
 import equinox as eqx
+import gymnax
 import jax
 import jax.numpy as jnp
 import jax.random as jr
@@ -30,11 +29,11 @@ import wandb
 from config import ArchConfig, TrainConfig, main
 from log_util import exec_loop, get_norm_data, log_values, roll_into_matrix, tree_slice
 from prioritized_buffer import BufferState, PrioritizedBuffer
-from wrappers.base import StepType, TEnvState, TObs, Timestep
+from wrappers.base import StepType, TEnvState, Timestep, TObs
 from wrappers.goal_wrapper import GoalObs
 from wrappers.log import Metrics
-from wrappers.translate import make_env
 from wrappers.multi_catch import get_action_name, visualize_catch
+from wrappers.translate import make_env
 
 matplotlib.use("agg")  # enable plotting inside jax callback
 
@@ -55,16 +54,14 @@ class WorldModelRNN(eqx.Module):
     def __init__(
         self,
         config: ArchConfig,
-        num_actions: int,
-        num_value_bins: int | Literal["scalar"],
         *,
         key: Key[Array, ""],
     ):
         key_cell, key_reward = jr.split(key)
-        self.cell = eqx.nn.GRUCell(num_actions, config.rnn_size, key=key_cell)
+        self.cell = eqx.nn.GRUCell(config.num_actions, config.rnn_size, key=key_cell)
         self.reward_head = eqx.nn.MLP(
-            config.rnn_size + config.mlp_size,
-            num_value_bins,
+            config.rnn_size + config.num_goals,
+            config.num_value_bins,
             config.mlp_size,
             config.mlp_depth,
             getattr(jax.nn, config.activation),
@@ -103,23 +100,21 @@ class ActorCritic(eqx.Module):
     def __init__(
         self,
         config: ArchConfig,
-        num_actions: int,
-        num_value_bins: int | Literal["scalar"],
         *,
         key: Key[Array, ""],
     ):
         key_policy, key_value = jr.split(key)
         self.policy_head = eqx.nn.MLP(
-            config.rnn_size + config.mlp_size,
-            num_actions,
+            config.rnn_size + config.num_goals,
+            config.num_actions,
             config.mlp_size,
             config.mlp_depth,
             getattr(jax.nn, config.activation),
             key=key_policy,
         )
         self.value_head = eqx.nn.MLP(
-            config.rnn_size + config.mlp_size,
-            num_value_bins,
+            config.rnn_size + config.num_goals,
+            config.num_value_bins,
             config.mlp_size,
             config.mlp_depth,
             getattr(jax.nn, config.activation),
@@ -142,24 +137,21 @@ class MuZeroNetwork(eqx.Module):
 
     projection: eqx.nn.MLP
     """Embed the observation into world model recurrent state."""
-    goal_embedding: eqx.nn.Linear
-    """Embed the one-hot goal into `mlp_size` embedding."""
     world_model: WorldModelRNN
     """The recurrent world model."""
     actor_critic: ActorCritic
     """The actor and critic networks."""
+    num_goals: int
 
     def __init__(
         self,
         config: ArchConfig,
         obs_size: tuple[int, ...],
-        num_actions: int,
-        num_value_bins: int,
-        num_goals: int,
         *,
         key: Key[Array, ""],
     ):
-        key_projection, key_goal_embedding, key_world_model, key_actor_critic = jr.split(key, 4)
+        key_projection, key_world_model, key_actor_critic = jr.split(key, 3)
+        self.num_goals = config.num_goals
 
         if config.kind == "mlp":
             self.projection = eqx.nn.MLP(
@@ -189,23 +181,8 @@ class MuZeroNetwork(eqx.Module):
                 ]
             )
 
-        goal_embedding = eqx.nn.Linear(num_goals, config.mlp_size, key=jr.key(0))
-        weight = jr.truncated_normal(
-            key_goal_embedding, lower=-1.96, upper=1.96, shape=goal_embedding.weight.shape
-        )
-        self.goal_embedding = eqx.tree_at(lambda x: x.weight, goal_embedding, weight)
-        self.world_model = WorldModelRNN(
-            config=config,
-            num_actions=num_actions,
-            num_value_bins=num_value_bins,
-            key=key_world_model,
-        )
-        self.actor_critic = ActorCritic(
-            config=config,
-            num_actions=num_actions,
-            num_value_bins=num_value_bins,
-            key=key_actor_critic,
-        )
+        self.world_model = WorldModelRNN(config=config, key=key_world_model)
+        self.actor_critic = ActorCritic(config=config, key=key_actor_critic)
 
     def __call__(
         self,
@@ -231,8 +208,7 @@ class MuZeroNetwork(eqx.Module):
         return hidden, (reward, pred)
 
     def embed_goal(self, goal: Integer[Array, ""]):
-        goal = jax.nn.one_hot(goal, self.goal_embedding.in_features)
-        return self.goal_embedding(goal)
+        return jax.nn.one_hot(goal, self.num_goals)
 
 
 class Transition(NamedTuple, Generic[TObs, TEnvState]):
@@ -368,11 +344,13 @@ def make_train(config: TrainConfig):
         )
         # initialize all state
         init_net = MuZeroNetwork(
-            config=config.arch,
+            config=dc.replace(
+                config.arch,
+                num_actions=num_actions,
+                num_value_bins=config.value.num_value_bins,
+                num_goals=env.goal_space(env_params).num_values,
+            ),
             obs_size=init_timesteps.obs.obs.shape[1:],
-            num_actions=num_actions,
-            num_value_bins=config.value.num_value_bins,
-            num_goals=env.goal_space(env_params).num_values,
             key=key_net,
         )
         init_params, net_static = eqx.partition(init_net, eqx.is_inexact_array)

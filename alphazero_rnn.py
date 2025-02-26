@@ -36,8 +36,8 @@ import wandb
 from config import ArchConfig, TrainConfig, main
 from log_util import exec_loop, get_norm_data, log_values, tree_slice
 from prioritized_buffer import BufferState, PrioritizedBuffer
-from wrappers.translate import make_env
 from wrappers.multi_catch import visualize_catch
+from wrappers.translate import make_env
 
 matplotlib.use("agg")  # enable plotting inside jax callback
 

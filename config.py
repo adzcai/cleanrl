@@ -113,6 +113,11 @@ class ArchConfig:
     mlp_depth: int
     activation: str
 
+    # to be replaced
+    num_actions: int = -1
+    num_goals: int = -1
+    num_value_bins: int | Literal["scalar"] = -1
+
 
 @dataclass
 class EnvConfig:

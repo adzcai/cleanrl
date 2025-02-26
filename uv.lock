@@ -668,6 +668,7 @@ version = "0.0.8"
 source = { editable = "../gymnax" }
 dependencies = [
     { name = "chex" },
+    { name = "flax" },
     { name = "gym" },
     { name = "gymnasium" },
     { name = "jax" },
@@ -680,6 +681,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "chex" },
+    { name = "flax" },
     { name = "gym", specifier = ">=0.26" },
     { name = "gymnasium" },
     { name = "jax" },

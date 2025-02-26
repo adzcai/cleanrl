@@ -1,6 +1,5 @@
 from typing import Any
 
-from config import EnvConfig
 import gymnax.environments.environment as ge
 import gymnax.environments.spaces as spaces
 import housemaze
@@ -11,6 +10,7 @@ import jax.random as jr
 import navix as nx
 from jaxtyping import Array, Key
 
+from config import EnvConfig
 from wrappers.auto_reset import auto_reset_wrapper
 from wrappers.base import Environment, StepType, Timestep
 from wrappers.flatten_observation import flatten_observation_wrapper
