@@ -87,6 +87,11 @@ class Config:
         metadata={"help": "Load config from wandb instead of cli."},
     )
 
+    @property
+    def name(self):
+        """The wandb run name. Can be overridden."""
+        raise NotImplementedError
+
 
 # outside the class to allow subclasses to have arguments without defaults
 DEFAULT_CONFIG = Config(
@@ -115,7 +120,7 @@ class EnvConfig:
 
     env_name: str
     horizon: int
-    env_source: Literal["gymnax", "brax", "custom"] = "gymnax"
+    env_source: Literal["gymnax", "brax", "navix", "custom"] = "gymnax"
     env_kwargs: dict[str, Any] = dc.field(default_factory=dict)
 
 
@@ -183,6 +188,10 @@ class TrainConfig(Config):
     optim: OptimConfig
     eval: EvalConfig
 
+    @property
+    def name(self):
+        return f"{self.env.env_name} {self.collection.total_transitions}"
+
 
 def main(
     ConfigClass: type[TConfig],
@@ -221,8 +230,9 @@ def main(
             "Run `man sbatch` for details."
         )
     else:
-        with wandb.init(config=None if cfg.agent else OmegaConf.to_object(cfg)):
+        with wandb.init(config=None if cfg.agent else OmegaConf.to_object(cfg)) as run:
             cfg = dict_to_dataclass(ConfigClass, wandb.config)
+            run.name = cfg.name
             train = make_train(cfg)
             keys = jr.split(jr.key(cfg.seed), cfg.num_seeds)
             # with jax.profiler.trace(f"/tmp/{os.environ['WANDB_PROJECT']}-trace", create_perfetto_link=True):

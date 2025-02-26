@@ -1,11 +1,11 @@
 """Wrapper for multitask environments."""
 
 import jax.numpy as jnp
-from gymnax.environments import spaces
+from dm_env.specs import DiscreteArray as DiscreteArraySpec
 from jaxtyping import Array, Integer, Key
 
 from log_util import dataclass
-from wrappers.common import (
+from wrappers.base import (
     Environment,
     GoalObs,
     TAction,
@@ -33,11 +33,11 @@ def goal_wrapper(
     """
 
     def reset(params: TEnvParams, *, key: Key[Array, ""]):
-        obs, state = env.reset(params, key=key)
+        timestep = env.reset(params, key=key)
         goal = jnp.zeros((), int)
-        obs = GoalObs(obs=obs, goal=goal)
-        state = GoalState(_inner=state, goal=goal)
-        return obs, state
+        timestep.obs = GoalObs(obs=timestep.obs, goal=goal)
+        timestep.state = GoalState(_inner=timestep.state, goal=goal)
+        return timestep
 
     def step(
         state: GoalState[TEnvState], action: TAction, params: TEnvParams, *, key: Key[Array, ""]
@@ -45,12 +45,12 @@ def goal_wrapper(
         """Persist the goal throughout a rollout."""
         timestep = env.step(state._inner, action, params, key=key)
         # keep the goal
-        obs = GoalObs(obs=timestep.obs, goal=state.goal)
-        state = GoalState(_inner=timestep.state, goal=state.goal)
-        return timestep._replace(obs=obs, state=state)
+        timestep.obs = GoalObs(obs=timestep.obs, goal=state.goal)
+        timestep.state = GoalState(_inner=timestep.state, goal=state.goal)
+        return timestep
 
     def observation_space(params: TEnvParams):
         space = env.observation_space(params)
-        return spaces.Tuple([space, spaces.Discrete(1)])
+        return [space, DiscreteArraySpec(1, name="goal")]
 
-    return env.wrap(step=step, reset=reset, observation_space=observation_space)
+    return env.wrap(name="goal", step=step, reset=reset, observation_space=observation_space)

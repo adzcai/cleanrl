@@ -5,8 +5,7 @@ import jax.numpy as jnp
 from jaxtyping import Array, Float, Integer, Key
 
 from log_util import dataclass
-from wrappers.common import (Environment, T, TAction, TEnvParams, TEnvState,
-                             Timestep, TObs, Wrapper)
+from wrappers.base import Environment, T, TAction, TEnvParams, TEnvState, Timestep, TObs, Wrapper
 
 
 @dataclass
@@ -27,13 +26,13 @@ class Metrics:
 
 
 @dataclass
-class EnvState(Wrapper[T]):
+class LogState(Wrapper[T]):
     metrics: Metrics
 
 
 def log_wrapper(
     env: Environment[TObs, TEnvState, TAction, TEnvParams],
-) -> Environment[TObs, EnvState[TEnvState], TAction, EnvState[TEnvParams]]:
+) -> Environment[TObs, LogState[TEnvState], TAction, LogState[TEnvParams]]:
     """Log interactions and episode rewards.
 
     env, env_params = log_wrapper(env, env_params)
@@ -47,18 +46,20 @@ def log_wrapper(
     )
 
     def reset(
-        params: EnvState[TEnvParams], *, key: Key[Array, ""]
-    ) -> tuple[TObs, EnvState[TEnvState]]:
-        obs, env_state = env.reset(params, key=key)
-        return obs, EnvState(_inner=env_state, metrics=init_metrics)
+        params: LogState[TEnvParams], *, key: Key[Array, ""]
+    ) -> tuple[TObs, LogState[TEnvState]]:
+        timestep = env.reset(params, key=key)
+        timestep.state = LogState(_inner=timestep.state, metrics=init_metrics)
+        timestep.info |= {"metrics": init_metrics}
+        return timestep
 
     def step(
-        state: EnvState[TEnvState],
+        state: LogState[TEnvState],
         action: TAction,
         params: TEnvParams,
         *,
         key: Key[Array, ""],
-    ) -> Timestep[TObs, EnvState[TEnvState]]:
+    ) -> Timestep[TObs, LogState[TEnvState]]:
         timestep = env.step(state._inner, action, params, key=key)
         updated_return = state.metrics.current_return + timestep.reward
         updated_length = state.metrics.current_length + 1
@@ -74,8 +75,9 @@ def log_wrapper(
             episode_return=state.metrics.current_return,
             episode_length=state.metrics.episode_length,
         )
-        metrics = jax.tree.map(ft.partial(jnp.where, timestep.done), done_metrics, continue_metrics)
-        state = EnvState(_inner=timestep.state, metrics=metrics)
-        return timestep._replace(state=state, info=timestep.info | {"metrics": metrics})
+        metrics = jax.tree.map(ft.partial(jnp.where, timestep.last), done_metrics, continue_metrics)
+        timestep.state = LogState(_inner=timestep.state, metrics=metrics)
+        timestep.info |= {"metrics": metrics}
+        return timestep
 
-    return env.wrap(reset=reset, step=step)
+    return env.wrap(name="log", reset=reset, step=step)

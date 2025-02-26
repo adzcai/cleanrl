@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 from jaxtyping import Array, Key
 
-from wrappers.common import Environment, TAction, TEnvParams, TEnvState, TObs
+from wrappers.base import Environment, StepType, TAction, TEnvParams, TEnvState, Timestep, TObs
 
 
 def _flatten(x: Array):
@@ -18,11 +18,13 @@ def flatten_observation_wrapper(
     """Flatten observations."""
 
     def reset(params: TEnvParams, *, key: Key[Array, ""]):
-        obs, state = env.reset(params, key=key)
-        return _flatten(obs), state
+        timestep = env.reset(params, key=key)
+        timestep.obs = _flatten(timestep.obs)
+        return timestep
 
     def step(state: TEnvState, action: TAction, params: TEnvParams, *, key: Key[Array, ""]):
         timestep = env.step(state, action, params, key=key)
-        return timestep._replace(obs=_flatten(timestep.obs))
+        timestep.obs = _flatten(timestep.obs)
+        return timestep
 
-    return env.wrap(reset=reset, step=step)
+    return env.wrap(name="flatten_observation", reset=reset, step=step)

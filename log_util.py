@@ -6,14 +6,13 @@ from typing import TYPE_CHECKING
 from typing import Annotated as Batched
 from typing import Callable, TypeVar
 
-import chex
 import jax
 import jax.numpy as jnp
 import jax.random as jr
 import mctx
 import yaml
 from beartype import beartype as typechecker
-from gymnax.environments.bsuite.catch import EnvState as CatchEnvState
+from chex import dataclass
 from jaxtyping import Array, Bool, Float, Key, PyTree, jaxtyped
 
 import wandb
@@ -26,15 +25,18 @@ except ImportError:
     pass
 
 
-if TYPE_CHECKING:
-    from dataclasses import dataclass
-else:
+if not TYPE_CHECKING:  # runtime check dataclasses
+    _dataclass = dataclass
 
-    def dataclass(cls=None, /, frozen=True, **kwargs):
-        """Typecheck all dataclass fields"""
+    def dataclass(cls=None, /, **kwargs):
+        """Typecheck all dataclass fields."""
         if cls is None:
             return ft.partial(dataclass, **kwargs)
-        return jaxtyped(typechecker=typechecker)(chex.dataclass(cls, **kwargs))
+        return jaxtyped(typechecker=typechecker)(_dataclass(cls, **kwargs))
+
+
+def typecheck(f):
+    return jaxtyped(f, typechecker=typechecker)
 
 
 def get_norm_data(tree: PyTree[Float[Array, " ..."]], prefix: str):
@@ -71,6 +73,10 @@ def exec_callback(f: Callable):
     return f
 
 
+def scale_gradient(x: Float[Array, "n"], factor: float):
+    return x * factor + jax.lax.stop_gradient((1 - factor) * x)
+
+
 Carry = TypeVar("Carry")
 X = TypeVar("X")
 Y = TypeVar("Y")
@@ -89,7 +95,7 @@ def exec_loop(init: Carry, length: int, key: Key[Array, ""], cond: Bool[Array, "
 
     def decorator(
         f: Callable[[Carry, X], tuple[Carry, Y]],
-    ) -> tuple[Carry, Batched[Y, "length"]]:
+    ) -> tuple[Carry, Batched[Y, " length"]]:
         if cond is None:
             return jax.lax.scan(f, init, jr.split(key, length))
         else:
@@ -102,43 +108,6 @@ def exec_loop(init: Carry, length: int, key: Key[Array, ""], cond: Bool[Array, "
             )
 
     return decorator
-
-
-def visualize(env_name: str):
-    if env_name in ["Catch-bsuite"]:
-        ...
-
-
-def visualize_catch(
-    env_states: Batched[CatchEnvState, "horizon"],
-    maps: Float[Array, " horizon obs_size"] | None = None,
-) -> Float[Array, " horizon channel height width"]:
-    """Turn a sequence of Catch environment states into a wandb.Video matrix."""
-
-    obs_shape = (10, 5)
-
-    horizon = env_states.paddle_x.size
-    horizon_grid = jnp.arange(horizon)
-    video_shape = (horizon, 3, *obs_shape)
-
-    if maps is not None:
-        # rescale to [0, 255]
-        maps_min = jnp.min(maps, keepdims=True)
-        maps = 255 * (maps - maps_min) / (jnp.max(maps, keepdims=True) - maps_min)
-        maps = maps.astype(jnp.uint8)
-        maps = jnp.reshape(maps, (horizon, 1, *obs_shape))
-        maps = jnp.broadcast_to(maps, video_shape)
-    else:
-        maps = jnp.full(video_shape, 255, dtype=jnp.uint8)
-
-    video = (
-        maps.at[horizon_grid, :, env_states.ball_y, env_states.ball_x]
-        .set(jnp.array([255, 0, 0], dtype=jnp.uint8))
-        .at[horizon_grid, :, obs_shape[0] - 1, env_states.paddle_x]
-        .set(jnp.array([0, 255, 0], dtype=jnp.uint8))
-    )
-
-    return video
 
 
 def convert_tree_to_graph(

@@ -34,9 +34,10 @@ from matplotlib.axes import Axes
 
 import wandb
 from config import ArchConfig, TrainConfig, main
-from log_util import exec_loop, get_norm_data, log_values, tree_slice, visualize_catch
+from log_util import exec_loop, get_norm_data, log_values, tree_slice
 from prioritized_buffer import BufferState, PrioritizedBuffer
-from wrappers.make_env import make_env
+from wrappers.translate import make_env
+from wrappers.multi_catch import visualize_catch
 
 matplotlib.use("agg")  # enable plotting inside jax callback
 
@@ -157,7 +158,7 @@ class IterState(NamedTuple):
     """Carried across algorithm iterations."""
 
     step: Integer[Array, ""]
-    rollout_states: Batched[RolloutState, "num_envs"]
+    rollout_states: Batched[RolloutState, " num_envs"]
     param_state: ParamState
     target_params: ActorCriticRNN
 
@@ -191,7 +192,6 @@ def make_train(config: TrainConfig):
     env_params = env_params.replace(
         max_steps_in_episode=config.collection.total_transitions
     )  # don't truncate
-    obs_shape = env.observation_space(env_params).shape  # for visualization
     num_actions = env.action_space(env_params).n
     # env: gymnax.environments.environment.Environment = FlattenObservationWrapper(env)
 
@@ -344,7 +344,7 @@ def make_train(config: TrainConfig):
                     config.eval.warnings,
                     key=jr.split(key, config.optim.batch_size),
                 )
-                trajectories: Batched[Transition, "batch_size horizon"] = batch.experience
+                trajectories: Batched[Transition, " batch_size horizon"] = batch.experience
 
                 @ft.partial(jax.value_and_grad, has_aux=True)
                 def loss_grad(params: ActorCriticRNN):
@@ -433,11 +433,11 @@ def make_train(config: TrainConfig):
 
     def rollout(
         net: ActorCriticRNN,
-        init_rollout_state: Batched[RolloutState, "num_envs"],
+        init_rollout_state: Batched[RolloutState, " num_envs"],
         key: Key[Array, ""],
-    ) -> tuple[Batched[RolloutState, "num_envs"], Batched[Transition, "num_envs horizon"]]:
+    ) -> tuple[Batched[RolloutState, " num_envs"], Batched[Transition, " num_envs horizon"]]:
         @exec_loop(init_rollout_state, config.env.horizon, key)
-        def rollout_step(rollout_states: Batched[RolloutState, "num_envs"], key: Key[Array, ""]):
+        def rollout_step(rollout_states: Batched[RolloutState, " num_envs"], key: Key[Array, ""]):
             key_action, key_step = jr.split(key)
 
             hiddens, preds, out = act_mcts(net, rollout_states, key_action)
@@ -452,7 +452,7 @@ def make_train(config: TrainConfig):
                 unobs=Unobs(
                     env_state=timesteps.state,
                     hidden=hiddens,
-                    initial=timesteps.done,
+                    initial=timesteps.last,
                 ),
             ), Transition(
                 # contains the reward and network predictions computed from the rollout state
@@ -471,7 +471,7 @@ def make_train(config: TrainConfig):
 
     def act_mcts(
         net: ActorCriticRNN,
-        rollout_state: Batched[RolloutState, "num_envs"],
+        rollout_state: Batched[RolloutState, " num_envs"],
         key: Key[Array, ""],
     ):
         hiddens, preds = jax.vmap(net.step)(*rollout_state.as_inputs())
@@ -489,7 +489,7 @@ def make_train(config: TrainConfig):
             _: None,  # closure net
             key: Key[Array, ""],
             action: Integer[Array, " num_envs"],
-            unobs: Batched[Unobs, "num_envs"],
+            unobs: Batched[Unobs, " num_envs"],
         ):
             """Returns the logits and value for the newly created node."""
             obs, env_states, rewards, is_initials, infos = env_step_batch(
@@ -521,7 +521,7 @@ def make_train(config: TrainConfig):
 
         return hiddens, preds, out
 
-    def bootstrap(net: ActorCriticRNN, trajectory: Batched[Transition, "horizon"]):
+    def bootstrap(net: ActorCriticRNN, trajectory: Batched[Transition, " horizon"]):
         """Bootstrap values from the target network."""
         unobs = trajectory.rollout_state.unobs
         _, pred = net(unobs.hidden[0, :], trajectory.rollout_state.obs, unobs.initial)
@@ -543,7 +543,7 @@ def make_train(config: TrainConfig):
     def loss_trajectory(
         net: ActorCriticRNN,
         target_net: ActorCriticRNN,
-        trajectory: Batched[Transition, "horizon"],
+        trajectory: Batched[Transition, " horizon"],
     ):
         """Compute behavior cloning loss for the `trajectory`. Bootstrap values from `target_net`."""
         init_hidden = trajectory.rollout_state.unobs.hidden[0, :]
@@ -636,7 +636,7 @@ def make_train(config: TrainConfig):
             config.env.horizon,
             key_rollout,
         )
-        def rollout_step(rollout_states: Batched[RolloutState, "num_envs"], key: Key[Array, ""]):
+        def rollout_step(rollout_states: Batched[RolloutState, " num_envs"], key: Key[Array, ""]):
             key_action, key_step, key_mcts = jr.split(key, 3)
 
             @ft.partial(jax.value_and_grad, has_aux=True)
@@ -669,7 +669,7 @@ def make_train(config: TrainConfig):
                 unobs=Unobs(
                     env_state=timesteps.state,
                     hidden=hiddens,
-                    initial=timesteps.done,
+                    initial=timesteps.last,
                 ),
             ), (
                 Transition(
@@ -686,7 +686,7 @@ def make_train(config: TrainConfig):
         trajectories, obs_grads = jax.tree.map(
             lambda x: x.swapaxes(0, 1), (trajectories, obs_grads)
         )
-        trajectories: Batched[Transition, "num_envs horizon"]
+        trajectories: Batched[Transition, " num_envs horizon"]
 
         target_net = eqx.combine(target_params, net_static)
         _, bootstrapped_returns = jax.vmap(bootstrap, in_axes=(None, 0))(target_net, trajectories)
@@ -710,7 +710,7 @@ def make_train(config: TrainConfig):
         # debug training procedure
         if False:
             batch = buffer.sample(buffer_state, key_sample)
-            sampled_trajectories: Batched[Transition, "num_envs horizon"] = tree_slice(
+            sampled_trajectories: Batched[Transition, " num_envs horizon"] = tree_slice(
                 batch.experience, slice(0, num_envs)
             )
             _, aux = loss_trajectory(net, target_net, sampled_trajectories)
@@ -735,7 +735,7 @@ def make_train(config: TrainConfig):
         return eval_return
 
     def visualize_callback(
-        trajectories: Batched[Transition, "num_envs horizon"],
+        trajectories: Batched[Transition, " num_envs horizon"],
         bootstrapped_returns: Float[Array, " num_envs horizon-1"],
         video: Float[Array, " num_envs horizon 3 height width"],
         prefix: str,
@@ -833,7 +833,7 @@ def make_train(config: TrainConfig):
 
     def plot_statistics(
         ax: Axes,
-        trajectory: Batched[Transition, "horizon"],
+        trajectory: Batched[Transition, " horizon"],
         bootstrapped_return: Float[Array, " horizon"],
     ):
         horizon = jnp.arange(trajectory.action.size)
@@ -896,7 +896,9 @@ def make_train(config: TrainConfig):
         ax.set_xticks(horizon, horizon)
         ax.set_ylim(config.value.min_value, config.value.max_value)
 
-    def plot_compare_dists(ax: Axes, p0: Float[Array, " horizon n"], p1: Float[Array, " horizon n"]):
+    def plot_compare_dists(
+        ax: Axes, p0: Float[Array, " horizon n"], p1: Float[Array, " horizon n"]
+    ):
         chex.assert_equal_shape([p0, p1])
         horizon, num_actions = p0.shape
         x = jnp.arange(horizon)

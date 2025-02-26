@@ -4,14 +4,15 @@ Source: github.com/deepmind/bsuite/blob/master/bsuite/environments/catch.py.
 """
 
 import dataclasses as dc
+from typing import Annotated as Batched
 
-import gymnax.environments.spaces as spaces
+import dm_env.specs as specs
 import jax.numpy as jnp
 import jax.random as jr
 from jaxtyping import Array, Float, Integer, Key
 
 from log_util import dataclass
-from wrappers.common import Environment, GoalObs, StepType, Timestep
+from wrappers.base import Environment, GoalObs, StepType, Timestep
 
 Obs = Float[Array, " rows columns"]
 
@@ -60,7 +61,7 @@ def make_multi_catch(
             ball_type=jr.randint(key_type, (), 0, params.num_goals),
             goal=jr.randint(key_goal, (), 0, params.num_goals),
         )
-        return _get_obs(state, params), state
+        return Timestep.initial(obs=_get_obs(state, params), state=state, info={})
 
     def step(
         state: EnvState,
@@ -79,35 +80,81 @@ def make_multi_catch(
             paddle_x=paddle_x,
         )
 
-        done = new_state.ball_y == params.rows - 1
+        terminal = new_state.ball_y == params.rows - 1
         missed = paddle_x != new_state.ball_x
         matched = state.goal == state.ball_type
         success = jnp.logical_xor(missed, matched)
-        reward = done * jnp.where(success, 1.0, -1.0)
+        reward = terminal * jnp.where(success, 1.0, -1.0)
 
-        # Check number of steps in episode termination condition
         return Timestep(
             obs=_get_obs(new_state, params),
             state=new_state,
             reward=reward,
-            step_type=jnp.where(done, StepType.TERMINATION, StepType.TRANSITION),
+            discount=1.0 - terminal,
+            step_type=jnp.where(terminal, StepType.LAST, StepType.MID),
             info={},
         )
 
-    def action_space(params: EnvParams) -> spaces.Discrete:
-        return spaces.Discrete(3)
+    def action_space(params: EnvParams):
+        return specs.DiscreteArray(3, name="action")
 
-    def observation_space(params: EnvParams) -> spaces.Box:
-        return spaces.Box(0, 1, (params.rows, params.columns))
+    def observation_space(params: EnvParams):
+        return specs.BoundedArray(
+            (params.rows, params.columns), dtype=float, minimum=0, maximum=1, name="observation"
+        )
 
-    def goal_space(params: EnvParams) -> spaces.Discrete:
-        return spaces.Discrete(2)
+    def goal_space(params: EnvParams):
+        return specs.DiscreteArray(2, name="goal")
 
     return Environment(
         _inner=None,
+        name="MultiCatch",
         reset=reset,
         step=step,
         action_space=action_space,
         observation_space=observation_space,
         goal_space=goal_space,
     ), EnvParams(**kwargs)
+
+
+def visualize_catch(
+    env_states: Batched[EnvState, " horizon"],
+    maps: Float[Array, " horizon obs_size"] | None = None,
+) -> Float[Array, " horizon channel height width"]:
+    """Turn a sequence of Catch environment states into a wandb.Video matrix."""
+
+    obs_shape = (10, 5)
+
+    horizon = env_states.paddle_x.size
+    horizon_grid = jnp.arange(horizon)
+    video_shape = (horizon, 3, *obs_shape)
+
+    if maps is not None:
+        # rescale to [0, 255]
+        maps_min = jnp.min(maps, keepdims=True)
+        maps = 255 * (maps - maps_min) / (jnp.max(maps, keepdims=True) - maps_min)
+        maps = maps.astype(jnp.uint8)
+        maps = jnp.reshape(maps, (horizon, 1, *obs_shape))
+        maps = jnp.broadcast_to(maps, video_shape)
+    else:
+        maps = jnp.full(video_shape, 255, dtype=jnp.uint8)
+
+    video = (
+        maps.at[horizon_grid, :, env_states.ball_y, env_states.ball_x]
+        .set(jnp.array([255, 0, 0], dtype=jnp.uint8))
+        .at[horizon_grid, :, obs_shape[0] - 1, env_states.paddle_x]
+        .set(jnp.array([0, 255, 0], dtype=jnp.uint8))
+    )
+
+    return video
+
+
+def get_action_name(action: int):
+    if action == 0:
+        return "L"
+    elif action == 1:
+        return "N"
+    elif action == 2:
+        return "R"
+    else:
+        raise ValueError(f"Invalid action {action}")

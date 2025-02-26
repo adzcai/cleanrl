@@ -30,7 +30,7 @@ class BufferState(Generic[TExperience]):
 
 @dataclass
 class Sample(Generic[TExperience]):
-    experience: Batched[TExperience, "horizon"]
+    experience: Batched[TExperience, " horizon"]
     idx: UInt[Array, ""]
     priority: Float[Array, ""]
 
@@ -74,7 +74,7 @@ class PrioritizedBuffer(Generic[TExperience]):
     def add(
         self,
         state: BufferState[TExperience],
-        experience: Batched[TExperience, "batch_size horizon"],
+        experience: Batched[TExperience, " batch_size horizon"],
     ) -> BufferState[TExperience]:
         """Add a batch of trajectories.
 
@@ -119,7 +119,7 @@ class PrioritizedBuffer(Generic[TExperience]):
 
     def sample(
         self, state: BufferState[TExperience], debug=False, *, key: Key[Array, ""]
-    ) -> Batched[Sample[TExperience], "horizon"]:
+    ) -> Batched[Sample[TExperience], " horizon"]:
         """Sample a trajectory from the buffer."""
         key_sample, key_fallback = jr.split(key)
         idx, priority = self.priority_tree.sample(state.priority_state, key_sample, debug=debug)
