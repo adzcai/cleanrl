@@ -5,7 +5,7 @@ import functools as ft
 import sys
 from pathlib import Path
 from typing import Annotated as Batched
-from typing import Generic, Literal, NamedTuple
+from typing import Generic, NamedTuple
 
 import chex
 import distrax
@@ -21,13 +21,12 @@ import mctx
 import optax
 import rlax
 import yaml
-from beartype import beartype as typechecker
-from jaxtyping import Array, Bool, Float, Integer, Key, UInt, jaxtyped
+from jaxtyping import Array, Bool, Float, Integer, Key, UInt
 from matplotlib.axes import Axes
 
 import wandb
 from config import ArchConfig, TrainConfig, main
-from log_util import exec_loop, get_norm_data, log_values, roll_into_matrix, tree_slice
+from log_util import exec_loop, get_norm_data, log_values, roll_into_matrix, tree_slice, typecheck
 from prioritized_buffer import BufferState, PrioritizedBuffer
 from wrappers.base import StepType, TEnvState, Timestep, TObs
 from wrappers.goal_wrapper import GoalObs
@@ -36,8 +35,6 @@ from wrappers.multi_catch import get_action_name, visualize_catch
 from wrappers.translate import make_env
 
 matplotlib.use("agg")  # enable plotting inside jax callback
-
-Obs = GoalObs[Float[Array, " *obs_size"]]
 
 
 class WorldModelRNN(eqx.Module):
@@ -68,6 +65,7 @@ class WorldModelRNN(eqx.Module):
             key=key_reward,
         )
 
+    @typecheck
     def step(
         self,
         hidden: Float[Array, " rnn_size"],
@@ -186,16 +184,30 @@ class MuZeroNetwork(eqx.Module):
 
     def __call__(
         self,
-        goal_obs: Obs,
+        goal_obs: GoalObs[Float[Array, " *obs_size"]],
         action: Integer[Array, " horizon"],
-    ):
+    ) -> tuple[
+        Float[Array, " rnn_size"],
+        tuple[Float[Array, " horizon"], Batched[Prediction, " horizon"]],
+    ]:
+        """Roll out an imagined trajectory by taking the actions from goal_obs.
+
+        Args:
+            goal_obs (Obs): The observation to roll out from.
+            action (Integer (horizon,)): The series of actions to take.
+
+        Returns:
+            tuple[Float (rnn_size,), tuple[Float (horizon,), Prediction (horizon,)]]: The resulting hidden world state;
+                The predicted rewards for taking the given actions (including from `goal_obs`);
+                The predicted policy logits and values at the imagined states (including `goal_obs`).
+        """
         return jax.lax.scan(
             lambda hidden, action: self.step(hidden, action, goal_obs.goal),
             self.projection(goal_obs.obs),
             action,
         )
 
-    @jaxtyped(typechecker=typechecker)
+    @typecheck
     def step(
         self,
         hidden: Float[Array, " rnn_size"],
@@ -215,7 +227,7 @@ class MuZeroNetwork(eqx.Module):
 class Transition(NamedTuple, Generic[TObs, TEnvState]):
     """A single transition. May be batched into a trajectory."""
 
-    timestep: Timestep[TObs, TEnvState]
+    timestep: Timestep[GoalObs[TObs], TEnvState]
     """The timestep that was acted in."""
     action: Integer[Array, ""]
     """The action taken from `timestep`."""
@@ -272,7 +284,6 @@ def make_train(config: TrainConfig):
     action_space: specs.DiscreteArray = env.action_space(env_params)
     num_actions = action_space.num_values
     action_dtype = action_space.dtype
-    print(env.fullname)
 
     env_reset_batch = jax.vmap(env.reset, in_axes=(None,))
     env_step_batch = jax.vmap(env.step, in_axes=(0, 0, None))  # map over state and action
@@ -336,7 +347,8 @@ def make_train(config: TrainConfig):
     def train(key: Key[Array, ""]):
         key_reset, key_net, key_iter = jr.split(key, 3)
 
-        print("Config\n" + "=" * 25)
+        print(env.fullname)
+        print("=" * 25)
         yaml.safe_dump(dc.asdict(config), sys.stdout)
         print("=" * 25)
 
@@ -395,7 +407,7 @@ def make_train(config: TrainConfig):
             next_timesteps, trajectories = rollout(
                 eqx.combine(iter_state.param_state.params, net_static),
                 iter_state.timesteps,
-                key_rollout,
+                key=key_rollout,
             )
             buffer_state = buffer.add(iter_state.param_state.buffer_state, trajectories)
 
@@ -450,7 +462,11 @@ def make_train(config: TrainConfig):
                     )
                     chex.assert_shape(losses, (config.optim.batch_size,))
                     # TODO add importance reweighting
-                    return jnp.mean(losses), aux
+                    importance_weights = (
+                        jnp.reciprocal(batch.priority) ** config.optim.importance_exponent
+                    )
+                    importance_weights /= jnp.max(importance_weights, keepdims=True)
+                    return jnp.mean(importance_weights * losses), aux
 
                 (_, aux), grads = loss_grad(param_state.params)
                 # value_and_grad drops types
@@ -539,13 +555,16 @@ def make_train(config: TrainConfig):
     def rollout(
         net: MuZeroNetwork,
         init_timesteps: Batched[Timestep, " num_envs"],
+        *,
         key: Key[Array, ""],
     ) -> tuple[Batched[Timestep, " num_envs"], Batched[Transition, " num_envs horizon"]]:
+        """Collect a batch of trajectories."""
+
         @exec_loop(init_timesteps, config.env.horizon, key)
         def rollout_step(timesteps: Batched[Timestep, " num_envs"], key: Key[Array, ""]):
             key_action, key_step = jr.split(key)
 
-            preds, outs = act_mcts(net, timesteps, key_action)
+            preds, outs = act_mcts(net, timesteps, key=key_action)
             actions = outs.action.astype(action_dtype)
             next_timesteps = env_step_batch(
                 timesteps.state,
@@ -571,13 +590,16 @@ def make_train(config: TrainConfig):
     # @jaxtyped(typechecker=typechecker)
     def act_mcts(
         net: MuZeroNetwork,
-        timesteps: Batched[Timestep, " num_envs"],
+        timesteps: Batched[Timestep[GoalObs[TObs], TEnvState], " num_envs"],
+        *,
         key: Key[Array, ""],
-    ) -> tuple[Prediction, mctx.PolicyOutput[mctx.GumbelMuZeroExtraData]]:
-        """Take a single action from the timestep using mcts.
+    ) -> tuple[Prediction, mctx.PolicyOutput]:
+        """Take a single action from the timestep using MCTS.
 
         Returns:
-            tuple[Prediction, mctx.PolicyOutput[mctx.GumbelMuZeroExtraData]]: The value and mcts output from the timestep.
+            tuple[Prediction, mctx.PolicyOutput]: The value of `timestep`
+                predicted by the critic network
+                and the MCTS output of planning from the timestep.
         """
         init_hiddens = jax.vmap(net.projection)(timesteps.obs.obs)
         goal_embeddings = jax.vmap(net.embed_goal)(timesteps.obs.goal)
@@ -597,8 +619,14 @@ def make_train(config: TrainConfig):
             key: Key[Array, ""],
             actions: Integer[Array, " num_envs"],
             hiddens: Float[Array, " num_envs rnn_size"],
-        ):
-            """Returns the logits and value for the newly created node."""
+        ) -> tuple[mctx.RecurrentFnOutput, Float[Array, " num_envs rnn_size"]]:
+            """World model transition function.
+
+            Returns:
+                tuple[mctx.RecurrentFnOutput, Float (num_envs, rnn_size)]: The logits and value
+                    computed by the actor-critic network for the newly created node;
+                    The hidden state representing the state following `hiddens`.
+            """
             hiddens, rewards = jax.vmap(net.world_model.step)(hiddens, actions, goal_embeddings)
             preds = jax.vmap(net.actor_critic)(hiddens, goal_embeddings)
             return mctx.RecurrentFnOutput(
@@ -631,12 +659,19 @@ def make_train(config: TrainConfig):
         """Abstracted out for plotting.
 
         Note that we use `Timestep.discount` rather than `Timestep.step_type`.
+
+        Returns:
+            tuple[Prediction (horizon, horizon), Float (horizon, horizon-1)]: The rolled matrix of network predictions;
+                the rolled matrix of bootstrapped returns along the imagined trajectories.
         """
+        # see `loss_trajectory` for rolling details
         action_rolled, reward_rolled, discount_rolled = map(
             roll_into_matrix,
             (trajectory.action, trajectory.timestep.reward, trajectory.timestep.discount),
         )
 
+        # i.e. pred.value_logits[i, j] is the array of predicted value logits at time i+j,
+        # based on the observation at time i
         _, (_, pred) = jax.vmap(net)(trajectory.timestep.obs, action_rolled)
         value = logits_to_value(pred.value_logits)
         bootstrapped_return: Float[Array, " horizon horizon-1"] = jax.vmap(
@@ -704,6 +739,8 @@ def make_train(config: TrainConfig):
         ).cross_entropy(distrax.Categorical(logits=online_pred.policy_logits))
 
         # reward model loss
+        # recall online_reward[i, j] is the reward _after_ state i+j
+        # while reward_rolled[i, j] is the reward _before_ state i+j
         reward_rolled = roll_into_matrix(trajectory.timestep.reward)
         if config.value.num_value_bins == "scalar":
             reward_losses = rlax.l2_loss(
@@ -792,7 +829,7 @@ def make_train(config: TrainConfig):
                 timesteps.state, actions, env_params, key=jr.split(key_step, num_envs)
             )
 
-            preds, outs = act_mcts(net, timesteps, key_mcts)
+            preds, outs = act_mcts(net, timesteps, key=key_mcts)
 
             return next_timesteps, (
                 Transition(

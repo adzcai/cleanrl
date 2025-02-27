@@ -170,6 +170,7 @@ class OptimConfig:
     value_coef: float  # scale the value loss
     reward_coef: float  # scale the reward loss
     priority_exponent: float  # prioritized replay
+    importance_exponent: float
 
 
 @dataclass

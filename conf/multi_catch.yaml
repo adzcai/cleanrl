@@ -2,4 +2,4 @@ env:
   env_name: MultiCatch
   env_source: custom
   env_kwargs:
-    num_goals: 1
+    num_goals: 2

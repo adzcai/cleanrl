@@ -35,6 +35,7 @@ optim:
   value_coef: 0.6
   reward_coef: 0.8
   priority_exponent: 0.8
+  importance_exponent: 0.0
 
 eval:
   warnings: False

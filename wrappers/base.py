@@ -133,7 +133,7 @@ class Environment(Wrapper["Environment"], Generic[TObs, TEnvState, TAction, TEnv
         """Add all the wrapper names."""
         env = self
         name = self.name
-        while env._inner is not None:
+        while getattr(env, "_inner", None) is not None:
             env = env._inner
             name = env.name + " > " + name
         return name
