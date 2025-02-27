@@ -64,10 +64,8 @@ class Timestep(Generic[TObs, TEnvState]):
         return cls(
             obs=obs,
             state=state,
-            reward=jnp.asarray(0.0),
-            discount=jnp.asarray(0.0),
-            # reward=jnp.asarray(jnp.nan),
-            # discount=jnp.asarray(jnp.nan),
+            reward=jnp.asarray(0.0),  # TODO should be None
+            discount=jnp.asarray(0.0),  # same
             step_type=jnp.asarray(StepType.FIRST),
             info=info,
         )

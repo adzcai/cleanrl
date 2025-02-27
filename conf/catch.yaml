@@ -8,7 +8,7 @@ arch:
 env:
   env_name: Catch-bsuite
   env_source: gymnax
-  horizon: 20
+  horizon: 10
 
 collection:
   total_transitions: 200000

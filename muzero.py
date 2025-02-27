@@ -208,6 +208,7 @@ class MuZeroNetwork(eqx.Module):
         return hidden, (reward, pred)
 
     def embed_goal(self, goal: Integer[Array, ""]):
+        # TODO should this be a la word embeddings
         return jax.nn.one_hot(goal, self.num_goals)
 
 
@@ -391,7 +392,7 @@ def make_train(config: TrainConfig):
             key_rollout, key_optim, key_evaluate = jr.split(key, 3)
 
             # collect data
-            rollout_states, trajectories = rollout(
+            next_timesteps, trajectories = rollout(
                 eqx.combine(iter_state.param_state.params, net_static),
                 iter_state.timesteps,
                 key_rollout,
@@ -481,6 +482,7 @@ def make_train(config: TrainConfig):
             del buffer_state  # replaced by param_state.buffer_state
             param_state, _ = optimize_step
 
+            # occasionally update target
             target_params = jax.tree.map(
                 lambda online, target: jnp.where(
                     iter_state.step % config.bootstrap.target_update_freq == 0,
@@ -526,7 +528,7 @@ def make_train(config: TrainConfig):
 
             return IterState(
                 step=iter_state.step + 1,
-                timesteps=rollout_states,
+                timesteps=next_timesteps,
                 param_state=param_state,
                 target_params=target_params,
             ), eval_return
@@ -559,12 +561,12 @@ def make_train(config: TrainConfig):
                 mcts_probs=outs.action_weights,
             )
 
-        final_rollout_state, trajectories = rollout_step
+        final_timestep, trajectories = rollout_step
         trajectories = jax.tree.map(
             lambda x: jnp.swapaxes(x, 0, 1), trajectories
         )  # swap horizon and num_envs axes
 
-        return final_rollout_state, trajectories
+        return final_timestep, trajectories
 
     # @jaxtyped(typechecker=typechecker)
     def act_mcts(
@@ -640,8 +642,8 @@ def make_train(config: TrainConfig):
         bootstrapped_return: Float[Array, " horizon horizon-1"] = jax.vmap(
             rlax.lambda_returns, (0, 0, 0, None)
         )(
-            jnp.nan_to_num(reward_rolled)[:, 1:],
-            jnp.nan_to_num(discount_rolled)[:, 1:] * config.bootstrap.discount,
+            reward_rolled[:, 1:],
+            discount_rolled[:, 1:] * config.bootstrap.discount,
             value[:, 1:],
             config.bootstrap.lambda_gae,
         )
@@ -690,7 +692,13 @@ def make_train(config: TrainConfig):
             ).cross_entropy(distrax.Categorical(logits=online_pred.value_logits[:-1, :-1]))
 
         # policy loss
-        mcts_probs_rolled = roll_into_matrix(trajectory.mcts_probs)
+        # replace terminal timesteps with uniform
+        mcts_probs = jnp.where(
+            trajectory.timestep.step_type[:, jnp.newaxis] == StepType.LAST,
+            jnp.ones_like(trajectory.mcts_probs) / num_actions,
+            trajectory.mcts_probs,
+        )
+        mcts_probs_rolled = roll_into_matrix(mcts_probs)
         policy_losses = distrax.Categorical(
             probs=mcts_probs_rolled,
         ).cross_entropy(distrax.Categorical(logits=online_pred.policy_logits))
@@ -699,18 +707,18 @@ def make_train(config: TrainConfig):
         reward_rolled = roll_into_matrix(trajectory.timestep.reward)
         if config.value.num_value_bins == "scalar":
             reward_losses = rlax.l2_loss(
-                predictions=online_reward[:-1, :-1], targets=reward_rolled[1:, 1:]
+                predictions=online_reward[:-1, :-1], targets=reward_rolled[:-1, 1:]
             )
         else:
             reward_losses = distrax.Categorical(
-                probs=value_to_probs(reward_rolled[1:, 1:]),
+                probs=value_to_probs(reward_rolled[:-1, 1:]),
             ).cross_entropy(distrax.Categorical(logits=online_reward[:-1, :-1]))
 
         # top left triangle of matrix
         horizon_axis = jnp.arange(trajectory.action.size)
         mask = horizon_axis[:, jnp.newaxis] + horizon_axis[jnp.newaxis, :]
         mask = horizon_axis.size - mask
-        mask = mask / (mask.sum(where=mask > 0))
+        mask = mask / (mask.sum(where=mask > 0, keepdims=True))
 
         # multiplying by mask accounts for multiple-counting timesteps
         # and taking the mean averages across the horizon
@@ -796,7 +804,7 @@ def make_train(config: TrainConfig):
                 obs_grads,
             )
 
-        rollout_states, (trajectories, obs_grads) = rollout_step
+        _, (trajectories, obs_grads) = rollout_step
         trajectories, obs_grads = jax.tree.map(
             lambda x: x.swapaxes(0, 1), (trajectories, obs_grads)
         )
@@ -850,6 +858,7 @@ def make_train(config: TrainConfig):
         bootstrapped_returns: Float[Array, " num_envs horizon-1"],
         video: Float[Array, " num_envs horizon 3 height width"] | None,
         prefix: str,
+        predicted_rewards: Float[Array, " num_envs horizon"] | None = None,
         priorities: Float[Array, " num_envs"] | None = None,
     ) -> None:
         """Visualize a batch of trajectories.
@@ -868,7 +877,7 @@ def make_train(config: TrainConfig):
         rows_per_env = 2
         if config.value.num_value_bins != "scalar":
             rows_per_env += 1
-        num_envs, horizon = trajectories.reward.shape
+        num_envs, horizon = trajectories.timestep.reward.shape
 
         fig_stats, ax = plt.subplots(
             nrows=num_envs * rows_per_env,
@@ -882,25 +891,39 @@ def make_train(config: TrainConfig):
             ax_stats.set_title(
                 f"T{i}" + (f" priority {priorities[i]:.2f}" if priorities is not None else "")
             )
-            plot_statistics(ax_stats, tree_slice(trajectories, i), bootstrapped_returns[i])
+            plot_statistics(
+                ax_stats,
+                tree_slice(trajectories, i),
+                bootstrapped_returns[i],
+                predicted_rewards[i] if predicted_rewards is not None else None,
+            )
 
             ax_policy: Axes = ax[rows_per_env * i + j]
             j += 1
             ax_policy.set_title(f"Trajectory {i} Policy and MCTS")
+            action_names = [get_action_name(i) for i in range(3)]
+            action_names += [f"{name} (mc)" for name in action_names]
             plot_compare_dists(
                 ax_policy,
                 jax.nn.softmax(trajectories.pred.policy_logits[i], axis=-1),
                 trajectories.mcts_probs[i],
+                labels=action_names,
             )
 
             if config.value.num_value_bins != "scalar":
                 ax_value: Axes = ax[rows_per_env * i + j]
                 j += 1
                 ax_value.set_title(f"Trajectory {i} Value and Bootstrapped")
+                bin_labels = jnp.linspace(
+                    config.value.min_value, config.value.max_value, config.value.num_value_bins
+                )
+                bin_labels = [f"{v.item():.02f}" for v in bin_labels]
+                bin_labels += [f"{label} (bs)" for label in bin_labels]
                 plot_compare_dists(
                     ax_value,
                     jax.nn.softmax(trajectories.pred.value_logits[i, :-1], axis=-1),
                     value_to_probs(bootstrapped_returns[i]),
+                    labels=bin_labels,
                 )
 
             # legend above first axes
@@ -938,14 +961,15 @@ def make_train(config: TrainConfig):
             for i in range(num_envs):
                 for h in range(horizon):
                     ax_stats: Axes = ax_video[i, h]
-                    step_type = trajectories.timestep.step_type[i, h].item()
 
+                    step_type = trajectories.timestep.step_type[i, h].item()
                     if step_type == StepType.FIRST:
                         step_type = "F"
                     elif step_type == StepType.MID:
                         step_type = "M"
                     elif step_type == StepType.LAST:
                         step_type = "L"
+
                     a = get_action_name(trajectories.action[i, h].item())
                     # c h w -> h w c
                     ax_stats.imshow(jnp.permute_dims(video[i, h], (1, 2, 0)))
@@ -965,16 +989,29 @@ def make_train(config: TrainConfig):
         ax: Axes,
         trajectory: Batched[Transition, " horizon"],
         bootstrapped_return: Float[Array, " horizon"],
+        predicted_rewards: Float[Array, " horizon"] | None = None,
     ):
+        """Plot various trajectory statistics:
+
+        - Beginning of episodes
+        - Rewards
+        - Predicted values vs bootstrapped values (td error)
+        - Policy and value entropy and kl error
+        """
         horizon = jnp.arange(trajectory.action.size)
 
         # misc
-        initial_idx = horizon[trajectory.timestep.step_type]
-        ax.plot(initial_idx, jnp.zeros_like(initial_idx), "k>", label="initial", alpha=0.5)
+        initial_idx = horizon[trajectory.timestep.step_type == StepType.FIRST]
+        for idx in initial_idx:
+            ax.axvline(x=idx, color="purple", linestyle="--", label="initial", alpha=0.5)
+
+        # reward
+        ax.plot(horizon, trajectory.timestep.reward, "r+", label="reward")
+        if predicted_rewards is not None:
+            ax.plot(horizon, predicted_rewards, "g+", label="predicted reward")
 
         # value
         online_value = logits_to_value(trajectory.pred.value_logits)
-        ax.plot(horizon, trajectory.reward, "r+", label="reward")
         ax.plot(horizon, online_value, "bo", label="online value")
         ax.plot(horizon[:-1], bootstrapped_return, "mo", label="bootstrapped returns", alpha=0.5)
         ax.fill_between(
@@ -1001,10 +1038,14 @@ def make_train(config: TrainConfig):
             ax.plot(horizon[:-1], value_loss, "r--", label="value / bootstrap l2")
 
         ax.set_xticks(horizon, horizon)
-        ax.set_ylim(config.value.min_value, config.value.max_value)
+        spread = config.value.max_value - config.value.min_value
+        ax.set_ylim(config.value.min_value - spread / 10, config.value.max_value + spread / 10)
 
     def plot_compare_dists(
-        ax: Axes, p0: Float[Array, " horizon n"], p1: Float[Array, " horizon n"]
+        ax: Axes,
+        p0: Float[Array, " horizon n"],
+        p1: Float[Array, " horizon n"],
+        labels: list[str],
     ):
         chex.assert_equal_shape([p0, p1])
         horizon, num_actions = p0.shape
@@ -1013,8 +1054,7 @@ def make_train(config: TrainConfig):
         ax.stackplot(
             x,
             jnp.concat([p0, p1], axis=1).T,
-            labels=[f"Policy {a}" for a in range(num_actions)]
-            + [f"MCTS {a}" for a in range(num_actions)],
+            labels=labels,
         )
 
         ax.set_xticks(x, x)

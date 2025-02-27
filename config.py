@@ -20,6 +20,7 @@ or by running
     wandb init --project $PROJECT --entity $ENTITY
 
 before launching any sweeps or agents.
+For example, you can set `WANDB_RUN_GROUP` to categorize the run into a group.
 
 SWEEPS
 ------
