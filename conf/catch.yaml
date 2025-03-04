@@ -3,17 +3,18 @@ arch:
   rnn_size: 128
   mlp_size: 64
   mlp_depth: 1
+  goal_dim: 4
   activation: relu
 
 env:
   env_name: Catch-bsuite
   env_source: gymnax
-  horizon: 10
+  horizon: 20
 
 collection:
-  total_transitions: 200000
+  total_transitions: 100000
   num_envs: 64
-  mcts_depth: ${env.horizon}
+  mcts_depth: 10
   num_mcts_simulations: 4
 
 value:

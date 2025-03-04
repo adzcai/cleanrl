@@ -10,7 +10,7 @@ collection:
   num_mcts_simulations: 1
 
 value:
-  num_value_bins: "scalar"
+  num_value_bins: 2
 
 optim:
   num_minibatches: 1

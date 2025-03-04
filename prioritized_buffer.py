@@ -92,6 +92,7 @@ class PrioritizedBuffer(Generic[TExperience]):
         )
         state = dc.replace(state, data=data, pos=state.pos + horizon)
         # enable the trajectories starting up to this point
+        # TODO currently incorrect for initial trajectory if too short
         pos_enabled = jnp.maximum(0, state.pos - self.horizon - jnp.arange(horizon)) % self.max_time
         pos_enabled = jnp.broadcast_to(pos_enabled, (self.batch_size, horizon))
         idx_enabled = jax.vmap(self.pos_to_flat, in_axes=(1,))(pos_enabled)
@@ -145,7 +146,9 @@ class PrioritizedBuffer(Generic[TExperience]):
         i.e. (randint(0, available_pos) + range(horizon)) % max_time
         is entirely populated.
         """
-        return jnp.minimum(state.pos, self.max_time) - self.horizon + 1
+        return jnp.where(
+            state.pos < self.horizon, 0, jnp.minimum(state.pos, self.max_time) - self.horizon + 1
+        )
 
     def num_available(self, state: BufferState[TExperience]) -> int:
         """The number of possible trajectories (overlapping and across batch)."""
@@ -260,7 +263,7 @@ class SumTree:
             ValueError: If debug is enabled and an out-of-bounds index is returned.
 
         Returns:
-            UInt (): The sampled index.
+            tuple[UInt (), Float ()]: The sampled index; The priority of the sampled item.
         """
         idx = jnp.zeros((), jnp.uint32)
         value = jr.uniform(key, maxval=state.nodes[idx])
@@ -292,3 +295,41 @@ class SumTree:
     @property
     def leaf_idx(self):
         return (1 << self.depth) - 1
+
+    def pprint(self, state: SumTreeState):
+        """Pretty print the sum tree structure for debugging.
+
+        Args:
+            state (SumTreeState): The current state of the sum tree.
+        """
+        nodes = state.nodes
+        depth = self.depth
+        leaf_idx = self.leaf_idx
+
+        # Width settings
+        node_width = 7  # Width for each number
+        total_cols = 2**depth
+
+        for level in range(depth + 1):
+            # Calculate indices for this level
+            start_idx = (1 << level) - 1
+            end_idx = (1 << (level + 1)) - 1
+            level_nodes = nodes[start_idx:end_idx]
+
+            # Calculate positions for this level
+            positions = []
+            segment_width = total_cols // (1 << level)
+            for i in range(1 << level):
+                pos = (segment_width // 2) + i * segment_width
+                positions.append(pos)
+
+            # Print level number and nodes
+            line = [" " * node_width] * total_cols
+            for pos, val in zip(positions, level_nodes):
+                line[pos] = f"{val:7.2f}"
+
+            print(f"Level {level}:", "".join(line))
+
+        # Print separator and leaf values
+        print("-" * (total_cols * node_width))
+        print("Leaf values:", nodes[leaf_idx : leaf_idx + self.size])

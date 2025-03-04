@@ -1,5 +1,6 @@
-"""Implementation of AlphaZero with a recurrent actor-critic network."""
+"""Implementation of MuZero with a recurrent actor-critic network."""
 
+import colorsys
 import dataclasses as dc
 import functools as ft
 import sys
@@ -34,13 +35,12 @@ from wrappers.log import Metrics
 from wrappers.multi_catch import get_action_name, visualize_catch
 from wrappers.translate import make_env
 
-matplotlib.use("agg")  # enable plotting inside jax callback
 
 
 class WorldModelRNN(eqx.Module):
     """Parameterizes the recurrent world model.
 
-    Takes (hidden, action, goal_embedding) -> (hidden, reward).
+    Takes (hidden, action, goal_embedding) -> (next_hidden, reward).
     """
 
     cell: eqx.nn.GRUCell
@@ -51,14 +51,17 @@ class WorldModelRNN(eqx.Module):
     def __init__(
         self,
         config: ArchConfig,
+        num_actions: int,
+        num_value_bins: int,
         *,
         key: Key[Array, ""],
     ):
         key_cell, key_reward = jr.split(key)
-        self.cell = eqx.nn.GRUCell(config.num_actions, config.rnn_size, key=key_cell)
+        self.cell = eqx.nn.GRUCell(num_actions, config.rnn_size, key=key_cell)
         self.reward_head = eqx.nn.MLP(
-            config.rnn_size + config.num_goals,
-            config.num_value_bins,
+            # takes concat([hidden, goal_embedding])
+            config.rnn_size + config.goal_dim,
+            num_value_bins,
             config.mlp_size,
             config.mlp_depth,
             getattr(jax.nn, config.activation),
@@ -70,13 +73,17 @@ class WorldModelRNN(eqx.Module):
         self,
         hidden: Float[Array, " rnn_size"],
         action: Integer[Array, ""],
-        goal_embedding: Float[Array, " mlp_size"],
+        goal_embedding: Float[Array, " goal_dim"],
     ) -> tuple[Float[Array, " rnn_size"], Float[Array, " num_value_bins"]]:
         """Transitions to the next embedding and emits predicted reward."""
         # TODO handle continue predictor
-        action = jax.nn.one_hot(action, self.cell.input_size)
-        hidden = self.cell(action, hidden)
+        action = jax.nn.one_hot(action, self.num_actions)
+        hidden = self.cell(action, hidden)  # fake env.step
         return hidden, self.reward_head(jnp.concat([hidden, goal_embedding]))
+
+    @property
+    def num_actions(self):
+        return self.cell.input_size
 
     def init_hidden(self):
         return jnp.zeros(self.cell.hidden_size)
@@ -98,21 +105,23 @@ class ActorCritic(eqx.Module):
     def __init__(
         self,
         config: ArchConfig,
+        num_actions: int,
+        num_value_bins: int,
         *,
         key: Key[Array, ""],
     ):
         key_policy, key_value = jr.split(key)
         self.policy_head = eqx.nn.MLP(
-            config.rnn_size + config.num_goals,
-            config.num_actions,
+            config.rnn_size + config.goal_dim,
+            num_actions,
             config.mlp_size,
             config.mlp_depth,
             getattr(jax.nn, config.activation),
             key=key_policy,
         )
         self.value_head = eqx.nn.MLP(
-            config.rnn_size + config.num_goals,
-            config.num_value_bins,
+            config.rnn_size + config.goal_dim,
+            num_value_bins,
             config.mlp_size,
             config.mlp_depth,
             getattr(jax.nn, config.activation),
@@ -120,7 +129,9 @@ class ActorCritic(eqx.Module):
         )
 
     def __call__(
-        self, hidden: Float[Array, " rnn_size"], goal_embedding: Float[Array, " mlp_size"]
+        self,
+        hidden: Float[Array, " rnn_size"],
+        goal_embedding: Float[Array, " goal_dim"],
     ):
         """Predict action and value logits from the hidden state."""
         input = jnp.concat([hidden, goal_embedding])
@@ -139,19 +150,23 @@ class MuZeroNetwork(eqx.Module):
     """The recurrent world model."""
     actor_critic: ActorCritic
     """The actor and critic networks."""
-    num_goals: int
+    goal_embedder: eqx.nn.Linear
 
     def __init__(
         self,
         config: ArchConfig,
         obs_size: tuple[int, ...],
+        num_actions: int,
+        num_value_bins: int,
+        num_goals: int,
         *,
         key: Key[Array, ""],
     ):
-        key_projection, key_world_model, key_actor_critic = jr.split(key, 3)
-        self.num_goals = config.num_goals
+        key_projection, key_world_model, key_actor_critic, key_embedder = jr.split(key, 4)
 
         if config.kind == "mlp":
+            # ensure flattened input
+            chex.assert_equal(len(obs_size), 1)
             self.projection = eqx.nn.MLP(
                 in_size=obs_size[0],
                 out_size=config.rnn_size,
@@ -160,7 +175,7 @@ class MuZeroNetwork(eqx.Module):
                 key=key_projection,
             )
         elif config.kind == "cnn":
-            key_cnn, key_linear = jr.split(key)
+            key_cnn, key_linear = jr.split(key_projection)
             # (C, H, W)
             cnn = eqx.nn.Conv2d(
                 in_channels=obs_size,
@@ -179,8 +194,23 @@ class MuZeroNetwork(eqx.Module):
                 ]
             )
 
-        self.world_model = WorldModelRNN(config=config, key=key_world_model)
-        self.actor_critic = ActorCritic(config=config, key=key_actor_critic)
+        self.world_model = WorldModelRNN(
+            config=config,
+            num_actions=num_actions,
+            num_value_bins=num_value_bins,
+            key=key_world_model,
+        )
+        self.actor_critic = ActorCritic(
+            config=config,
+            num_actions=num_actions,
+            num_value_bins=num_value_bins,
+            key=key_actor_critic,
+        )
+        # initialize the goal embedder like a word embedding matrix
+        # standard normal truncated
+        linear = eqx.nn.Linear(num_goals, config.goal_dim, key=jr.key(0))
+        weights = jr.truncated_normal(key_embedder, -1.96, 1.96, linear.weight.shape)
+        self.goal_embedder = eqx.tree_at(lambda x: x.weight, linear, weights)
 
     def __call__(
         self,
@@ -213,15 +243,27 @@ class MuZeroNetwork(eqx.Module):
         hidden: Float[Array, " rnn_size"],
         action: Integer[Array, ""],
         goal: Integer[Array, ""],
-    ):
+    ) -> tuple[Float[Array, " rnn_size"], tuple[Float[Array, " num_value_bins"], Prediction]]:
+        """Evaluate the actor-critic on `hidden` and take one imagined step using the world model.
+
+        Args:
+            hidden (Float (rnn_size,)): The hidden world state.
+            action (int): The action taken from the represented state.
+            goal (int): The current goal.
+
+        Returns:
+            tuple[Float[Array, " rnn_size"], tuple[Float[Array, ""], Prediction]]: The resulting hidden world state;
+                The predicted reward for taking the given action;
+                The predicted policy logits and value of `hidden`.
+        """
         goal_embedding = self.embed_goal(goal)
         pred = self.actor_critic(hidden, goal_embedding)
         hidden, reward = self.world_model.step(hidden, action, goal_embedding)
         return hidden, (reward, pred)
 
     def embed_goal(self, goal: Integer[Array, ""]):
-        # TODO should this be a la word embeddings
-        return jax.nn.one_hot(goal, self.num_goals)
+        goal = jax.nn.one_hot(goal, self.goal_embedder.in_features)
+        return self.goal_embedder(goal)
 
 
 class Transition(NamedTuple, Generic[TObs, TEnvState]):
@@ -291,7 +333,7 @@ def make_train(config: TrainConfig):
     lr = optax.cosine_decay_schedule(config.optim.lr_init, num_grad_updates)
     optim = optax.chain(
         optax.clip_by_global_norm(config.optim.max_grad_norm),
-        optax.adamw(lr),
+        optax.contrib.ademamix(lr),
     )
 
     buffer = PrioritizedBuffer.new(
@@ -300,9 +342,10 @@ def make_train(config: TrainConfig):
         horizon=config.env.horizon,
     )
 
+    @typecheck
     def logits_to_value(
-        value_logits: Float[Array, " horizon num_value_bins"],
-    ) -> Float[Array, " horizon"]:
+        value_logits: Float[Array, " *horizon num_value_bins"],
+    ) -> Float[Array, " *horizon"]:
         """Convert from logits for two-hot encoding to scalar values."""
         if config.value.num_value_bins == "scalar":
             return value_logits
@@ -327,6 +370,7 @@ def make_train(config: TrainConfig):
             )
 
     def get_invalid_actions(env_state: gymnax.EnvState) -> Bool[Array, " num_actions"]:
+        """TODO currently not used"""
         if env.name == "Catch-bsuite":
             catch_state: gymnax.environments.bsuite.catch.EnvState = env_state
             catch_env: gymnax.environments.bsuite.catch.Catch = env
@@ -357,13 +401,11 @@ def make_train(config: TrainConfig):
         )
         # initialize all state
         init_net = MuZeroNetwork(
-            config=dc.replace(
-                config.arch,
-                num_actions=num_actions,
-                num_value_bins=config.value.num_value_bins,
-                num_goals=env.goal_space(env_params).num_values,
-            ),
+            config=config.arch,
             obs_size=init_timesteps.obs.obs.shape[1:],
+            num_actions=num_actions,
+            num_value_bins=config.value.num_value_bins,
+            num_goals=env.goal_space(env_params).num_values,
             key=key_net,
         )
         init_params, net_static = eqx.partition(init_net, eqx.is_inexact_array)
@@ -398,8 +440,8 @@ def make_train(config: TrainConfig):
         def iterate(iter_state: IterState, key: Key[Array, ""]):
             """A single iteration of optimization.
 
-            1. Collect a batch of rollouts in parallel.
-            2. Run a few epochs of SGD (or some optimization algorithm) on the batch.
+            1. Collect a batch of rollouts in parallel and add it to the buffer.
+            2. Run a few epochs of local optimization using sampled data from the buffer.
             """
             key_rollout, key_optim, key_evaluate = jr.split(key, 3)
 
@@ -587,7 +629,6 @@ def make_train(config: TrainConfig):
 
         return final_timestep, trajectories
 
-    # @jaxtyped(typechecker=typechecker)
     def act_mcts(
         net: MuZeroNetwork,
         timesteps: Batched[Timestep[GoalObs[TObs], TEnvState], " num_envs"],
@@ -815,16 +856,22 @@ def make_train(config: TrainConfig):
             key_action, key_step, key_mcts = jr.split(key, 3)
 
             @ft.partial(jax.value_and_grad, has_aux=True)
-            def predict(obs: Float[Array, " *obs_size"], goal: UInt[Array, ""]):
+            def predict(
+                obs: Float[Array, " *obs_size"], goal: UInt[Array, ""], *, key: Key[Array, ""]
+            ):
                 """Differentiate with respect to value to obtain saliency map."""
                 hidden = net.projection(obs)
                 goal_embedding = net.embed_goal(goal)
                 pred = net.actor_critic(hidden, goal_embedding)
+                action = jr.categorical(key, pred.policy_logits)
+                _, reward = net.world_model.step(hidden, action, goal_embedding)
                 value = logits_to_value(pred.value_logits[jnp.newaxis])[0]
-                return value, pred.policy_logits
+                return value, (reward, action)
 
-            (_, policy_logits), obs_grads = jax.vmap(predict)(timesteps.obs.obs, timesteps.obs.goal)
-            actions = jr.categorical(key_action, logits=policy_logits, axis=-1)
+            (_, (reward_preds, actions)), obs_grads = jax.vmap(predict)(
+                timesteps.obs.obs, timesteps.obs.goal, key=jr.split(key_action, num_envs)
+            )
+
             next_timesteps = env_step_batch(
                 timesteps.state, actions, env_params, key=jr.split(key_step, num_envs)
             )
@@ -839,13 +886,16 @@ def make_train(config: TrainConfig):
                     mcts_probs=outs.action_weights,
                 ),
                 obs_grads,
+                reward_preds,
             )
 
-        _, (trajectories, obs_grads) = rollout_step
-        trajectories, obs_grads = jax.tree.map(
-            lambda x: x.swapaxes(0, 1), (trajectories, obs_grads)
+        (trajectories, obs_grads, reward_preds) = jax.tree.map(
+            lambda x: x.swapaxes(0, 1), rollout_step[1]
         )
         trajectories: Batched[Transition, " num_envs horizon"]
+        reward_preds: Batched[Transition, " num_envs horizon num_value_bins"] = jnp.roll(
+            reward_preds, 1, axis=-2
+        )
 
         target_net = eqx.combine(target_params, net_static)
         _, bootstrapped_returns = jax.vmap(bootstrap, in_axes=(None, 0))(target_net, trajectories)
@@ -858,6 +908,7 @@ def make_train(config: TrainConfig):
             if config.env.env_name in ["Catch-bsuite", "MultiCatch"]
             else None,
             prefix="eval",
+            predicted_rewards=reward_preds,
         )
 
         metrics: Batched[Metrics, " num_envs"] = trajectories.timestep.info["metrics"]
@@ -895,7 +946,7 @@ def make_train(config: TrainConfig):
         bootstrapped_returns: Float[Array, " num_envs horizon-1"],
         video: Float[Array, " num_envs horizon 3 height width"] | None,
         prefix: str,
-        predicted_rewards: Float[Array, " num_envs horizon"] | None = None,
+        predicted_rewards: Float[Array, " num_envs horizon num_value_bins"] | None = None,
         priorities: Float[Array, " num_envs"] | None = None,
     ) -> None:
         """Visualize a batch of trajectories.
@@ -910,8 +961,10 @@ def make_train(config: TrainConfig):
         if not wandb.run or wandb.run.disabled:
             return
 
-        fig_width = 3
+        fig_width = 4
         rows_per_env = 2
+        if predicted_rewards is not None:
+            rows_per_env += 1
         if config.value.num_value_bins != "scalar":
             rows_per_env += 1
         num_envs, horizon = trajectories.timestep.reward.shape
@@ -932,7 +985,6 @@ def make_train(config: TrainConfig):
                 ax_stats,
                 tree_slice(trajectories, i),
                 bootstrapped_returns[i],
-                predicted_rewards[i] if predicted_rewards is not None else None,
             )
 
             ax_policy: Axes = ax[rows_per_env * i + j]
@@ -947,15 +999,27 @@ def make_train(config: TrainConfig):
                 labels=action_names,
             )
 
+            bin_labels = jnp.linspace(
+                config.value.min_value, config.value.max_value, config.value.num_value_bins
+            )
+            bin_labels = [f"{v.item():.02f}" for v in bin_labels]
+            bin_labels += [f"{label} (bs)" for label in bin_labels]
+
+            if predicted_rewards is not None:
+                ax_reward: Axes = ax[rows_per_env * i + j]
+                j += 1
+                ax_reward.set_title(f"T{i} reward")
+                plot_compare_dists(
+                    ax_reward,
+                    jax.nn.softmax(predicted_rewards[i], axis=-1),
+                    value_to_probs(trajectories.timestep.reward[i]),
+                    labels=bin_labels,
+                )
+
             if config.value.num_value_bins != "scalar":
                 ax_value: Axes = ax[rows_per_env * i + j]
                 j += 1
                 ax_value.set_title(f"Trajectory {i} Value and Bootstrapped")
-                bin_labels = jnp.linspace(
-                    config.value.min_value, config.value.max_value, config.value.num_value_bins
-                )
-                bin_labels = [f"{v.item():.02f}" for v in bin_labels]
-                bin_labels += [f"{label} (bs)" for label in bin_labels]
                 plot_compare_dists(
                     ax_value,
                     jax.nn.softmax(trajectories.pred.value_logits[i, :-1], axis=-1),
@@ -976,9 +1040,6 @@ def make_train(config: TrainConfig):
                     ]
                 )
                 ax_stats.legend(loc="center left", bbox_to_anchor=(1, 0.5))
-                ax_policy.legend(loc="upper center", bbox_to_anchor=(0.5, 1.20), ncol=3)
-                if config.value.num_value_bins != "scalar":
-                    ax_value.legend(loc="upper center", bbox_to_anchor=(0.5, 1.20), ncol=3)
 
         # use wandb.Image since otherwise wandb uses plotly,
         # which breaks the legends
@@ -1026,7 +1087,6 @@ def make_train(config: TrainConfig):
         ax: Axes,
         trajectory: Batched[Transition, " horizon"],
         bootstrapped_return: Float[Array, " horizon"],
-        predicted_rewards: Float[Array, " horizon"] | None = None,
     ):
         """Plot various trajectory statistics:
 
@@ -1039,13 +1099,17 @@ def make_train(config: TrainConfig):
 
         # misc
         initial_idx = horizon[trajectory.timestep.step_type == StepType.FIRST]
-        for idx in initial_idx:
-            ax.axvline(x=idx, color="purple", linestyle="--", label="initial", alpha=0.5)
+        for i, idx in enumerate(initial_idx):
+            ax.axvline(
+                x=idx,
+                color="purple",
+                linestyle="--",
+                label="initial" if i == 0 else None,
+                alpha=0.5,
+            )
 
         # reward
         ax.plot(horizon, trajectory.timestep.reward, "r+", label="reward")
-        if predicted_rewards is not None:
-            ax.plot(horizon, predicted_rewards, "g+", label="predicted reward")
 
         # value
         online_value = logits_to_value(trajectory.pred.value_logits)
@@ -1088,16 +1152,16 @@ def make_train(config: TrainConfig):
         horizon, num_actions = p0.shape
         x = jnp.arange(horizon)
 
-        ax.stackplot(
-            x,
-            jnp.concat([p0, p1], axis=1).T,
-            labels=labels,
-        )
+        # evenly spaced colors around the hue circle
+        colors = [colorsys.hsv_to_rgb(hue / num_actions, 0.8, 0.9) for hue in range(num_actions)]
+        ax.stackplot(x, jnp.concat([p0, p1], axis=1).T, labels=labels, colors=colors * 2)
 
         ax.set_xticks(x, x)
         ax.set_ylim(0, 2)
 
-    return train
+        ax.legend(loc="center left", bbox_to_anchor=(0.9, 0.5))
+
+    return train, (rollout, bootstrap)
 
 
 if __name__ == "__main__":

@@ -54,13 +54,14 @@ For example, in your algorithm file,
 
 import dataclasses as dc
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any, Literal, TypeVar, get_origin
 
 import jax
 import jax.numpy as jnp
 import jax.random as jr
 from jaxtyping import Array, Key
+import matplotlib
 from omegaconf import OmegaConf
 
 import wandb
@@ -112,12 +113,8 @@ class ArchConfig:
     rnn_size: int
     mlp_size: int
     mlp_depth: int
+    goal_dim: int
     activation: str
-
-    # to be replaced
-    num_actions: int = -1
-    num_goals: int = -1
-    num_value_bins: int | Literal["scalar"] = -1
 
 
 @dataclass
@@ -200,6 +197,15 @@ class TrainConfig(Config):
         return f"{self.env.env_name} {self.collection.total_transitions}"
 
 
+def get_args(cfg_paths: Iterable[str] = (), cli_args: Iterable[str] = ()):
+    return OmegaConf.merge(
+        # using `structured` prevents addition of ConfigClass fields
+        OmegaConf.create(dc.asdict(DEFAULT_CONFIG)),
+        *map(OmegaConf.load, cfg_paths),
+        OmegaConf.from_cli(cli_args),
+    )
+
+
 def main(
     ConfigClass: type[TConfig],
     make_train: Callable[[TConfig], Callable[[Key[Array, ""]], Any]],
@@ -218,13 +224,9 @@ def main(
         if arg in ["-h", "--help"]:
             print(__doc__.format(file=file))
             sys.exit(0)
-        (cli_args if "=" in arg else cfg_paths).append(arg)
-    cfg: TConfig = OmegaConf.merge(
-        # using `structured` prevents addition of ConfigClass fields
-        OmegaConf.create(dc.asdict(DEFAULT_CONFIG)),
-        *map(OmegaConf.load, cfg_paths),
-        OmegaConf.from_cli(cli_args),
-    )
+        ary = cli_args if "=" in arg else cfg_paths
+        ary.append(arg)
+    cfg: TConfig = get_args(cfg_paths, cli_args)
 
     if cfg.sweep:
         cfg = dict_to_dataclass(ConfigClass, cfg)
@@ -237,11 +239,16 @@ def main(
             "Run `man sbatch` for details."
         )
     else:
+        matplotlib.use("agg")  # enable plotting inside jax callback
+
         with wandb.init(config=None if cfg.agent else OmegaConf.to_object(cfg)) as run:
+            # setup config
             cfg = dict_to_dataclass(ConfigClass, wandb.config)
             run.name = cfg.name
-            train = make_train(cfg)
+            train, _ = make_train(cfg)
             keys = jr.split(jr.key(cfg.seed), cfg.num_seeds)
+
+            # call train
             # with jax.profiler.trace(f"/tmp/{os.environ['WANDB_PROJECT']}-trace", create_perfetto_link=True):
             outputs = jax.jit(jax.vmap(train))(keys)
             _, mean_eval_reward = jax.block_until_ready(outputs)

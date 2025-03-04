@@ -17,6 +17,7 @@ dependencies = [
     "mctx>=0.0.5",
     "navix>=0.7.0",
     "omegaconf>=2.3.0",
+    "optax>=0.2.4",
     "pygraphviz>=1.14 ; sys_platform != 'linux'",
     "pytest>=8.3.4",
     "rlax>=0.1.6",
@@ -31,3 +32,4 @@ lint.ignore = ["F722"]
 housemaze = { path = "../JaxHouseMaze", editable = true }
 navix = { path = "../navix", editable = true }
 gymnax = { path = "../gymnax", editable = true }
+optax = { git = "https://github.com/google-deepmind/optax.git" }
