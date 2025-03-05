@@ -147,7 +147,9 @@ class PrioritizedBuffer(Generic[TExperience]):
         is entirely populated.
         """
         return jnp.where(
-            state.pos < self.horizon, 0, jnp.minimum(state.pos, self.max_time) - self.horizon + 1
+            state.pos < self.horizon,
+            0,
+            jnp.minimum(state.pos, self.max_time) - self.horizon + 1,
         )
 
     def num_available(self, state: BufferState[TExperience]) -> int:
@@ -189,7 +191,10 @@ class SumTree:
         )
 
     def update(
-        self, state: SumTreeState, indices: UInt[Array, " n"], priority: Float[Array, " n"]
+        self,
+        state: SumTreeState,
+        indices: UInt[Array, " n"],
+        priority: Float[Array, " n"],
     ) -> SumTreeState:
         """Set priorities at the given indices.
 
@@ -214,7 +219,10 @@ class SumTree:
         )
 
     def _update(
-        self, state: SumTreeState, indices: UInt[Array, " n"], priority: Float[Array, " n"]
+        self,
+        state: SumTreeState,
+        indices: UInt[Array, " n"],
+        priority: Float[Array, " n"],
     ) -> SumTreeState:
         # we only update using the first priority for each index
         # turn others into no-ops (add zero)
@@ -239,7 +247,10 @@ class SumTree:
         )
 
     def _recompute(
-        self, state: SumTreeState, indices: UInt[Array, " n"], priority: Float[Array, " n"]
+        self,
+        state: SumTreeState,
+        indices: UInt[Array, " n"],
+        priority: Float[Array, " n"],
     ):
         """Sets the priorities and recomputes the entire tree."""
         nodes = state.nodes.at[indices + self.leaf_idx].set(priority)

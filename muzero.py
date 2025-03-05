@@ -26,7 +26,14 @@ from matplotlib.axes import Axes
 
 import wandb
 from config import ArchConfig, TrainConfig, main
-from log_util import exec_loop, get_norm_data, log_values, roll_into_matrix, tree_slice, typecheck
+from log_util import (
+    exec_loop,
+    get_norm_data,
+    log_values,
+    roll_into_matrix,
+    tree_slice,
+    typecheck,
+)
 from prioritized_buffer import BufferState, PrioritizedBuffer
 from wrappers.base import StepType, TEnvState, Timestep, TObs
 from wrappers.goal_wrapper import GoalObs
@@ -190,7 +197,9 @@ class MuZeroNetwork(eqx.Module):
                     cnn,
                     eqx.nn.Lambda(jnp.ravel),
                     eqx.nn.Linear(
-                        in_features=flat_size, out_features=config.rnn_size, key=key_linear
+                        in_features=flat_size,
+                        out_features=config.rnn_size,
+                        key=key_linear,
                     ),
                 ]
             )
@@ -359,7 +368,9 @@ def make_train(config: TrainConfig):
             config.value.num_value_bins,
         )
 
-    def value_to_probs(value: Float[Array, " horizon"]) -> Float[Array, " horizon num_value_bins"]:
+    def value_to_probs(
+        value: Float[Array, " horizon"],
+    ) -> Float[Array, " horizon num_value_bins"]:
         """Convert from scalar values to probabilities for two-hot encoding."""
         return rlax.transform_to_2hot(
             value,
@@ -409,7 +420,8 @@ def make_train(config: TrainConfig):
         )
         init_params, net_static = eqx.partition(init_net, eqx.is_inexact_array)
         init_hiddens = jnp.broadcast_to(
-            init_net.world_model.init_hidden(), (config.collection.num_envs, config.arch.rnn_size)
+            init_net.world_model.init_hidden(),
+            (config.collection.num_envs, config.arch.rnn_size),
         )
         init_buffer_state = buffer.init(
             Transition(
@@ -532,11 +544,14 @@ def make_train(config: TrainConfig):
                     | get_norm_data(params, "params/norm")
                 )
 
-                return ParamState(
-                    params=params,
-                    opt_state=opt_state,
-                    buffer_state=buffer_state,
-                ), None
+                return (
+                    ParamState(
+                        params=params,
+                        opt_state=opt_state,
+                        buffer_state=buffer_state,
+                    ),
+                    None,
+                )
 
             del buffer_state  # replaced by param_state.buffer_state
             param_state, _ = optimize_step
@@ -583,12 +598,15 @@ def make_train(config: TrainConfig):
                     if not valid:
                         raise ValueError("NaN parameters.")
 
-            return IterState(
-                step=iter_state.step + 1,
-                timesteps=next_timesteps,
-                param_state=param_state,
-                target_params=target_params,
-            ), eval_return
+            return (
+                IterState(
+                    step=iter_state.step + 1,
+                    timesteps=next_timesteps,
+                    param_state=param_state,
+                    target_params=target_params,
+                ),
+                eval_return,
+            )
 
         final_iter_state, eval_returns = iterate
         return final_iter_state, eval_returns
@@ -671,13 +689,16 @@ def make_train(config: TrainConfig):
             """
             hiddens, rewards = jax.vmap(net.world_model.step)(hiddens, actions, goal_embeddings)
             preds = jax.vmap(net.actor_critic)(hiddens, goal_embeddings)
-            return mctx.RecurrentFnOutput(
-                reward=logits_to_value(rewards),
-                # TODO termination
-                discount=jnp.full(actions.shape[0], config.bootstrap.discount),
-                prior_logits=preds.policy_logits,
-                value=logits_to_value(preds.value_logits),
-            ), hiddens
+            return (
+                mctx.RecurrentFnOutput(
+                    reward=logits_to_value(rewards),
+                    # TODO termination
+                    discount=jnp.full(actions.shape[0], config.bootstrap.discount),
+                    prior_logits=preds.policy_logits,
+                    value=logits_to_value(preds.value_logits),
+                ),
+                hiddens,
+            )
 
         out = mctx.gumbel_muzero_policy(
             params=None,
@@ -709,7 +730,11 @@ def make_train(config: TrainConfig):
         # see `loss_trajectory` for rolling details
         action_rolled, reward_rolled, discount_rolled = map(
             roll_into_matrix,
-            (trajectory.action, trajectory.timestep.reward, trajectory.timestep.discount),
+            (
+                trajectory.action,
+                trajectory.timestep.reward,
+                trajectory.timestep.discount,
+            ),
         )
 
         # i.e. pred.value_logits[i, j] is the array of predicted value logits at time i+j,
@@ -844,7 +869,10 @@ def make_train(config: TrainConfig):
 
             @ft.partial(jax.value_and_grad, has_aux=True)
             def predict(
-                obs: Float[Array, " *obs_size"], goal: UInt[Array, ""], *, key: Key[Array, ""]
+                obs: Float[Array, " *obs_size"],
+                goal: UInt[Array, ""],
+                *,
+                key: Key[Array, ""],
             ):
                 """Differentiate with respect to value to obtain saliency map."""
                 hidden = net.projection(obs)
@@ -857,7 +885,9 @@ def make_train(config: TrainConfig):
                 return value, (reward, action)
 
             (_, (reward_preds, actions)), obs_grads = jax.vmap(predict)(
-                timesteps.obs.obs, timesteps.obs.goal, key=jr.split(key_action, num_envs)
+                timesteps.obs.obs,
+                timesteps.obs.goal,
+                key=jr.split(key_action, num_envs),
             )
 
             next_timesteps = env_step_batch(
@@ -892,9 +922,11 @@ def make_train(config: TrainConfig):
             visualize_callback,
             trajectories,
             bootstrapped_returns[:, 0],
-            jax.vmap(visualize_catch)(trajectories.timestep.state, obs_grads)
-            if config.env.name in ["Catch-bsuite", "MultiCatch"]
-            else None,
+            (
+                jax.vmap(visualize_catch)(trajectories.timestep.state, obs_grads)
+                if config.env.name in ["Catch-bsuite", "MultiCatch"]
+                else None
+            ),
             prefix="eval",
             predicted_rewards=reward_preds,
         )
@@ -925,9 +957,11 @@ def make_train(config: TrainConfig):
                 )
             ),
             bootstrapped_returns=aux.bootstrapped_return,
-            video=jax.vmap(visualize_catch)(sampled_trajectories.timestep.state)
-            if config.env.name in ["Catch-bsuite", "MultiCatch"]
-            else None,
+            video=(
+                jax.vmap(visualize_catch)(sampled_trajectories.timestep.state)
+                if config.env.name in ["Catch-bsuite", "MultiCatch"]
+                else None
+            ),
             prefix="visualize",
             priorities=batch.priority,
         )
@@ -939,7 +973,7 @@ def make_train(config: TrainConfig):
         bootstrapped_returns: Float[Array, " num_envs horizon-1"],
         video: Float[Array, " num_envs horizon 3 height width"] | None,
         prefix: str,
-        predicted_rewards: Float[Array, " num_envs horizon num_value_bins"] | None = None,
+        predicted_rewards: (Float[Array, " num_envs horizon num_value_bins"] | None) = None,
         priorities: Float[Array, " num_envs"] | None = None,
     ) -> None:
         """Visualize a batch of trajectories.
@@ -993,7 +1027,9 @@ def make_train(config: TrainConfig):
             )
 
             bin_labels = jnp.linspace(
-                config.value.min_value, config.value.max_value, config.value.num_value_bins
+                config.value.min_value,
+                config.value.max_value,
+                config.value.num_value_bins,
             )
             bin_labels = [f"{v.item():.02f}" for v in bin_labels]
             bin_labels += [f"{label} (bs)" for label in bin_labels]
@@ -1107,9 +1143,19 @@ def make_train(config: TrainConfig):
         # value
         online_value = logits_to_value(trajectory.pred.value_logits)
         ax.plot(horizon, online_value, "bo", label="online value")
-        ax.plot(horizon[:-1], bootstrapped_return, "mo", label="bootstrapped returns", alpha=0.5)
+        ax.plot(
+            horizon[:-1],
+            bootstrapped_return,
+            "mo",
+            label="bootstrapped returns",
+            alpha=0.5,
+        )
         ax.fill_between(
-            horizon[:-1], bootstrapped_return, online_value[:-1], alpha=0.3, label="TD error"
+            horizon[:-1],
+            bootstrapped_return,
+            online_value[:-1],
+            alpha=0.3,
+            label="TD error",
         )
 
         # entropy
@@ -1122,7 +1168,12 @@ def make_train(config: TrainConfig):
             ax.plot(horizon, value_dist.entropy(), "y:", label="value entropy")
 
         # loss
-        ax.plot(horizon, mcts_dist.kl_divergence(policy_dist), "c--", label="policy / mcts kl")
+        ax.plot(
+            horizon,
+            mcts_dist.kl_divergence(policy_dist),
+            "c--",
+            label="policy / mcts kl",
+        )
         if config.value.num_value_bins != "scalar":
             bootstrapped_dist = distrax.Categorical(probs=value_to_probs(bootstrapped_return))
             value_loss = bootstrapped_dist.kl_divergence(value_dist[:-1])

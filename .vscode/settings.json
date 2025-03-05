@@ -1,0 +1,7 @@
+{
+    "python.analysis.extraPaths": [
+        "../navix",
+        "../JaxHouseMaze",
+        "../gymnax"
+    ]
+}

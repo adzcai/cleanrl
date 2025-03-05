@@ -4,7 +4,13 @@ import jax
 import jax.numpy as jnp
 from jaxtyping import Array, Key
 
-from wrappers.base import Environment, StepType, TAction, TEnvParams, TEnvState, Timestep, TObs
+from wrappers.base import (
+    Environment,
+    TAction,
+    TEnvParams,
+    TEnvState,
+    TObs,
+)
 
 
 def _flatten(x: Array):

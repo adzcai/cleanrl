@@ -29,7 +29,7 @@ line-length = 100
 lint.ignore = ["F722"]
 
 [tool.uv.sources]
-housemaze = { path = "../JaxHouseMaze", editable = true }
 navix = { path = "../navix", editable = true }
 gymnax = { path = "../gymnax", editable = true }
 optax = { git = "https://github.com/google-deepmind/optax.git" }
+housemaze = { path = "../JaxHouseMaze", editable = true }

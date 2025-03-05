@@ -72,10 +72,20 @@ class ActorCriticRNN(eqx.Module):
         in_size = arch.rnn_size if self.is_rnn else obs_size
 
         self.policy_head = eqx.nn.MLP(
-            in_size, num_actions, arch.mlp_size, arch.mlp_depth, activation, key=key_policy
+            in_size,
+            num_actions,
+            arch.mlp_size,
+            arch.mlp_depth,
+            activation,
+            key=key_policy,
         )
         self.value_head = eqx.nn.MLP(
-            in_size, num_value_bins, arch.mlp_size, arch.mlp_depth, activation, key=key_value
+            in_size,
+            num_value_bins,
+            arch.mlp_size,
+            arch.mlp_depth,
+            activation,
+            key=key_value,
         )
 
     def __call__(
@@ -378,11 +388,14 @@ def make_train(config: TrainConfig):
                     | get_norm_data(params, "params/norm")
                 )
 
-                return ParamState(
-                    params=params,
-                    opt_state=opt_state,
-                    buffer_state=buffer_state,
-                ), None
+                return (
+                    ParamState(
+                        params=params,
+                        opt_state=opt_state,
+                        buffer_state=buffer_state,
+                    ),
+                    None,
+                )
 
             param_state, _ = optimize_step
 
@@ -421,12 +434,15 @@ def make_train(config: TrainConfig):
                 mean_return,
             )
 
-            return IterState(
-                step=iter_state.step + 1,
-                rollout_states=rollout_states,
-                param_state=param_state,
-                target_params=target_params,
-            ), eval_return
+            return (
+                IterState(
+                    step=iter_state.step + 1,
+                    rollout_states=rollout_states,
+                    param_state=param_state,
+                    target_params=target_params,
+                ),
+                eval_return,
+            )
 
         final_iter_state, eval_returns = iterate
         return final_iter_state, eval_returns
@@ -884,7 +900,12 @@ def make_train(config: TrainConfig):
             ax.plot(horizon, value_dist.entropy(), "y:", label="value entropy")
 
         # loss
-        ax.plot(horizon, policy_dist.kl_divergence(mcts_dist), "c--", label="policy / mcts kl")
+        ax.plot(
+            horizon,
+            policy_dist.kl_divergence(mcts_dist),
+            "c--",
+            label="policy / mcts kl",
+        )
         if config.value.num_value_bins != "scalar":
             bootstrapped_dist = distrax.Categorical(probs=value_to_probs(bootstrapped_return))
             value_loss = bootstrapped_dist.kl_divergence(value_dist[:-1])

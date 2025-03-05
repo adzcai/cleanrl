@@ -6,7 +6,15 @@ import jax.random as jr
 from jaxtyping import Array, Bool, Key
 
 from log_util import dataclass
-from wrappers.base import Environment, TAction, TEnvParams, TEnvState, Timestep, TObs, Wrapper
+from wrappers.base import (
+    Environment,
+    TAction,
+    TEnvParams,
+    TEnvState,
+    Timestep,
+    TObs,
+    Wrapper,
+)
 
 
 @dataclass

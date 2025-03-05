@@ -698,6 +698,7 @@ version = "0.0.2"
 source = { editable = "../JaxHouseMaze" }
 dependencies = [
     { name = "distrax" },
+    { name = "flax" },
     { name = "jax" },
     { name = "matplotlib" },
     { name = "numpy" },
@@ -706,7 +707,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "distrax", specifier = ">=0.1.5" },
-    { name = "ipykernel", marker = "extra == 'examples'", specifier = ">=6.29.5" },
+    { name = "flax", specifier = ">=0.8.2" },
     { name = "jax", specifier = ">=0.4.16" },
     { name = "matplotlib" },
     { name = "numpy", specifier = ">=1.26.4" },

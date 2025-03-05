@@ -5,7 +5,16 @@ import jax.numpy as jnp
 from jaxtyping import Array, Float, Integer, Key
 
 from log_util import dataclass
-from wrappers.base import Environment, T, TAction, TEnvParams, TEnvState, Timestep, TObs, Wrapper
+from wrappers.base import (
+    Environment,
+    T,
+    TAction,
+    TEnvParams,
+    TEnvState,
+    Timestep,
+    TObs,
+    Wrapper,
+)
 
 
 @dataclass

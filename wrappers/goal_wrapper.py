@@ -40,7 +40,11 @@ def goal_wrapper(
         return timestep
 
     def step(
-        state: GoalState[TEnvState], action: TAction, params: TEnvParams, *, key: Key[Array, ""]
+        state: GoalState[TEnvState],
+        action: TAction,
+        params: TEnvParams,
+        *,
+        key: Key[Array, ""],
     ) -> Timestep[GoalObs[TObs], GoalState[TEnvState]]:
         """Persist the goal throughout a rollout."""
         timestep = env.step(state._inner, action, params, key=key)

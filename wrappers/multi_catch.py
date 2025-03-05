@@ -104,7 +104,11 @@ def make_multi_catch(
 
     def observation_space(params: EnvParams):
         return specs.BoundedArray(
-            (params.rows, params.columns), dtype=float, minimum=0, maximum=1, name="observation"
+            (params.rows, params.columns),
+            dtype=float,
+            minimum=0,
+            maximum=1,
+            name="observation",
         )
 
     def goal_space(params: EnvParams):

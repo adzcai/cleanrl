@@ -109,7 +109,12 @@ class ResetFn(Protocol[TObs, TEnvState, TEnvParams]):
 @runtime_checkable
 class StepFn(Protocol[TObs, TEnvState, TAction, TEnvParams]):
     def __call__(
-        self, env_state: TEnvState, action: TAction, params: TEnvParams, *, key: Key[Array, ""]
+        self,
+        env_state: TEnvState,
+        action: TAction,
+        params: TEnvParams,
+        *,
+        key: Key[Array, ""],
     ) -> Timestep[TObs, TEnvState]:
         """Step the environment. See `Timestep`."""
 
