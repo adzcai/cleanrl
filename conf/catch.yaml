@@ -4,6 +4,7 @@ arch:
   mlp_size: 64
   mlp_depth: 1
   goal_dim: 4
+  action_dim: 4
   activation: relu
 
 env:
@@ -15,7 +16,7 @@ env:
 collection:
   total_transitions: 100000
   num_envs: 64
-  timesteps: 10
+  num_timesteps: 10
   mcts_depth: 10
   num_mcts_simulations: 4
 

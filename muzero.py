@@ -43,15 +43,17 @@ from wrappers.translate import make_env
 
 
 class WorldModelRNN(eqx.Module):
-    """Parameterizes the recurrent world model.
+    """Parameterizes the recurrent world model. Simulates the dynamics and reward function.
 
-    Takes (hidden, action, goal_embedding) -> (next_hidden, reward).
+    Takes (hidden, action, goal) -> (next_hidden, reward).
     """
 
     cell: eqx.nn.GRUCell
     """The recurrent cell for the world model"""
     reward_head: eqx.nn.MLP
     """The reward model. Takes in hidden state and goal embedding."""
+    embed_action: eqx.nn.Embedding
+    """Embed actions to `rnn_size`."""
 
     def __init__(
         self,
@@ -61,8 +63,8 @@ class WorldModelRNN(eqx.Module):
         *,
         key: Key[Array, ""],
     ):
-        key_cell, key_reward = jr.split(key)
-        self.cell = eqx.nn.GRUCell(num_actions, config.rnn_size, key=key_cell)
+        key_cell, key_reward, key_embed_action = jr.split(key, 3)
+        self.cell = eqx.nn.GRUCell(config.action_dim, config.rnn_size, key=key_cell)
         self.reward_head = eqx.nn.MLP(
             # takes concat([hidden, goal_embedding])
             config.rnn_size + config.goal_dim,
@@ -72,6 +74,7 @@ class WorldModelRNN(eqx.Module):
             getattr(jax.nn, config.activation),
             key=key_reward,
         )
+        self.embed_action = eqx.nn.Embedding(num_actions, config.action_dim, key=key_embed_action)
 
     @typecheck
     def step(
@@ -80,13 +83,12 @@ class WorldModelRNN(eqx.Module):
         action: Integer[Array, ""],
         goal_embedding: Float[Array, " goal_dim"],
     ) -> tuple[Float[Array, " rnn_size"], Float[Array, " num_value_bins"]]:
-        """Like imagined `env.step`.
+        """An imagined state transition (`env.step`).
 
-        Transitions to the next embedding and emits predicted reward."""
+        Transitions to the next hidden state and emits predicted reward."""
         # TODO handle continue predictor
-        # TODO also embed action first?
-        action = jax.nn.one_hot(action, self.num_actions)
-        hidden = self.cell(action, hidden)  # fake env.step
+        action = self.embed_action(action)
+        hidden = self.cell(hidden=hidden, input=action)  # fake env.step
         return hidden, self.reward_head(jnp.concat([hidden, goal_embedding]))
 
     @property
@@ -158,7 +160,7 @@ class MuZeroNetwork(eqx.Module):
     """The recurrent world model."""
     actor_critic: ActorCritic
     """The actor and critic networks."""
-    goal_embedder: eqx.nn.Linear
+    embed_goal: eqx.nn.Embedding
 
     def __init__(
         self,
@@ -170,7 +172,7 @@ class MuZeroNetwork(eqx.Module):
         *,
         key: Key[Array, ""],
     ):
-        key_projection, key_world_model, key_actor_critic, key_embedder = jr.split(key, 4)
+        key_projection, key_world_model, key_actor_critic, key_embed_goal = jr.split(key, 4)
 
         if config.kind == "mlp":
             # ensure flattened input
@@ -219,12 +221,12 @@ class MuZeroNetwork(eqx.Module):
         if False:
             # initialize the goal embedder like a word embedding matrix
             # standard normal truncated
-            linear = eqx.nn.Linear(num_goals, config.goal_dim, key=jr.key(0))
-            weights = jr.truncated_normal(key_embedder, -1.96, 1.96, linear.weight.shape)
-            self.goal_embedder = eqx.tree_at(lambda x: x.weight, linear, weights)
+            linear = eqx.nn.Embedding(num_goals, config.goal_dim, key=jr.key(0))
+            weights = jr.truncated_normal(key_embed_goal, -1.96, 1.96, linear.weight.shape)
+            self.embed_goal = eqx.tree_at(lambda x: x.weight, linear, weights)
         else:
             # default initialization
-            self.goal_embedder = eqx.nn.Linear(num_goals, config.goal_dim, key=key_embedder)
+            self.embed_goal = eqx.nn.Embedding(num_goals, config.goal_dim, key=key_embed_goal)
 
     def __call__(
         self,
@@ -274,10 +276,6 @@ class MuZeroNetwork(eqx.Module):
         pred = self.actor_critic(hidden, goal_embedding)
         hidden, reward = self.world_model.step(hidden, action, goal_embedding)
         return hidden, (reward, pred)
-
-    def embed_goal(self, goal: Integer[Array, ""]):
-        goal = jax.nn.one_hot(goal, self.goal_embedder.in_features)
-        return self.goal_embedder(goal)
 
 
 class Transition(NamedTuple, Generic[TObs, TEnvState]):
@@ -329,9 +327,9 @@ class LossStatistics(NamedTuple):
 
 def make_train(config: TrainConfig):
     num_iters = config.collection.total_transitions // (
-        config.collection.num_envs * config.collection.timesteps
+        config.collection.num_envs * config.collection.num_timesteps
     )
-    max_horizon = num_iters * config.collection.timesteps
+    max_horizon = num_iters * config.collection.num_timesteps
     num_grad_updates = num_iters * config.optim.num_minibatches
     eval_freq = num_iters // config.eval.num_evals
 
@@ -619,7 +617,7 @@ def make_train(config: TrainConfig):
     ) -> tuple[Batched[Timestep, " num_envs"], Batched[Transition, " num_envs horizon"]]:
         """Collect a batch of trajectories."""
 
-        @exec_loop(init_timesteps, config.collection.timesteps, key)
+        @exec_loop(init_timesteps, config.collection.num_timesteps, key)
         def rollout_step(timesteps: Batched[Timestep, " num_envs"], key: Key[Array, ""]):
             """Take a single step using MCTS."""
             key_action, key_step = jr.split(key)

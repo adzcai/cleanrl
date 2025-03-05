@@ -114,6 +114,7 @@ class ArchConfig:
     mlp_size: int
     mlp_depth: int
     goal_dim: int
+    action_dim: int
     activation: str
 
 
@@ -131,7 +132,7 @@ class CollectionConfig:
     """For episode rollouts."""
 
     total_transitions: int
-    timesteps: int
+    num_timesteps: int
     num_envs: int  # more parallel data collection
     mcts_depth: int
     num_mcts_simulations: int  # stronger policy improvement
