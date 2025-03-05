@@ -74,21 +74,21 @@ def make_multi_catch(
 
         dx = action - 1  # [-1, 0, 1] = left, no-op, right
         paddle_x = jnp.clip(state.paddle_x + dx, 0, params.columns - 1)
-        new_state = dc.replace(
+        next_state = dc.replace(
             state,
             ball_y=state.ball_y + 1,
             paddle_x=paddle_x,
         )
 
-        terminal = new_state.ball_y == params.rows - 1
-        missed = paddle_x != new_state.ball_x
+        terminal = next_state.ball_y == params.rows - 1
+        missed = paddle_x != next_state.ball_x
         matched = state.goal == state.ball_type
         success = jnp.logical_xor(missed, matched)
         reward = terminal * jnp.where(success, 1.0, -1.0)
 
         return Timestep(
-            obs=_get_obs(new_state, params),
-            state=new_state,
+            obs=_get_obs(next_state, params),
+            state=next_state,
             reward=reward,
             discount=1.0 - terminal,
             step_type=jnp.where(terminal, StepType.LAST, StepType.MID),
@@ -104,7 +104,7 @@ def make_multi_catch(
         )
 
     def goal_space(params: EnvParams):
-        return specs.DiscreteArray(2, name="goal")
+        return specs.DiscreteArray(params.num_goals, name="goal")
 
     return Environment(
         _inner=None,

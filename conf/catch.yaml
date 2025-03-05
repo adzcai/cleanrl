@@ -3,17 +3,19 @@ arch:
   rnn_size: 128
   mlp_size: 64
   mlp_depth: 1
-  goal_dim: 4
+  goal_dim: 2
   activation: relu
 
 env:
-  env_name: Catch-bsuite
-  env_source: gymnax
-  horizon: 20
+  name: MultiCatch
+  source: custom
+  kwargs:
+    num_goals: 2
 
 collection:
   total_transitions: 100000
   num_envs: 64
+  timesteps: 10
   mcts_depth: 10
   num_mcts_simulations: 4
 
@@ -26,15 +28,16 @@ bootstrap:
   discount: 0.997
   lambda_gae: 0.95
   target_update_freq: 4
-  target_update_size: 0.75
+  target_update_size: 0.99
 
 optim:
   num_minibatches: 8
-  batch_size: 32
+  batch_size: 64
+  timesteps: 20
   lr_init: 0.01
   max_grad_norm: 3.14
-  value_coef: 0.6
-  reward_coef: 0.8
+  value_coef: 0.5
+  reward_coef: 0.99
   priority_exponent: 0.8
   importance_exponent: 0.0
 
@@ -42,4 +45,4 @@ eval:
   warnings: False
   num_evals: 8
   num_eval_envs: 2
-  eval_horizon: 20
+  timesteps: 25

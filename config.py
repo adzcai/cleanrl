@@ -121,10 +121,9 @@ class ArchConfig:
 class EnvConfig:
     """Arguments to specify an environment."""
 
-    env_name: str
-    horizon: int
-    env_source: Literal["gymnax", "brax", "navix", "custom"] = "gymnax"
-    env_kwargs: dict[str, Any] = dc.field(default_factory=dict)
+    name: str
+    source: Literal["gymnax", "brax", "navix", "custom"] = "gymnax"
+    kwargs: dict[str, Any] = dc.field(default_factory=dict)
 
 
 @dataclass
@@ -132,6 +131,7 @@ class CollectionConfig:
     """For episode rollouts."""
 
     total_transitions: int
+    timesteps: int
     num_envs: int  # more parallel data collection
     mcts_depth: int
     num_mcts_simulations: int  # stronger policy improvement
@@ -162,6 +162,7 @@ class OptimConfig:
 
     num_minibatches: int  # number of gradient descent updates per iteration
     batch_size: int  # reduce gradient variance
+    timesteps: int
     lr_init: float
     max_grad_norm: float
     value_coef: float  # scale the value loss
@@ -175,7 +176,7 @@ class EvalConfig:
     """Evaluation of the learned policy and value function."""
 
     warnings: bool
-    eval_horizon: int
+    timesteps: int
     num_evals: int
     num_eval_envs: int
 
@@ -194,7 +195,7 @@ class TrainConfig(Config):
 
     @property
     def name(self):
-        return f"{self.env.env_name} {self.collection.total_transitions}"
+        return f"{self.env.name} {self.collection.total_transitions}"
 
 
 def get_args(cfg_paths: Iterable[str] = (), cli_args: Iterable[str] = ()):

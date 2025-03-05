@@ -10,6 +10,7 @@ import jax
 import jax.numpy as jnp
 import jax.random as jr
 import mctx
+from omegaconf import DictConfig, ListConfig, OmegaConf
 import yaml
 from beartype import beartype as typechecker
 from chex import dataclass
@@ -40,7 +41,7 @@ def typecheck(f):
 
 
 def get_norm_data(tree: PyTree[Float[Array, " ..."]], prefix: str):
-    """For logging norms of pytree leaves."""
+    """For logging root-mean-squares of pytree leaves."""
     return {
         f"{prefix}{jax.tree_util.keystr(keys)}": jnp.sqrt(jnp.mean(jnp.square(ary)))
         for keys, ary in jax.tree.leaves_with_path(tree)
@@ -206,5 +207,7 @@ def dict_to_dataclass(cls: type[T], obj: dict) -> T:
             raise ValueError(f"Field {field.name} missing when constructing {cls}")
         if dc.is_dataclass(field.type):
             value = dict_to_dataclass(field.type, value)
+        if isinstance(value, (DictConfig, ListConfig)):
+            value = OmegaConf.to_object(value)
         out[field.name] = value
     return cls(**out)

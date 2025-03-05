@@ -83,27 +83,27 @@ def navix_wrapper(env: nx.Environment):
 def make_env(env_config: EnvConfig, goal=True) -> tuple[Environment, Any]:
     env: Environment | None = None
 
-    if env_config.env_source == "gymnax":
-        env, params = gymnax.make(env_config.env_name, **env_config.env_kwargs)
+    if env_config.source == "gymnax":
+        env, params = gymnax.make(env_config.name, **env_config.kwargs)
         env = gymnax_wrapper(env)
         if goal:
             env = goal_wrapper(env)
-    elif env_config.env_source == "brax":
-        # env = brax.envs.get_environment(env_config.env_name, **env_config.env_kwargs)
+    elif env_config.source == "brax":
+        # env = brax.envs.get_environment(env_config.env_name, **env_config.kwargs)
         ...
-    elif env_config.env_source == "navix":
-        env = nx.make(env_config.env_name, **env_config.env_kwargs)
+    elif env_config.source == "navix":
+        env = nx.make(env_config.name, **env_config.kwargs)
         env = navix_wrapper(env)
 
-    elif env_config.env_source == "custom":
-        if env_config.env_name == "MultiCatch":
+    elif env_config.source == "custom":
+        if env_config.name == "MultiCatch":
             assert goal, "Multitask requires goal"
-            env, params = make_multi_catch(**env_config.env_kwargs)
+            env, params = make_multi_catch(**env_config.kwargs)
             env = auto_reset_wrapper(env)
 
     if env is None:
         raise ValueError(
-            f"Unrecognized environment {env_config.env_name} in {env_config.env_source}"
+            f"Unrecognized environment {env_config.name} in {env_config.source}"
         )
 
     env = flatten_observation_wrapper(env)
