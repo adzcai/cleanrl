@@ -10,11 +10,11 @@ import jax
 import jax.numpy as jnp
 import jax.random as jr
 import mctx
-from omegaconf import DictConfig, ListConfig, OmegaConf
 import yaml
 from beartype import beartype as typechecker
 from chex import dataclass
 from jaxtyping import Array, Bool, Float, Key, PyTree, jaxtyped
+from omegaconf import DictConfig, ListConfig, OmegaConf
 
 import wandb
 

@@ -60,8 +60,8 @@ from typing import Any, Literal, TypeVar, get_origin
 import jax
 import jax.numpy as jnp
 import jax.random as jr
-from jaxtyping import Array, Key
 import matplotlib
+from jaxtyping import Array, Key
 from omegaconf import OmegaConf
 
 import wandb

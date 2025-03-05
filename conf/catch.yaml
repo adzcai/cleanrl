@@ -3,7 +3,7 @@ arch:
   rnn_size: 128
   mlp_size: 64
   mlp_depth: 1
-  goal_dim: 2
+  goal_dim: 4
   activation: relu
 
 env:

@@ -102,9 +102,7 @@ def make_env(env_config: EnvConfig, goal=True) -> tuple[Environment, Any]:
             env = auto_reset_wrapper(env)
 
     if env is None:
-        raise ValueError(
-            f"Unrecognized environment {env_config.name} in {env_config.source}"
-        )
+        raise ValueError(f"Unrecognized environment {env_config.name} in {env_config.source}")
 
     env = flatten_observation_wrapper(env)
     env = log_wrapper(env)

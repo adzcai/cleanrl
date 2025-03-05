@@ -22,7 +22,6 @@ class EnvState:
     ball_x: Integer[Array, ""]
     ball_y: Integer[Array, ""]
     paddle_x: Integer[Array, ""]
-    ball_type: Integer[Array, ""]
     goal: Integer[Array, ""]
 
 
@@ -36,9 +35,14 @@ class EnvParams:
 def make_multi_catch(
     **kwargs,
 ) -> tuple[Environment[GoalObs[Obs], EnvState, Integer[Array, ""], EnvParams], EnvParams]:
-    """JAX Compatible version of Catch bsuite environment."""
+    """JAX-compatible multitask version of Catch bsuite environment.
+
+    If the goal is zero, reward is given for _missing_ the ball.
+    Otherwise reward is given for _catching_ the ball.
+    """
 
     def _get_obs(state: EnvState, params: EnvParams) -> GoalObs[Obs]:
+        """Observe the state."""
         obs = (
             jnp.zeros((params.rows, params.columns))
             .at[state.ball_y, state.ball_x]
@@ -52,13 +56,12 @@ def make_multi_catch(
         )
 
     def reset(params: EnvParams, *, key: Key[Array, ""]) -> tuple[GoalObs[Obs], EnvState]:
-        """Randomly sample ball column, ball type, and goal."""
-        key_ball, key_type, key_goal = jr.split(key, 3)
+        """Randomly sample ball column and goal."""
+        key_ball, key_goal = jr.split(key)
         state = EnvState(
             ball_x=jr.randint(key_ball, (), 0, params.columns, int),
             ball_y=jnp.zeros((), int),
             paddle_x=jnp.asarray(params.columns // 2, int),
-            ball_type=jr.randint(key_type, (), 0, params.num_goals),
             goal=jr.randint(key_goal, (), 0, params.num_goals),
         )
         return Timestep.initial(obs=_get_obs(state, params), state=state, info={})
@@ -82,8 +85,9 @@ def make_multi_catch(
 
         terminal = next_state.ball_y == params.rows - 1
         missed = paddle_x != next_state.ball_x
-        matched = state.goal == state.ball_type
-        success = jnp.logical_xor(missed, matched)
+        # if goal is zero, miss is success
+        # if goal is nonzero, catch is success
+        success = jnp.logical_xor(missed, state.goal)
         reward = terminal * jnp.where(success, 1.0, -1.0)
 
         return Timestep(
