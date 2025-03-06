@@ -1,4 +1,5 @@
 import dataclasses as dc
+import equinox as eqx
 import functools as ft
 import inspect
 import sys
@@ -211,3 +212,7 @@ def dict_to_dataclass(cls: type[T], obj: dict) -> T:
             value = OmegaConf.to_object(value)
         out[field.name] = value
     return cls(**out)
+
+def print_bytes(x) -> None:
+    eqx.tree_pprint(jax.tree.map(lambda x: x.nbytes if eqx.is_array(x) else None, x))
+

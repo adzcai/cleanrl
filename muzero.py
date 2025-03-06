@@ -27,6 +27,7 @@ import wandb
 from config import ArchConfig, TrainConfig, main
 from log_util import (
     exec_loop,
+    print_bytes,
     get_norm_data,
     log_values,
     roll_into_matrix,
@@ -37,8 +38,8 @@ from prioritized_buffer import BufferState, PrioritizedBuffer
 from wrappers.base import StepType, TEnvState, Timestep, TObs
 from wrappers.goal_wrapper import GoalObs
 from wrappers.log import Metrics
-from wrappers.multi_catch import get_action_name, visualize_catch
-from wrappers.translate import HouseMazeObs, make_env, visualize
+from wrappers.multi_catch import visualize_catch
+from wrappers.translate import HouseMazeObs, make_env, visualize, get_action_name
 
 
 class WorldModelRNN(eqx.Module):
@@ -386,7 +387,6 @@ def make_train(config: TrainConfig):
     num_iters = config.collection.total_transitions // (
         config.collection.num_envs * config.collection.num_timesteps
     )
-    max_horizon = num_iters * config.collection.num_timesteps
     num_grad_updates = num_iters * config.optim.num_minibatches
     eval_freq = num_iters // config.eval.num_evals
 
@@ -405,6 +405,7 @@ def make_train(config: TrainConfig):
         optax.contrib.ademamix(lr),
     )
 
+    max_horizon = int(config.collection.total_transitions / (config.collection.num_envs * config.collection.buffer_size_denominator))
     buffer = PrioritizedBuffer.new(
         batch_size=config.collection.num_envs,
         max_time=max_horizon,
@@ -474,6 +475,9 @@ def make_train(config: TrainConfig):
             num_goals=env.goal_space(env_params).num_values,
             key=key_net,
         )
+        print("network size (bytes):")
+        print_bytes(init_net)
+
         init_params, net_static = eqx.partition(init_net, eqx.is_inexact_array)
         init_hiddens = jnp.broadcast_to(
             init_net.world_model.init_hidden(),
@@ -489,6 +493,8 @@ def make_train(config: TrainConfig):
                 mcts_probs=jnp.empty(num_actions, init_hiddens.dtype),
             )
         )
+        print(f"buffer size (bytes)")
+        print_bytes(init_buffer_state)
 
         @exec_loop(
             IterState(
@@ -1069,7 +1075,7 @@ def make_train(config: TrainConfig):
             ax_policy: Axes = ax[rows_per_env * i + j]
             j += 1
             ax_policy.set_title(f"Trajectory {i} Policy and MCTS")
-            action_names = [get_action_name(i) for i in range(3)]
+            action_names = [get_action_name(config.env.name, i) for i in range(3)]
             action_names += [f"{name} (mc)" for name in action_names]
             plot_compare_dists(
                 ax_policy,
@@ -1149,7 +1155,7 @@ def make_train(config: TrainConfig):
                     elif step_type == StepType.LAST:
                         step_type = "L"
 
-                    a = get_action_name(trajectories.action[i, h].item())
+                    a = get_action_name(config.env.name, trajectories.action[i, h].item())
                     # c h w -> h w c
                     ax_stats.imshow(jnp.permute_dims(video[i, h], (1, 2, 0)))
                     ax_stats.grid(True)

@@ -133,6 +133,8 @@ class CollectionConfig:
 
     total_transitions: int
     num_timesteps: int
+    buffer_size_denominator: float
+    """The buffer has size (num_envs, total_transitions // (num_envs * buffer_size_denominator))"""
     num_envs: int  # more parallel data collection
     mcts_depth: int
     num_mcts_simulations: int  # stronger policy improvement

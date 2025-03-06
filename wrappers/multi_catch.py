@@ -156,13 +156,3 @@ def visualize_catch(
 
     return video
 
-
-def get_action_name(action: int):
-    if action == 0:
-        return "L"
-    elif action == 1:
-        return "N"
-    elif action == 2:
-        return "R"
-    else:
-        raise ValueError(f"Invalid action {action}")

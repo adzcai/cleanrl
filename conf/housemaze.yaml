@@ -1,7 +1,7 @@
 arch:
   projection_kind: housemaze
-  rnn_size: 128
-  mlp_size: 64
+  rnn_size: 32
+  mlp_size: 32
   mlp_depth: 2
   goal_dim: 8
   action_dim: 8
@@ -13,8 +13,9 @@ env:
 
 collection:
   total_transitions: 100000
-  num_envs: 64
-  num_timesteps: 10
+  num_envs: 8
+  num_timesteps: 50
+  buffer_size_denominator: 4.0
   mcts_depth: 10
   num_mcts_simulations: 4
 

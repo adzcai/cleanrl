@@ -278,3 +278,20 @@ def visualize(env_name: str, env_state: PyTree[Array], **kwargs):
         return visualize_catch(env_state, **kwargs)
     if env_name == "HouseMaze":
         return visualize_housemaze(env_state)
+    raise ValueError(f"Env {env_name} not recognized")
+
+def get_action_name(env_name: str,action: int):
+    if env_name in ["Catch-bsuite", "MultiCatch"]:
+        if action == 0:
+            return "L"
+        elif action == 1:
+            return "N"
+        elif action == 2:
+            return "R"
+        else:
+            raise ValueError(f"Invalid action {action}")
+    elif env_name == "HouseMaze":
+        return ['right', 'down', 'left', 'up', 'done', 'NONE', 'reset'][action]
+    else:
+        raise ValueError(f"Env {env_name} not recognized")
+
