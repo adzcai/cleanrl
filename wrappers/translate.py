@@ -1,23 +1,26 @@
-from typing import Any
+from typing import Any, NamedTuple
 
+import dm_env.specs as specs
 import gymnax.environments.environment as ge
 import gymnax.environments.spaces as spaces
 import housemaze.env as maze
 import housemaze.levels as maze_levels
+import housemaze.renderer as renderer
 import housemaze.utils as maze_utils
 import jax
 import jax.numpy as jnp
 import jax.random as jr
 import navix as nx
-from jaxtyping import Array, Key, Integer
+from jaxtyping import Array, Integer, Key, PyTree
 
 from config import EnvConfig
+from log_util import dataclass
 from wrappers.auto_reset import auto_reset_wrapper
 from wrappers.base import Environment, GoalObs, StepType, Timestep
 from wrappers.flatten_observation import flatten_observation_wrapper
 from wrappers.goal_wrapper import goal_wrapper
 from wrappers.log import log_wrapper
-from wrappers.multi_catch import make_multi_catch
+from wrappers.multi_catch import make_multi_catch, visualize_catch
 
 
 def gymnax_wrapper(env: ge.Environment[ge.TEnvState, ge.TEnvParams], params: ge.TEnvParams):
@@ -81,6 +84,18 @@ def navix_wrapper(env: nx.Environment):
     )
 
 
+image_dict = maze_utils.load_image_dict()
+
+
+class HouseMazeObs(NamedTuple):
+    image: Integer[Array, " height width"]
+    # state_features
+    direction: Integer[Array, ""]
+    row: Integer[Array, ""]
+    column: Integer[Array, ""]
+    prev_action: Integer[Array, ""]
+
+
 def new_housemaze():
     """Initialize HouseMaze environment."""
     # initialize map
@@ -92,14 +107,21 @@ def new_housemaze():
         E="bowl",
         F="plates",
     )
-    image_dict = maze_utils.load_image_dict()
     object_to_index = {key: idx for idx, key in enumerate(image_dict["keys"])}
-    levels = [maze_levels.two_objects, maze_levels.three_pairs_maze1]
-    map_init = [
-        maze_utils.from_str(map_str, char_to_key=char_to_key, object_to_index=object_to_index)
-        for map_str in levels
-    ]
-    map_init = jax.tree.map(lambda *x: jnp.stack(x), *map_init)
+    if False:
+        # switch between multiple levels
+        levels = [maze_levels.three_pairs_maze1, maze_levels.two_objects]
+        map_init = [
+            maze_utils.from_str(map_str, char_to_key=char_to_key, object_to_index=object_to_index)
+            for map_str in levels
+        ]
+        map_init = jax.tree.map(lambda *x: jnp.stack(x), *map_init)
+    else:
+        map_init = maze_utils.from_str(
+            maze_levels.three_pairs_maze1,
+            char_to_key=char_to_key,
+            object_to_index=object_to_index,
+        )
     map_init = maze.MapInit(*map_init)
 
     # create env params
@@ -117,33 +139,45 @@ def new_housemaze():
 def housemaze_wrapper(
     env: maze.HouseMaze,
 ) -> Environment[Any, maze.TimeStep, Integer[Array, ""], maze.EnvParams]:
-    def _translate_obs(env_obs: maze.Observation):
-        obs = {
-            "image": env_obs.image,
+    def _translate_obs(env_obs: maze.Observation, params: maze.EnvParams):
+        row, column = env_obs.position
+        # insert 0 and 1 as valid keys
+        objects = jnp.concat([jnp.arange(2), params.objects])
+        image = jnp.argmax(env_obs.image[:, :, jnp.newaxis] == objects, axis=-1)
+        obs = HouseMazeObs(
+            image=image.ravel(),  # flatten
             # "state_features": env_obs.state_features,
-            "direction": env_obs.direction,
-            "position": env_obs.position,
-            "prev_action": env_obs.prev_action,
-        }
+            direction=env_obs.direction,
+            row=row,
+            column=column,
+            prev_action=env_obs.prev_action,
+        )
         goal = jnp.argmax(env_obs.task_w)
         return GoalObs(obs=obs, goal=goal)
 
-    def observation_space(params: maze.EnvParams) -> spaces.Space:
+    def observation_space(params: maze.EnvParams) -> PyTree[specs.Array]:
         """TODO inaccurate since image size changes per maze"""
-        return spaces.Dict(
-            {
-                "image": spaces.Box(low=-jnp.inf, high=jnp.inf, shape=(None, None), dtype=int),
-                # "state_features": spaces.Box(low=-jnp.inf, high=jnp.inf, dtype=float),
-                "direction": spaces.Box(low=0, high=3, shape=(), dtype=int),
-                "position": spaces.Box(low=0, high=jnp.inf, shape=(2,), dtype=int),
-                "prev_action": spaces.Box(low=0, high=jnp.inf, shape=(), dtype=int),
-            }
+        height, width = params.map_init.grid.shape[:-1]
+        num_objects = len(params.objects) + 2  # for 0 and 1
+        return HouseMazeObs(
+            image=specs.BoundedArray(
+                shape=(height * width,),
+                dtype=int,
+                minimum=0,
+                maximum=num_objects - 1,
+                name="image",
+            ),
+            # "state_features": spaces.Box(low=-jnp.inf, high=jnp.inf, dtype=float),
+            direction=specs.DiscreteArray(len(maze.DIR_TO_VEC), name="direction"),
+            row=specs.DiscreteArray(height, name="row"),
+            column=specs.DiscreteArray(width, name="width"),
+            prev_action=specs.DiscreteArray(env.num_actions(params), name="prev_action"),
         )
 
     def reset(params: maze.EnvParams, *, key: Key[Array, ""]):
         env_timestep = env.reset(key, params)
         return Timestep.initial(
-            obs=_translate_obs(env_timestep.observation),
+            obs=_translate_obs(env_timestep.observation, params),
             state=env_timestep,
             info={},
         )
@@ -167,7 +201,7 @@ def housemaze_wrapper(
         )
         return Timestep(
             state=env_timestep,
-            obs=_translate_obs(obs),
+            obs=_translate_obs(obs, params),
             reward=env_timestep.reward,
             discount=env_timestep.discount,
             step_type=step_type,
@@ -175,13 +209,22 @@ def housemaze_wrapper(
         )
 
     return Environment(
-        _inner=env,
+        _inner=None,
         name="HouseMaze",
         reset=reset,
         step=step,
-        action_space=lambda params: spaces.Discrete(env.num_actions(params)),
+        action_space=lambda params: specs.DiscreteArray(env.num_actions(params), name="action"),
         observation_space=observation_space,
-        goal_space=lambda params: spaces.Discrete(len(params.objects)),
+        goal_space=lambda params: specs.DiscreteArray(len(params.objects), name="goal"),
+    )
+
+
+def visualize_housemaze(timestep: maze.TimeStep):
+    return renderer.create_image_from_grid(
+        timestep.state.grid,
+        timestep.state.agent_pos,
+        timestep.state.agent_dir,
+        image_dict,
     )
 
 
@@ -191,6 +234,7 @@ def make_env(env_config: EnvConfig, goal=True) -> tuple[Environment, Any]:
     if env_config.source == "gymnax":
         env, params = gymnax.make(env_config.name, **env_config.kwargs)
         env = gymnax_wrapper(env)
+        env = flatten_observation_wrapper(env)
         if goal:
             env = goal_wrapper(env)
     elif env_config.source == "brax":
@@ -204,6 +248,7 @@ def make_env(env_config: EnvConfig, goal=True) -> tuple[Environment, Any]:
         if env_config.name == "MultiCatch":
             assert goal, "Multitask requires goal"
             env, params = make_multi_catch(**env_config.kwargs)
+            env = flatten_observation_wrapper(env)
             env = auto_reset_wrapper(env)
 
         elif env_config.name == "HouseMaze":
@@ -214,6 +259,12 @@ def make_env(env_config: EnvConfig, goal=True) -> tuple[Environment, Any]:
     if env is None:
         raise ValueError(f"Unrecognized environment {env_config.name} in {env_config.source}")
 
-    env = flatten_observation_wrapper(env)
     env = log_wrapper(env)
     return env, params
+
+
+def visualize(env_name: str, env_state: PyTree[Array], **kwargs):
+    if env_name in ["Catch-bsuite", "MultiCatch"]:
+        return visualize_catch(env_state, **kwargs)
+    if env_name == "HouseMaze":
+        return visualize_housemaze(env_state)

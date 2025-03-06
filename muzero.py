@@ -1,8 +1,8 @@
 """Implementation of MuZero with a recurrent actor-critic network."""
 
-import colorsys
 import dataclasses as dc
 import functools as ft
+import math
 import sys
 from pathlib import Path
 from typing import Annotated as Batched
@@ -21,7 +21,7 @@ import mctx
 import optax
 import rlax
 import yaml
-from jaxtyping import Array, Bool, Float, Integer, Key, UInt
+from jaxtyping import Array, Bool, Float, Integer, Key, PyTree, UInt
 from matplotlib.axes import Axes
 
 import wandb
@@ -39,7 +39,7 @@ from wrappers.base import StepType, TEnvState, Timestep, TObs
 from wrappers.goal_wrapper import GoalObs
 from wrappers.log import Metrics
 from wrappers.multi_catch import get_action_name, visualize_catch
-from wrappers.translate import make_env
+from wrappers.translate import HouseMazeObs, make_env, visualize
 
 
 class WorldModelRNN(eqx.Module):
@@ -151,10 +151,61 @@ class ActorCritic(eqx.Module):
         )
 
 
+class HouseMazeEmbedding(eqx.Module):
+    """Embed a HouseMaze observation.
+
+    See `housemaze.env.Observation` and also `preplay-AI/networks/CategoricalHouzemazeObsEncoder`.
+    A `HouseMazeObs` has the following properties:
+
+        image (Integer (height, width)): The type of object within each cell.
+        row (Integer ()): The agent's row coordinate.
+        column (Integer ()): The agent's column coordinate.
+        direction (Integer ()): The agent's direction (right, down, left, up)
+        prev_action (Integer ()): The previous action.
+    """
+
+    dim_offset: Integer[Array, " num_leaves"] = eqx.field(static=True)
+    embed: eqx.nn.Embedding
+    mlp: eqx.nn.MLP
+
+    def __init__(
+        self,
+        config: ArchConfig,
+        obs_spec: PyTree[specs.Array],
+        *,
+        key: Key[Array, ""],
+    ):
+        key_embed, key_mlp = jr.split(key)
+
+        leaf_specs: list[specs.Array] = jax.tree.leaves(obs_spec)
+        num_values = [spec.maximum - spec.minimum + 1 for spec in leaf_specs]
+        self.dim_offset = jnp.cumsum(jnp.asarray([0] + num_values[:-1]))
+        self.embed = eqx.nn.Embedding(sum(num_values).item(), config.mlp_size, key=key_embed)
+
+        # mlp for embedding
+        in_size = sum(math.prod(spec.shape) for spec in leaf_specs)
+        self.mlp = eqx.nn.MLP(
+            in_size=in_size * config.mlp_size,
+            out_size=config.rnn_size,
+            width_size=config.mlp_size,
+            depth=config.mlp_depth,
+            activation=getattr(jax.nn, config.activation),
+            key=key_mlp,
+        )
+
+    def __call__(self, obs: HouseMazeObs, *, key: Key[Array, ""] | None = None):
+        obs = jax.tree.leaves(obs)
+        obs = [jnp.reshape(x + offset, -1) for x, offset in zip(obs, self.dim_offset)]
+        obs = jnp.concat(obs)
+        input = jax.vmap(self.embed)(obs)
+        input = self.mlp(input.ravel())
+        return input
+
+
 class MuZeroNetwork(eqx.Module):
     """The entire MuZero network parameters."""
 
-    projection: eqx.nn.MLP
+    projection: eqx.nn.MLP | HouseMazeEmbedding
     """Embed the observation into world model recurrent state."""
     world_model: WorldModelRNN
     """The recurrent world model."""
@@ -165,7 +216,7 @@ class MuZeroNetwork(eqx.Module):
     def __init__(
         self,
         config: ArchConfig,
-        obs_size: tuple[int, ...],
+        obs_spec: PyTree[specs.Array],
         num_actions: int,
         num_value_bins: int,
         num_goals: int,
@@ -174,9 +225,10 @@ class MuZeroNetwork(eqx.Module):
     ):
         key_projection, key_world_model, key_actor_critic, key_embed_goal = jr.split(key, 4)
 
-        if config.kind == "mlp":
+        if config.projection_kind == "mlp":
             # ensure flattened input
-            assert len(obs_size) == 1, "MLP expects flattened input"
+            obs_size = obs_spec.shape
+            assert len(obs_size) == 1, f"MLP expects flattened input. Got {obs_size}"
             self.projection = eqx.nn.MLP(
                 in_size=obs_size[0],
                 out_size=config.rnn_size,
@@ -184,8 +236,10 @@ class MuZeroNetwork(eqx.Module):
                 depth=config.mlp_depth,
                 key=key_projection,
             )
-        elif config.kind == "cnn":
+        elif config.projection_kind == "cnn":
             key_cnn, key_linear = jr.split(key_projection)
+            obs_size = obs_spec.shape
+            # TODO implement cnn projection
             # (C, H, W)
             cnn = eqx.nn.Conv2d(
                 in_channels=obs_size,
@@ -204,6 +258,10 @@ class MuZeroNetwork(eqx.Module):
                         key=key_linear,
                     ),
                 ]
+            )
+        elif config.projection_kind == "housemaze":
+            self.projection = HouseMazeEmbedding(
+                config=config, obs_spec=obs_spec, key=key_projection
             )
 
         self.world_model = WorldModelRNN(
@@ -410,7 +468,7 @@ def make_train(config: TrainConfig):
         # initialize all state
         init_net = MuZeroNetwork(
             config=config.arch,
-            obs_size=init_timesteps.obs.obs.shape[1:],
+            obs_spec=env.observation_space(env_params),
             num_actions=num_actions,
             num_value_bins=config.value.num_value_bins,
             num_goals=env.goal_space(env_params).num_values,
@@ -865,7 +923,7 @@ def make_train(config: TrainConfig):
         def rollout_step(timesteps: Batched[Timestep, " num_envs"], key: Key[Array, ""]):
             key_action, key_step, key_mcts = jr.split(key, 3)
 
-            @ft.partial(jax.value_and_grad, has_aux=True)
+            @ft.partial(jax.value_and_grad, has_aux=True, allow_int=True)
             def predict(
                 obs: Float[Array, " *obs_size"],
                 goal: UInt[Array, ""],
@@ -920,10 +978,8 @@ def make_train(config: TrainConfig):
             visualize_callback,
             trajectories,
             bootstrapped_returns[:, 0],
-            (
-                jax.vmap(visualize_catch)(trajectories.timestep.state, obs_grads)
-                if config.env.name in ["Catch-bsuite", "MultiCatch"]
-                else None
+            video=jax.vmap(ft.partial(visualize, config.env.name))(
+                trajectories.timestep.state, maps=obs_grads
             ),
             prefix="eval",
             predicted_rewards=reward_preds,
@@ -955,10 +1011,8 @@ def make_train(config: TrainConfig):
                 )
             ),
             bootstrapped_returns=aux.bootstrapped_return,
-            video=(
-                jax.vmap(visualize_catch)(sampled_trajectories.timestep.state)
-                if config.env.name in ["Catch-bsuite", "MultiCatch"]
-                else None
+            video=jax.vmap(ft.partial(visualize, config.env.name))(
+                sampled_trajectories.timestep.state
             ),
             prefix="visualize",
             priorities=batch.priority,
@@ -1194,14 +1248,24 @@ def make_train(config: TrainConfig):
         horizon, num_actions = p0.shape
         x = jnp.arange(horizon)
 
-        # evenly spaced colors around the hue circle
-        colors = [colorsys.hsv_to_rgb(hue / num_actions, 0.8, 0.9) for hue in range(num_actions)]
-        ax.stackplot(x, jnp.concat([p0, p1], axis=1).T, labels=labels, colors=colors * 2)
+        # Use matplotlib's built-in colormap to get evenly spaced colors around the color wheel
+        import matplotlib.cm as cm
+
+        colors = []
+        for i in range(num_actions):
+            # Use the 'hsv' colormap to get colors around the hue wheel
+            color = cm.hsv(i / num_actions)
+            colors.append(color)
+
+        # Repeat colors for MCTS distributions
+        all_colors = colors * 2  # repeat colors for policy and MCTS
+
+        ax.stackplot(x, jnp.concat([p0, p1], axis=1).T, labels=labels, colors=all_colors)
 
         ax.set_xticks(x, x)
         ax.set_ylim(0, 2)
 
-        ax.legend(loc="center left", bbox_to_anchor=(0.9, 0.5))
+        ax.legend(loc="center left", bbox_to_anchor=(1, 0.5))
 
     return train, (rollout, bootstrap)
 

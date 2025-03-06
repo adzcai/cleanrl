@@ -1,20 +1,18 @@
 arch:
-  projection_kind: mlp
+  projection_kind: housemaze
   rnn_size: 128
   mlp_size: 64
-  mlp_depth: 1
-  goal_dim: 4
-  action_dim: 4
+  mlp_depth: 2
+  goal_dim: 8
+  action_dim: 8
   activation: relu
 
 env:
-  name: MultiCatch
+  name: HouseMaze
   source: custom
-  kwargs:
-    num_goals: 2
 
 collection:
-  total_transitions: 100000
+  total_transitions: 10000
   num_envs: 64
   num_timesteps: 10
   mcts_depth: 10

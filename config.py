@@ -109,7 +109,7 @@ DEFAULT_CONFIG = Config(
 class ArchConfig:
     """Network architecture"""
 
-    kind: Literal["mlp", "cnn"]
+    projection_kind: Literal["mlp", "cnn", "housemaze"]
     rnn_size: int
     mlp_size: int
     mlp_depth: int
