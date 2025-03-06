@@ -34,7 +34,7 @@ bootstrap:
 optim:
   num_minibatches: 8
   batch_size: 64
-  timesteps: 20
+  num_timesteps: 20
   lr_init: 0.01
   max_grad_norm: 3.14
   value_coef: 0.5
@@ -46,4 +46,4 @@ eval:
   warnings: False
   num_evals: 8
   num_eval_envs: 2
-  timesteps: 25
+  num_timesteps: 25

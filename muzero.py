@@ -409,7 +409,7 @@ def make_train(config: TrainConfig):
     buffer = PrioritizedBuffer.new(
         batch_size=config.collection.num_envs,
         max_time=max_horizon,
-        horizon=config.optim.timesteps,
+        horizon=config.optim.num_timesteps,
     )
 
     @typecheck
@@ -521,10 +521,8 @@ def make_train(config: TrainConfig):
             buffer_state = buffer.add(iter_state.param_state.buffer_state, trajectories)
 
             metrics: Metrics = trajectories.timestep.info["metrics"]
-            mean_return = jnp.mean(
-                metrics.episode_return,
-                where=trajectories.timestep.step_type == StepType.LAST,
-            )
+            final_step_mask = trajectories.timestep.step_type == StepType.LAST
+            mean_return = jnp.mean(metrics.episode_return, where=final_step_mask)
             log_values({"iter/step": iter_state.step, "iter/mean_return": mean_return})
 
             buffer_available = buffer.num_available(buffer_state) >= config.optim.batch_size
@@ -638,12 +636,14 @@ def make_train(config: TrainConfig):
             jax.debug.print(
                 "step {step}/{num_iters}. "
                 "seen {transitions}/{total_transitions} transitions. "
-                "mean return {mean_return}",
+                "mean return {mean_return}. "
+                "{num_episodes} episodes collected.",
                 step=iter_state.step,
                 num_iters=num_iters,
                 transitions=param_state.buffer_state.pos * config.collection.num_envs,
                 total_transitions=config.collection.total_transitions,
                 mean_return=mean_return,
+                num_episodes=jnp.sum(final_step_mask),
             )
 
             if config.eval.warnings:
@@ -919,7 +919,7 @@ def make_train(config: TrainConfig):
         key_reset = jr.split(key_reset, num_envs)
         init_timesteps = env_reset_batch(env_params, key=key_reset)
 
-        @exec_loop(init_timesteps, config.eval.timesteps, key_rollout)
+        @exec_loop(init_timesteps, config.eval.num_timesteps, key_rollout)
         def rollout_step(timesteps: Batched[Timestep, " num_envs"], key: Key[Array, ""]):
             key_action, key_step, key_mcts = jr.split(key, 3)
 

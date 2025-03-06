@@ -12,7 +12,7 @@ env:
   source: custom
 
 collection:
-  total_transitions: 10000
+  total_transitions: 100000
   num_envs: 64
   num_timesteps: 10
   mcts_depth: 10
@@ -32,7 +32,7 @@ bootstrap:
 optim:
   num_minibatches: 8
   batch_size: 64
-  timesteps: 20
+  num_timesteps: 200
   lr_init: 0.01
   max_grad_norm: 3.14
   value_coef: 0.5
@@ -44,4 +44,4 @@ eval:
   warnings: False
   num_evals: 8
   num_eval_envs: 2
-  timesteps: 25
+  num_timesteps: 25

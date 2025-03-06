@@ -10,8 +10,13 @@
             "request": "launch",
             "program": "${file}",
             "console": "integratedTerminal",
+            "env": {
+                "JAX_DISABLE_JIT": "True",
+                "JAX_DEBUG_NANS": "True"
+            },
             "args": [
-                "conf/housemaze.yaml"
+                "conf/housemaze.yaml",
+                "conf/debug.yaml"
             ]
         }
     ]

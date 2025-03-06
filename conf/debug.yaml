@@ -6,7 +6,7 @@ arch:
 collection:
   total_transitions: 100
   num_envs: 1
-  horizon: 9
+  num_timesteps: 10
   num_mcts_simulations: 1
 
 value:
@@ -17,5 +17,6 @@ optim:
   batch_size: 1
 
 eval:
-  num_evals: 1
+  num_evals: 4
   num_eval_envs: 1
+  num_timesteps: 10

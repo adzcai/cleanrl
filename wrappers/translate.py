@@ -11,10 +11,9 @@ import jax
 import jax.numpy as jnp
 import jax.random as jr
 import navix as nx
-from jaxtyping import Array, Integer, Key, PyTree
+from jaxtyping import Array, Integer, Key, PyTree, Float
 
 from config import EnvConfig
-from log_util import dataclass
 from wrappers.auto_reset import auto_reset_wrapper
 from wrappers.base import Environment, GoalObs, StepType, Timestep
 from wrappers.flatten_observation import flatten_observation_wrapper
@@ -171,7 +170,8 @@ def housemaze_wrapper(
             direction=specs.DiscreteArray(len(maze.DIR_TO_VEC), name="direction"),
             row=specs.DiscreteArray(height, name="row"),
             column=specs.DiscreteArray(width, name="width"),
-            prev_action=specs.DiscreteArray(env.num_actions(params), name="prev_action"),
+            # housemaze reset_action sets to num_actions + 1
+            prev_action=specs.DiscreteArray(env.num_actions(params) + 2, name="prev_action"),
         )
 
     def reset(params: maze.EnvParams, *, key: Key[Array, ""]):
@@ -219,13 +219,16 @@ def housemaze_wrapper(
     )
 
 
-def visualize_housemaze(timestep: maze.TimeStep):
-    return renderer.create_image_from_grid(
+def visualize_housemaze(timestep: maze.TimeStep) -> Float[Array, " horizon channel height width"]:
+    video: Float[Array, " horizon height width channel"] = jax.vmap(
+        renderer.create_image_from_grid, in_axes=(0, 0, 0, None)
+    )(
         timestep.state.grid,
         timestep.state.agent_pos,
         timestep.state.agent_dir,
         image_dict,
     )
+    return video.transpose((0, 3, 1, 2))  # C H W
 
 
 def make_env(env_config: EnvConfig, goal=True) -> tuple[Environment, Any]:

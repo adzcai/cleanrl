@@ -163,7 +163,7 @@ class OptimConfig:
 
     num_minibatches: int  # number of gradient descent updates per iteration
     batch_size: int  # reduce gradient variance
-    timesteps: int
+    num_timesteps: int
     lr_init: float
     max_grad_norm: float
     value_coef: float  # scale the value loss
@@ -177,7 +177,7 @@ class EvalConfig:
     """Evaluation of the learned policy and value function."""
 
     warnings: bool
-    timesteps: int
+    num_timesteps: int
     num_evals: int
     num_eval_envs: int
 
