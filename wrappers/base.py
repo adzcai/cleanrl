@@ -27,6 +27,18 @@ from jaxtyping import Array, Float, Integer, Key, PyTree
 
 from log_util import T, dataclass
 
+try:
+    import gymnax
+    GYMNAX_INSTALLED = True
+except ImportError:
+    GYMNAX_INSTALLED = False
+
+try:
+    import navix
+    NAVIX_INSTALLED = True
+except ImportError:
+    NAVIX_INSTALLED = False
+
 P = ParamSpec("P")
 TEnvState = TypeVar("TEnvState")
 TObs = TypeVar("TObs")

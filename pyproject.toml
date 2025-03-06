@@ -8,14 +8,12 @@ dependencies = [
     "beartype>=0.20.0",
     "distrax>=0.1.5",
     "equinox>=0.11.11",
-    "gymnax",
     "housemaze",
     "ipykernel>=6.29.5",
     "jax>=0.5.0 ; sys_platform != 'linux'",
     "jax[cuda12]>=0.5.0 ; sys_platform == 'linux'",
     "jaxtyping>=0.2.36",
     "mctx>=0.0.5",
-    "navix>=0.7.0",
     "omegaconf>=2.3.0",
     "optax>=0.2.4",
     "pygraphviz>=1.14 ; sys_platform != 'linux'",
@@ -29,7 +27,5 @@ line-length = 100
 lint.ignore = ["F722"]
 
 [tool.uv.sources]
-navix = { path = "../navix", editable = true }
-gymnax = { path = "../gymnax", editable = true }
 optax = { git = "https://github.com/google-deepmind/optax.git" }
 housemaze = { path = "../JaxHouseMaze", editable = true }

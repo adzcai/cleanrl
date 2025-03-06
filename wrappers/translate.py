@@ -1,8 +1,16 @@
 from typing import Any, NamedTuple
 
 import dm_env.specs as specs
-import gymnax.environments.environment as ge
-import gymnax.environments.spaces as spaces
+
+from wrappers.base import Environment, GoalObs, StepType, Timestep, GYMNAX_INSTALLED, NAVIX_INSTALLED
+
+if GYMNAX_INSTALLED:
+    import gymnax.environments.environment as ge
+    import gymnax.environments.spaces as spaces
+
+if NAVIX_INSTALLED:
+    import navix as nx
+
 import housemaze.env as maze
 import housemaze.levels as maze_levels
 import housemaze.renderer as renderer
@@ -10,77 +18,76 @@ import housemaze.utils as maze_utils
 import jax
 import jax.numpy as jnp
 import jax.random as jr
-import navix as nx
 from jaxtyping import Array, Integer, Key, PyTree, Float
 
 from config import EnvConfig
 from wrappers.auto_reset import auto_reset_wrapper
-from wrappers.base import Environment, GoalObs, StepType, Timestep
 from wrappers.flatten_observation import flatten_observation_wrapper
 from wrappers.goal_wrapper import goal_wrapper
 from wrappers.log import log_wrapper
 from wrappers.multi_catch import make_multi_catch, visualize_catch
 
 
-def gymnax_wrapper(env: ge.Environment[ge.TEnvState, ge.TEnvParams], params: ge.TEnvParams):
-    _, init_state = env.reset(jr.key(0), params)
-    _, init_step = env.step(
-        jr.key(0), init_state, env.action_space(params).sample(jr.key(0)), params
-    )
-    init_info = jax.tree.map(jnp.empty_like, init_step[-1])
+if GYMNAX_INSTALLED:
+    def gymnax_wrapper(env: ge.Environment[ge.TEnvState, ge.TEnvParams], params: ge.TEnvParams):
+        _, init_state = env.reset(jr.key(0), params)
+        _, init_step = env.step(
+            jr.key(0), init_state, env.action_space(params).sample(jr.key(0)), params
+        )
+        init_info = jax.tree.map(jnp.empty_like, init_step[-1])
 
-    def reset(params: ge.TEnvParams, *, key: Key[Array, ""]):
-        obs, state = env.reset(key, params)
-        return Timestep.initial(obs, state, init_info)
+        def reset(params: ge.TEnvParams, *, key: Key[Array, ""]):
+            obs, state = env.reset(key, params)
+            return Timestep.initial(obs, state, init_info)
 
-    def step(state: ge.TEnvState, action: Any, params: ge.TEnvParams, *, key: Key[Array, ""]):
-        obs, state, reward, done, info = env.step(key, state, action, params)
-        return Timestep(
-            obs=obs,
-            state=state,
-            reward=reward,
-            step_type=jnp.where(done, StepType.TERMINATION, StepType.TRANSITION),
-            info=info,
+        def step(state: ge.TEnvState, action: Any, params: ge.TEnvParams, *, key: Key[Array, ""]):
+            obs, state, reward, done, info = env.step(key, state, action, params)
+            return Timestep(
+                obs=obs,
+                state=state,
+                reward=reward,
+                step_type=jnp.where(done, StepType.TERMINATION, StepType.TRANSITION),
+                info=info,
+            )
+
+        return Environment(
+            _inner=env,  # technically a type error
+            reset=reset,
+            step=step,
+            action_space=env.action_space,
+            observation_space=env.observation_space,
+            goal_space=lambda env_params: spaces.Discrete(0),
         )
 
-    return Environment(
-        _inner=env,  # technically a type error
-        reset=reset,
-        step=step,
-        action_space=env.action_space,
-        observation_space=env.observation_space,
-        goal_space=lambda env_params: spaces.Discrete(0),
-    )
+if NAVIX_INSTALLED:
+    def navix_wrapper(env: nx.Environment):
+        def reset(params: None, *, key: Key[Array, ""]):
+            timestep = env.reset(key)
+            return timestep.observation, timestep
 
+        def step(state: nx.Timestep, action: Any, params: None, *, key: Key[Array, ""]):
+            timestep = env.step(state, action)
+            step_type = jnp.select(
+                [timestep.is_termination(), timestep.is_truncation()],
+                [StepType.TERMINATION, StepType.TRUNCATION],
+                default=StepType.TRANSITION,
+            )
+            return Timestep(
+                obs=timestep.observation,
+                state=timestep,
+                reward=timestep.reward,
+                step_type=step_type,
+                info=timestep.info,
+            )
 
-def navix_wrapper(env: nx.Environment):
-    def reset(params: None, *, key: Key[Array, ""]):
-        timestep = env.reset(key)
-        return timestep.observation, timestep
-
-    def step(state: nx.Timestep, action: Any, params: None, *, key: Key[Array, ""]):
-        timestep = env.step(state, action)
-        step_type = jnp.select(
-            [timestep.is_termination(), timestep.is_truncation()],
-            [StepType.TERMINATION, StepType.TRUNCATION],
-            default=StepType.TRANSITION,
+        return Environment(
+            _inner=env,
+            reset=reset,
+            step=step,
+            action_space=lambda params: env.action_space,
+            observation_space=lambda params: env.observation_space,
+            goal_space=lambda params: spaces.Discrete(0),
         )
-        return Timestep(
-            obs=timestep.observation,
-            state=timestep,
-            reward=timestep.reward,
-            step_type=step_type,
-            info=timestep.info,
-        )
-
-    return Environment(
-        _inner=env,
-        reset=reset,
-        step=step,
-        action_space=lambda params: env.action_space,
-        observation_space=lambda params: env.observation_space,
-        goal_space=lambda params: spaces.Discrete(0),
-    )
 
 
 image_dict = maze_utils.load_image_dict()

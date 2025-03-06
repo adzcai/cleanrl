@@ -12,7 +12,6 @@ import chex
 import distrax
 import dm_env.specs as specs
 import equinox as eqx
-import gymnax
 import jax
 import jax.numpy as jnp
 import jax.random as jr
@@ -435,24 +434,25 @@ def make_train(config: TrainConfig):
             config.value.num_value_bins,
         )
 
-    def get_invalid_actions(env_state: gymnax.EnvState) -> Bool[Array, " num_actions"]:
-        """TODO currently not used"""
-        if env.name == "Catch-bsuite":
-            catch_state: gymnax.environments.bsuite.catch.EnvState = env_state
-            catch_env: gymnax.environments.bsuite.catch.Catch = env
-            return jnp.select(
-                [
-                    catch_state.paddle_x == 0,
-                    catch_state.paddle_x == catch_env.columns - 1,
-                ],
-                [
-                    jnp.array([True, False, False]),
-                    jnp.array([False, False, True]),
-                ],
-                default=jnp.zeros(3, jnp.bool),
-            )
+    if False:
+        def get_invalid_actions(env_state: gymnax.EnvState) -> Bool[Array, " num_actions"]:
+            """TODO currently not used"""
+            if env.name == "Catch-bsuite":
+                catch_state: gymnax.environments.bsuite.catch.EnvState = env_state
+                catch_env: gymnax.environments.bsuite.catch.Catch = env
+                return jnp.select(
+                    [
+                        catch_state.paddle_x == 0,
+                        catch_state.paddle_x == catch_env.columns - 1,
+                    ],
+                    [
+                        jnp.array([True, False, False]),
+                        jnp.array([False, False, True]),
+                    ],
+                    default=jnp.zeros(3, jnp.bool),
+                )
 
-        return None
+            return None
 
     def train(key: Key[Array, ""]):
         key_reset, key_net, key_iter = jr.split(key, 3)
