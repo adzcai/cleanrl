@@ -297,11 +297,19 @@ def make_env(env_config: EnvConfig, goal=True) -> tuple[Environment, Any]:
     return env, params
 
 
-def visualize(env_name: str, env_state: PyTree[Array], **kwargs):
+def visualize_env_state_frame(
+    env_name: str, env_state: PyTree[Array], **kwargs
+) -> Float[Array, " channel height width"]:
+    """Visualize the environment.
+
+    Returns:
+        tuple[Float (horizon, channel, height, width), list[str]]: The recorded video;
+            The sequence of labels to append to the titles.
+    """
     if env_name in ["Catch-bsuite", "MultiCatch"]:
-        return visualize_catch(env_state, **kwargs)
+        return jax.jit(visualize_catch)(env_state, **kwargs)
     if env_name == "HouseMaze":
-        return visualize_housemaze(env_state)
+        return jax.jit(visualize_housemaze)(env_state)
     raise ValueError(f"Env {env_name} not recognized")
 
 
@@ -319,3 +327,12 @@ def get_action_name(env_name: str, action: int):
         return ["➡️", "⬇️", "⬅️", "⬆️", "done", "NONE", "reset"][action]
     else:
         raise ValueError(f"Env {env_name} not recognized")
+
+
+def get_env_state_frame_label(env_name: str, env_state):
+    """Label the frame in the generated video."""
+    if env_name in ["Catch-bsuite", "MultiCatch"]:
+        return f" task={env_state.goal}"
+    if env_name == "HouseMaze":
+        return f" task={env_state.state.task_w.argmax()}"
+    return ""

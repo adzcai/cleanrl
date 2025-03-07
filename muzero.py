@@ -38,7 +38,13 @@ from prioritized_buffer import BufferState, PrioritizedBuffer
 from wrappers.base import StepType, TEnvState, Timestep, TObs
 from wrappers.goal_wrapper import GoalObs
 from wrappers.log import Metrics
-from wrappers.translate import HouseMazeObs, get_action_name, make_env, visualize
+from wrappers.translate import (
+    HouseMazeObs,
+    get_action_name,
+    get_env_state_frame_label,
+    make_env,
+    visualize_env_state_frame,
+)
 
 
 class MLPConcatArgs(eqx.nn.MLP):
@@ -689,7 +695,7 @@ def make_train(config: TrainConfig):
                 "seen {transitions}/{total_transitions} transitions. "
                 "available {available}. "
                 "mean return {mean_return:.02f}. "
-                "mean length {mean_length:.02f}."
+                "mean length {mean_length:.02f}. "
                 "{num_episodes} episodes collected.",
                 step=iter_state.step,
                 num_iters=num_iters,
@@ -1033,7 +1039,7 @@ def make_train(config: TrainConfig):
             visualize_callback,
             trajectories,
             bootstrapped_returns[:, 0],
-            video=jax.vmap(ft.partial(visualize, config.env.name))(
+            video=jax.vmap(ft.partial(visualize_env_state_frame, config.env.name))(
                 trajectories.timestep.state, maps=obs_grads
             ),
             prefix="eval",
@@ -1066,7 +1072,7 @@ def make_train(config: TrainConfig):
                 )
             ),
             bootstrapped_returns=aux.bootstrapped_return,
-            video=jax.vmap(ft.partial(visualize, config.env.name))(
+            video=jax.vmap(ft.partial(visualize_env_state_frame, config.env.name))(
                 sampled_trajectories.timestep.state
             ),
             prefix="visualize",
@@ -1210,7 +1216,10 @@ def make_train(config: TrainConfig):
                     ax_stats.grid(True)
                     ax_stats.xaxis.set_major_locator(plt.MultipleLocator(1))
                     ax_stats.yaxis.set_major_locator(plt.MultipleLocator(1))
-                    ax_stats.set_title(f"{h=} {step_type} {a=}")
+                    env_state = tree_slice(trajectories.timestep.state, (i, h))
+                    ax_stats.set_title(
+                        f"{h=} {step_type} {a=}{get_env_state_frame_label(config.env.name, env_state)}"
+                    )
                     ax_stats.axis("off")
             obj[f"{prefix}/trajectories"] = wandb.Image(fig_video)
 
