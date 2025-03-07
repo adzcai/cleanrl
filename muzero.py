@@ -550,7 +550,14 @@ def make_train(config: TrainConfig):
             metrics: Metrics = trajectories.timestep.info["metrics"]
             final_step_mask = trajectories.timestep.step_type == StepType.LAST
             mean_return = jnp.mean(metrics.episode_return, where=final_step_mask)
-            log_values({"iter/step": iter_state.step, "iter/mean_return": mean_return})
+            mean_length = jnp.mean(metrics.episode_length, where=final_step_mask)
+            log_values(
+                {
+                    "iter/step": iter_state.step,
+                    "iter/mean_return": mean_return,
+                    "iter/mean_length": mean_length,
+                }
+            )
 
             buffer_available = buffer.num_available(buffer_state) >= config.optim.batch_size
 
@@ -680,13 +687,17 @@ def make_train(config: TrainConfig):
             jax.debug.print(
                 "step {step}/{num_iters}. "
                 "seen {transitions}/{total_transitions} transitions. "
-                "mean return {mean_return}. "
+                "available {available}. "
+                "mean return {mean_return:.02f}. "
+                "mean length {mean_length:.02f}."
                 "{num_episodes} episodes collected.",
                 step=iter_state.step,
                 num_iters=num_iters,
                 transitions=param_state.buffer_state.pos * config.collection.num_envs,
                 total_transitions=config.collection.total_transitions,
+                available=buffer_available,
                 mean_return=mean_return,
+                mean_length=mean_length,
                 num_episodes=jnp.sum(final_step_mask),
             )
 

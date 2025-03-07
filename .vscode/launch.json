@@ -16,7 +16,7 @@
             },
             "args": [
                 "conf/housemaze.yaml",
-                "conf/debug.yaml"
+                // "conf/debug.yaml"
             ]
         }
     ]
