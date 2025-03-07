@@ -230,7 +230,8 @@ def housemaze_wrapper(
         return Timestep(
             state=env_timestep,
             obs=_translate_obs(obs, params),
-            reward=env_timestep.reward,
+            # small negative reward to encourage short trajectories
+            reward=jnp.where(step_type == StepType.MID, -0.1, env_timestep.reward),
             discount=env_timestep.discount,
             step_type=step_type,
             info={},

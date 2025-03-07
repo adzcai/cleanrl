@@ -561,12 +561,29 @@ def make_train(config: TrainConfig):
                 cond=buffer_available,
             )
             def optimize_step(param_state: ParamState, key: Key[Array, ""]):
+                key_sample, key_should, key_reanalyze = jr.split(key, 3)
                 batch = jax.vmap(buffer.sample, in_axes=(None, None))(
                     param_state.buffer_state,
                     config.eval.warnings,
-                    key=jr.split(key, config.optim.batch_size),
+                    key=jr.split(key_sample, config.optim.batch_size),
                 )
                 trajectories: Batched[Transition, " batch_size horizon"] = batch.experience
+
+                @ft.partial(
+                    jax.lax.cond,
+                    jr.bernoulli(key_should, config.optim.p_reanalyze),
+                    false_fun=lambda: trajectories.mcts_probs,
+                )
+                def mcts_probs():
+                    """Recompute the policy targets using the current parameters."""
+                    horizon = trajectories.action.shape[1]
+                    net = eqx.combine(param_state.params, net_static)
+                    _, out = jax.vmap(act_mcts, in_axes=(None, 1), out_axes=1)(
+                        net, trajectories.timestep, key=jr.split(key_reanalyze, horizon)
+                    )
+                    return out.action_weights
+
+                trajectories = trajectories._replace(mcts_probs=mcts_probs)
 
                 if False:
 
@@ -736,7 +753,7 @@ def make_train(config: TrainConfig):
         *,
         key: Key[Array, ""],
     ) -> tuple[Prediction, mctx.PolicyOutput]:
-        """Take a single action from the timestep using MCTS.
+        """Take a single batch of actions from the batch of timesteps using MCTS.
 
         Returns:
             tuple[Prediction, mctx.PolicyOutput]: The value of `timestep`
