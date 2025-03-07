@@ -29,12 +29,14 @@ from log_util import T, dataclass
 
 try:
     import gymnax
+
     GYMNAX_INSTALLED = True
 except ImportError:
     GYMNAX_INSTALLED = False
 
 try:
     import navix
+
     NAVIX_INSTALLED = True
 except ImportError:
     NAVIX_INSTALLED = False

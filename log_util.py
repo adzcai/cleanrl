@@ -1,12 +1,11 @@
 import dataclasses as dc
-import equinox as eqx
 import functools as ft
 import inspect
 import sys
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable, TypeVar
 from typing import Annotated as Batched
-from typing import Callable, TypeVar
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import jax.random as jr
@@ -213,6 +212,6 @@ def dict_to_dataclass(cls: type[T], obj: dict) -> T:
         out[field.name] = value
     return cls(**out)
 
+
 def print_bytes(x) -> None:
     eqx.tree_pprint(jax.tree.map(lambda x: x.nbytes if eqx.is_array(x) else None, x))
-

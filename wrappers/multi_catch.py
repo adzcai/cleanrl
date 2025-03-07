@@ -155,4 +155,3 @@ def visualize_catch(
     )
 
     return video
-

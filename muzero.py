@@ -27,9 +27,9 @@ import wandb
 from config import ArchConfig, TrainConfig, main
 from log_util import (
     exec_loop,
-    print_bytes,
     get_norm_data,
     log_values,
+    print_bytes,
     roll_into_matrix,
     tree_slice,
     typecheck,
@@ -38,20 +38,27 @@ from prioritized_buffer import BufferState, PrioritizedBuffer
 from wrappers.base import StepType, TEnvState, Timestep, TObs
 from wrappers.goal_wrapper import GoalObs
 from wrappers.log import Metrics
-from wrappers.multi_catch import visualize_catch
-from wrappers.translate import HouseMazeObs, make_env, visualize, get_action_name
+from wrappers.translate import HouseMazeObs, get_action_name, make_env, visualize
+
+
+class MLPConcatArgs(eqx.nn.MLP):
+    """An MLP that concatenates its arguments."""
+
+    def __call__(self, *x, key=None):
+        return super().__call__(jnp.concat(x), key=key)
 
 
 class WorldModelRNN(eqx.Module):
-    """Parameterizes the recurrent world model. Simulates the dynamics and reward function.
+    """Parameterizes the recurrent dynamics model and reward function.
 
-    Takes (hidden, action, goal) -> (next_hidden, reward).
+    We use `hidden_dyn` to mean the dynamics model recurrent state
+    and `hidden_obs` for the recurrent policy's state (see `ActorCritic`).
     """
 
-    cell: eqx.nn.GRUCell
-    """The recurrent cell for the world model"""
+    recurrent_cell: eqx.nn.GRUCell
+    """The recurrent cell for the dynamics model. `(hidden_dyn, action) -> next_hidden_dyn`"""
     reward_head: eqx.nn.MLP
-    """The reward model. Takes in hidden state and goal embedding."""
+    """The reward model. `(hidden_dyn, goal) -> reward`"""
     embed_action: eqx.nn.Embedding
     """Embed actions to `rnn_size`."""
 
@@ -64,9 +71,8 @@ class WorldModelRNN(eqx.Module):
         key: Key[Array, ""],
     ):
         key_cell, key_reward, key_embed_action = jr.split(key, 3)
-        self.cell = eqx.nn.GRUCell(config.action_dim, config.rnn_size, key=key_cell)
-        self.reward_head = eqx.nn.MLP(
-            # takes concat([hidden, goal_embedding])
+        self.recurrent_cell = eqx.nn.GRUCell(config.action_dim, config.rnn_size, key=key_cell)
+        self.reward_head = MLPConcatArgs(
             config.rnn_size + config.goal_dim,
             num_value_bins,
             config.mlp_size,
@@ -85,18 +91,18 @@ class WorldModelRNN(eqx.Module):
     ) -> tuple[Float[Array, " rnn_size"], Float[Array, " num_value_bins"]]:
         """An imagined state transition (`env.step`).
 
-        Transitions to the next hidden state and emits predicted reward."""
+        Transitions to the next hidden state and emits predicted reward from the transition."""
         # TODO handle continue predictor
         action = self.embed_action(action)
-        hidden = self.cell(hidden=hidden, input=action)  # fake env.step
-        return hidden, self.reward_head(jnp.concat([hidden, goal_embedding]))
+        hidden = self.recurrent_cell(hidden=hidden, input=action)  # "fake env.step"
+        return hidden, self.reward_head(hidden, goal_embedding)
 
     @property
     def num_actions(self):
-        return self.cell.input_size
+        return self.recurrent_cell.input_size
 
     def init_hidden(self):
-        return jnp.zeros(self.cell.hidden_size)
+        return jnp.zeros(self.recurrent_cell.hidden_size)
 
 
 class Prediction(NamedTuple):
@@ -107,10 +113,10 @@ class Prediction(NamedTuple):
 class ActorCritic(eqx.Module):
     """Parameterizes the actor-critic network."""
 
-    policy_head: eqx.nn.MLP
-    """Policy network. Takes world model hidden state and goal embedding."""
-    value_head: eqx.nn.MLP
-    """Value network. Takes world model hidden state and goal embedding."""
+    policy_head: MLPConcatArgs
+    """Policy network. `(hidden_dyn, goal) -> action distribution`"""
+    value_head: MLPConcatArgs
+    """Value network. `(hidden_dyn, goal) -> value distribution`"""
 
     def __init__(
         self,
@@ -121,7 +127,7 @@ class ActorCritic(eqx.Module):
         key: Key[Array, ""],
     ):
         key_policy, key_value = jr.split(key)
-        self.policy_head = eqx.nn.MLP(
+        self.policy_head = MLPConcatArgs(
             config.rnn_size + config.goal_dim,
             num_actions,
             config.mlp_size,
@@ -129,7 +135,7 @@ class ActorCritic(eqx.Module):
             getattr(jax.nn, config.activation),
             key=key_policy,
         )
-        self.value_head = eqx.nn.MLP(
+        self.value_head = MLPConcatArgs(
             config.rnn_size + config.goal_dim,
             num_value_bins,
             config.mlp_size,
@@ -144,29 +150,26 @@ class ActorCritic(eqx.Module):
         goal_embedding: Float[Array, " goal_dim"],
     ):
         """Predict action and value logits from the hidden state."""
-        input = jnp.concat([hidden, goal_embedding])
         return Prediction(
-            policy_logits=self.policy_head(input),
-            value_logits=self.value_head(input),
+            policy_logits=self.policy_head(hidden, goal_embedding),
+            value_logits=self.value_head(hidden, goal_embedding),
         )
 
 
 class HouseMazeEmbedding(eqx.Module):
     """Embed a HouseMaze observation.
 
-    See `housemaze.env.Observation` and also `preplay-AI/networks/CategoricalHouzemazeObsEncoder`.
-    A `HouseMazeObs` has the following properties:
-
-        image (Integer (height, width)): The type of object within each cell.
-        row (Integer ()): The agent's row coordinate.
-        column (Integer ()): The agent's column coordinate.
-        direction (Integer ()): The agent's direction (right, down, left, up)
-        prev_action (Integer ()): The previous action.
+    Based on `preplay-AI/networks/CategoricalHouzemazeObsEncoder`.
     """
 
     dim_offset: Integer[Array, " num_leaves"] = eqx.field(static=True)
-    embed: eqx.nn.Embedding
-    mlp: eqx.nn.MLP
+    """Offsets of the observation components in the concatenated encoding."""
+    embed_combined: eqx.nn.Embedding
+    """Embedding matrix for the concatenated encoding."""
+    norm: eqx.nn.LayerNorm
+    """Normalization of embedding."""
+    mlp: MLPConcatArgs
+    """Combine the embeddings into a single hidden state."""
 
     def __init__(
         self,
@@ -179,13 +182,14 @@ class HouseMazeEmbedding(eqx.Module):
 
         leaf_specs: list[specs.Array] = jax.tree.leaves(obs_spec)
         num_values = [spec.maximum - spec.minimum + 1 for spec in leaf_specs]
+        total_dims = sum(num_values).item()  # number of distinct categories
         self.dim_offset = jnp.cumsum(jnp.asarray([0] + num_values[:-1]))
-        self.embed = eqx.nn.Embedding(sum(num_values).item(), config.mlp_size, key=key_embed)
+        self.embed_combined = eqx.nn.Embedding(total_dims, config.obs_dim, key=key_embed)
 
-        # mlp for embedding
-        in_size = sum(math.prod(spec.shape) for spec in leaf_specs)
-        self.mlp = eqx.nn.MLP(
-            in_size=in_size * config.mlp_size,
+        obs_flattened_size = sum(math.prod(spec.shape) for spec in leaf_specs)
+        self.norm = eqx.nn.LayerNorm(config.obs_dim)  # we map over the components
+        self.mlp = MLPConcatArgs(
+            in_size=obs_flattened_size * config.obs_dim + config.goal_dim,
             out_size=config.rnn_size,
             width_size=config.mlp_size,
             depth=config.mlp_depth,
@@ -193,13 +197,19 @@ class HouseMazeEmbedding(eqx.Module):
             key=key_mlp,
         )
 
-    def __call__(self, obs: HouseMazeObs, *, key: Key[Array, ""] | None = None):
+    def __call__(
+        self,
+        obs: HouseMazeObs,
+        goal_embedding: Float[Array, " goal_dim"],
+        *,
+        key: Key[Array, ""] | None = None,
+    ):
         obs = jax.tree.leaves(obs)
-        obs = [jnp.reshape(x + offset, -1) for x, offset in zip(obs, self.dim_offset)]
-        obs = jnp.concat(obs)
-        input = jax.vmap(self.embed)(obs)
-        input = self.mlp(input.ravel())
-        return input
+        obs = jnp.concat([jnp.ravel(x + offset) for x, offset in zip(obs, self.dim_offset)])
+        embedding: Float[Array, " obs_flattened_size obs_dim"] = jax.vmap(self.embed_combined)(obs)
+        embedding = jax.vmap(self.norm)(embedding)
+        embedding = self.mlp(embedding.ravel(), goal_embedding)
+        return embedding
 
 
 class MuZeroNetwork(eqx.Module):
@@ -229,8 +239,8 @@ class MuZeroNetwork(eqx.Module):
             # ensure flattened input
             obs_size = obs_spec.shape
             assert len(obs_size) == 1, f"MLP expects flattened input. Got {obs_size}"
-            self.projection = eqx.nn.MLP(
-                in_size=obs_size[0],
+            self.projection = MLPConcatArgs(
+                in_size=obs_size[0] + config.goal_dim,
                 out_size=config.rnn_size,
                 width_size=config.mlp_size,
                 depth=config.mlp_depth,
@@ -286,6 +296,7 @@ class MuZeroNetwork(eqx.Module):
             # default initialization
             self.embed_goal = eqx.nn.Embedding(num_goals, config.goal_dim, key=key_embed_goal)
 
+    # @typecheck
     def __call__(
         self,
         goal_obs: GoalObs[Float[Array, " *obs_size"]],
@@ -305,18 +316,20 @@ class MuZeroNetwork(eqx.Module):
                 The predicted rewards for taking the given actions (including from `goal_obs`);
                 The predicted policy logits and values at the imagined states (including `goal_obs`).
         """
+        goal_embedding = self.embed_goal(goal_obs.goal)
+        init_hidden_dyn = self.projection(goal_obs.obs, goal_embedding)
         return jax.lax.scan(
-            lambda hidden, action: self.step(hidden, action, goal_obs.goal),
-            self.projection(goal_obs.obs),
+            lambda hidden_dyn, action: self.step(hidden_dyn, action, goal_embedding),
+            init_hidden_dyn,
             action,
         )
 
     @typecheck
     def step(
         self,
-        hidden: Float[Array, " rnn_size"],
+        hidden_dyn: Float[Array, " rnn_size"],
         action: Integer[Array, ""],
-        goal: Integer[Array, ""],
+        goal_embedding: Float[Array, " goal_dim"],
     ) -> tuple[Float[Array, " rnn_size"], tuple[Float[Array, " num_value_bins"], Prediction]]:
         """Evaluate the actor-critic on `hidden` and take one imagined step using the world model.
 
@@ -330,10 +343,9 @@ class MuZeroNetwork(eqx.Module):
                 The predicted reward for taking the given action;
                 The predicted policy logits and value of `hidden`.
         """
-        goal_embedding = self.embed_goal(goal)
-        pred = self.actor_critic(hidden, goal_embedding)
-        hidden, reward = self.world_model.step(hidden, action, goal_embedding)
-        return hidden, (reward, pred)
+        pred = self.actor_critic(hidden_dyn, goal_embedding)
+        hidden_dyn, reward = self.world_model.step(hidden_dyn, action, goal_embedding)
+        return hidden_dyn, (reward, pred)
 
 
 class Transition(NamedTuple, Generic[TObs, TEnvState]):
@@ -405,12 +417,16 @@ def make_train(config: TrainConfig):
         optax.contrib.ademamix(lr),
     )
 
-    max_horizon = int(config.collection.total_transitions / (config.collection.num_envs * config.collection.buffer_size_denominator))
-    buffer = PrioritizedBuffer.new(
+    max_horizon = int(
+        config.collection.total_transitions
+        / (config.collection.num_envs * config.collection.buffer_size_denominator)
+    )
+    buffer_args = dict(
         batch_size=config.collection.num_envs,
         max_time=max_horizon,
         horizon=config.optim.num_timesteps,
     )
+    buffer = PrioritizedBuffer.new(**buffer_args)
 
     @typecheck
     def logits_to_value(
@@ -436,7 +452,10 @@ def make_train(config: TrainConfig):
         )
 
     if False:
-        def get_invalid_actions(env_state: gymnax.EnvState) -> Bool[Array, " num_actions"]:
+
+        def get_invalid_actions(
+            env_state: gymnax.EnvState,
+        ) -> Bool[Array, " num_actions"]:
             """TODO currently not used"""
             if env.name == "Catch-bsuite":
                 catch_state: gymnax.environments.bsuite.catch.EnvState = env_state
@@ -461,6 +480,8 @@ def make_train(config: TrainConfig):
         print(env.fullname)
         print("=" * 25)
         yaml.safe_dump(dc.asdict(config), sys.stdout)
+        print("=" * 25)
+        yaml.safe_dump(buffer_args, sys.stdout)
         print("=" * 25)
 
         init_timesteps = env_reset_batch(
@@ -722,8 +743,8 @@ def make_train(config: TrainConfig):
                 predicted by the critic network
                 and the MCTS output of planning from the timestep.
         """
-        init_hiddens = jax.vmap(net.projection)(timesteps.obs.obs)
         goal_embeddings = jax.vmap(net.embed_goal)(timesteps.obs.goal)
+        init_hiddens = jax.vmap(net.projection)(timesteps.obs.obs, goal_embeddings)
         preds = jax.vmap(net.actor_critic)(init_hiddens, goal_embeddings)
 
         root = mctx.RootFnOutput(
@@ -937,8 +958,8 @@ def make_train(config: TrainConfig):
                 key: Key[Array, ""],
             ):
                 """Differentiate with respect to value to obtain saliency map."""
-                hidden = net.projection(obs)
                 goal_embedding = net.embed_goal(goal)
+                hidden = net.projection(obs, goal_embedding)
                 pred = net.actor_critic(hidden, goal_embedding)
                 action = jr.categorical(key, pred.policy_logits)
                 # track the predicted reward for plotting

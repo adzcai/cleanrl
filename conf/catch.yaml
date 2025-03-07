@@ -16,6 +16,7 @@ env:
 collection:
   total_transitions: 100000
   num_envs: 64
+  buffer_size_denominator: 1
   num_timesteps: 10
   mcts_depth: 10
   num_mcts_simulations: 4

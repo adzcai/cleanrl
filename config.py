@@ -116,6 +116,8 @@ class ArchConfig:
     goal_dim: int
     action_dim: int
     activation: str
+    obs_dim: int | None = None
+    """Dimension of observation embedding. The number of "orthogonal directions" among observation components."""
 
 
 @dataclass
@@ -133,8 +135,8 @@ class CollectionConfig:
 
     total_transitions: int
     num_timesteps: int
-    buffer_size_denominator: float
-    """The buffer has size (num_envs, total_transitions // (num_envs * buffer_size_denominator))"""
+    buffer_size_denominator: int | float
+    """The buffer has size (num_envs, int(total_transitions / (num_envs * buffer_size_denominator)))"""
     num_envs: int  # more parallel data collection
     mcts_depth: int
     num_mcts_simulations: int  # stronger policy improvement

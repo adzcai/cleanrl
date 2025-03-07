@@ -2,7 +2,14 @@ from typing import Any, NamedTuple
 
 import dm_env.specs as specs
 
-from wrappers.base import Environment, GoalObs, StepType, Timestep, GYMNAX_INSTALLED, NAVIX_INSTALLED
+from wrappers.base import (
+    GYMNAX_INSTALLED,
+    NAVIX_INSTALLED,
+    Environment,
+    GoalObs,
+    StepType,
+    Timestep,
+)
 
 if GYMNAX_INSTALLED:
     import gymnax.environments.environment as ge
@@ -18,7 +25,7 @@ import housemaze.utils as maze_utils
 import jax
 import jax.numpy as jnp
 import jax.random as jr
-from jaxtyping import Array, Integer, Key, PyTree, Float
+from jaxtyping import Array, Float, Integer, Key, PyTree
 
 from config import EnvConfig
 from wrappers.auto_reset import auto_reset_wrapper
@@ -27,8 +34,8 @@ from wrappers.goal_wrapper import goal_wrapper
 from wrappers.log import log_wrapper
 from wrappers.multi_catch import make_multi_catch, visualize_catch
 
-
 if GYMNAX_INSTALLED:
+
     def gymnax_wrapper(env: ge.Environment[ge.TEnvState, ge.TEnvParams], params: ge.TEnvParams):
         _, init_state = env.reset(jr.key(0), params)
         _, init_step = env.step(
@@ -40,7 +47,13 @@ if GYMNAX_INSTALLED:
             obs, state = env.reset(key, params)
             return Timestep.initial(obs, state, init_info)
 
-        def step(state: ge.TEnvState, action: Any, params: ge.TEnvParams, *, key: Key[Array, ""]):
+        def step(
+            state: ge.TEnvState,
+            action: Any,
+            params: ge.TEnvParams,
+            *,
+            key: Key[Array, ""],
+        ):
             obs, state, reward, done, info = env.step(key, state, action, params)
             return Timestep(
                 obs=obs,
@@ -59,7 +72,9 @@ if GYMNAX_INSTALLED:
             goal_space=lambda env_params: spaces.Discrete(0),
         )
 
+
 if NAVIX_INSTALLED:
+
     def navix_wrapper(env: nx.Environment):
         def reset(params: None, *, key: Key[Array, ""]):
             timestep = env.reset(key)
@@ -94,16 +109,23 @@ image_dict = maze_utils.load_image_dict()
 
 
 class HouseMazeObs(NamedTuple):
+    """A categorical encoding of the observation."""
+
     image: Integer[Array, " height width"]
+    """`image[row, column]` stores the type of object within that cell."""
     # state_features
     direction: Integer[Array, ""]
+    """The agent's direction (0 = right < down < left < up < done = 4)"""
     row: Integer[Array, ""]
+    """The agent's row coordinate in `image`."""
     column: Integer[Array, ""]
+    """The agent's column coordinate in `image`."""
     prev_action: Integer[Array, ""]
+    """The previous action."""
 
 
 def new_housemaze():
-    """Initialize HouseMaze environment."""
+    """Create a new HouseMaze environment."""
     # initialize map
     char_to_key = dict(
         A="knife",
@@ -124,7 +146,7 @@ def new_housemaze():
         map_init = jax.tree.map(lambda *x: jnp.stack(x), *map_init)
     else:
         map_init = maze_utils.from_str(
-            maze_levels.three_pairs_maze1,
+            maze_levels.two_objects,
             char_to_key=char_to_key,
             object_to_index=object_to_index,
         )
@@ -162,7 +184,6 @@ def housemaze_wrapper(
         return GoalObs(obs=obs, goal=goal)
 
     def observation_space(params: maze.EnvParams) -> PyTree[specs.Array]:
-        """TODO inaccurate since image size changes per maze"""
         height, width = params.map_init.grid.shape[:-1]
         num_objects = len(params.objects) + 2  # for 0 and 1
         return HouseMazeObs(
@@ -226,7 +247,9 @@ def housemaze_wrapper(
     )
 
 
-def visualize_housemaze(timestep: maze.TimeStep) -> Float[Array, " horizon channel height width"]:
+def visualize_housemaze(
+    timestep: maze.TimeStep,
+) -> Float[Array, " horizon channel height width"]:
     video: Float[Array, " horizon height width channel"] = jax.vmap(
         renderer.create_image_from_grid, in_axes=(0, 0, 0, None)
     )(
@@ -280,7 +303,8 @@ def visualize(env_name: str, env_state: PyTree[Array], **kwargs):
         return visualize_housemaze(env_state)
     raise ValueError(f"Env {env_name} not recognized")
 
-def get_action_name(env_name: str,action: int):
+
+def get_action_name(env_name: str, action: int):
     if env_name in ["Catch-bsuite", "MultiCatch"]:
         if action == 0:
             return "L"
@@ -291,7 +315,6 @@ def get_action_name(env_name: str,action: int):
         else:
             raise ValueError(f"Invalid action {action}")
     elif env_name == "HouseMaze":
-        return ['right', 'down', 'left', 'up', 'done', 'NONE', 'reset'][action]
+        return ["➡️", "⬇️", "⬅️", "⬆️", "done", "NONE", "reset"][action]
     else:
         raise ValueError(f"Env {env_name} not recognized")
-

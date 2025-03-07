@@ -5,6 +5,7 @@ arch:
   mlp_depth: 2
   goal_dim: 8
   action_dim: 8
+  obs_dim: 32
   activation: relu
 
 env:
@@ -15,7 +16,7 @@ collection:
   total_transitions: 100000
   num_envs: 8
   num_timesteps: 50
-  buffer_size_denominator: 4.0
+  buffer_size_denominator: 4
   mcts_depth: 10
   num_mcts_simulations: 4
 
