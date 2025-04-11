@@ -19,7 +19,7 @@ collection:
   buffer_size_denominator: 1
   num_timesteps: 10
   mcts_depth: 10
-  num_mcts_simulations: 4
+  num_mcts_simulations: 8
 
 value:
   num_value_bins: 7
@@ -36,6 +36,7 @@ optim:
   num_minibatches: 8
   batch_size: 64
   num_timesteps: 20
+  p_reanalyze: 0.0
   lr_init: 0.01
   max_grad_norm: 3.14
   value_coef: 0.5

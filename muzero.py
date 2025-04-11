@@ -91,7 +91,7 @@ class WorldModelRNN(eqx.Module):
     @typecheck
     def step(
         self,
-        hidden: Float[Array, " rnn_size"],
+        hidden_dyn: Float[Array, " rnn_size"],
         action: Integer[Array, ""],
         goal_embedding: Float[Array, " goal_dim"],
     ) -> tuple[Float[Array, " rnn_size"], Float[Array, " num_value_bins"]]:
@@ -100,8 +100,8 @@ class WorldModelRNN(eqx.Module):
         Transitions to the next hidden state and emits predicted reward from the transition."""
         # TODO handle continue predictor
         action = self.embed_action(action)
-        hidden = self.recurrent_cell(hidden=hidden, input=action)  # "fake env.step"
-        return hidden, self.reward_head(hidden, goal_embedding)
+        hidden_dyn = self.recurrent_cell(hidden=hidden_dyn, input=action)  # "fake env.step"
+        return hidden_dyn, self.reward_head(hidden_dyn, goal_embedding)
 
     @property
     def num_actions(self):
@@ -117,7 +117,7 @@ class Prediction(NamedTuple):
 
 
 class ActorCritic(eqx.Module):
-    """Parameterizes the actor-critic network."""
+    """Parameterizes the actor-critic networks."""
 
     policy_head: MLPConcatArgs
     """Policy network. `(hidden_dyn, goal) -> action distribution`"""
@@ -171,11 +171,11 @@ class HouseMazeEmbedding(eqx.Module):
     dim_offset: Integer[Array, " num_leaves"] = eqx.field(static=True)
     """Offsets of the observation components in the concatenated encoding."""
     embed_combined: eqx.nn.Embedding
-    """Embedding matrix for the concatenated encoding."""
+    """Embedding matrix for the concatenated encoding. (total_dims,) -> (obs_dim,)"""
     norm: eqx.nn.LayerNorm
     """Normalization of embedding."""
     mlp: MLPConcatArgs
-    """Combine the embeddings into a single hidden state."""
+    """Combine the embeddings into a single hidden state via projection."""
 
     def __init__(
         self,
@@ -212,10 +212,10 @@ class HouseMazeEmbedding(eqx.Module):
     ):
         obs = jax.tree.leaves(obs)
         obs = jnp.concat([jnp.ravel(x + offset) for x, offset in zip(obs, self.dim_offset)])
-        embedding: Float[Array, " obs_flattened_size obs_dim"] = jax.vmap(self.embed_combined)(obs)
-        embedding = jax.vmap(self.norm)(embedding)
-        embedding = self.mlp(embedding.ravel(), goal_embedding)
-        return embedding
+        obs_embedding: Float[Array, " obs_flattened_size obs_dim"] = jax.vmap(self.embed_combined)(obs)
+        obs_embedding = jax.vmap(self.norm)(obs_embedding)
+        obs_embedding = self.mlp(jnp.ravel(obs_embedding), goal_embedding)
+        return obs_embedding
 
 
 class MuZeroNetwork(eqx.Module):
@@ -412,6 +412,7 @@ def make_train(config: TrainConfig):
     env, env_params = make_env(config.env)
     action_space: specs.DiscreteArray = env.action_space(env_params)
     num_actions = action_space.num_values
+    num_goals = env.goal_space(env_params).num_values
     action_dtype = action_space.dtype
 
     env_reset_batch = jax.vmap(env.reset, in_axes=(None,))
@@ -499,7 +500,7 @@ def make_train(config: TrainConfig):
             obs_spec=env.observation_space(env_params),
             num_actions=num_actions,
             num_value_bins=config.value.num_value_bins,
-            num_goals=env.goal_space(env_params).num_values,
+            num_goals=num_goals,
             key=key_net,
         )
         print("network size (bytes):")
@@ -1047,11 +1048,20 @@ def make_train(config: TrainConfig):
         )
 
         metrics: Batched[Metrics, " num_envs"] = trajectories.timestep.info["metrics"]
-        eval_return = jnp.mean(
-            metrics.episode_return,
-            where=trajectories.timestep.step_type == StepType.LAST,
-        )
-        log_values({"eval/mean_return": eval_return})
+        final_step_mask = trajectories.timestep.step_type == StepType.LAST
+
+        def compute_goal_return(goal):
+            goal_mask = final_step_mask & (trajectories.timestep.obs.goal == goal)
+            return jnp.mean(metrics.episode_return, where=goal_mask)
+
+        eval_return = jnp.mean(metrics.episode_return, where=final_step_mask)
+        goal_returns = jax.vmap(compute_goal_return)(jnp.arange(num_goals))
+        goal_returns_dict = {
+            f"eval/mean_return/goal_{goal}": return_val 
+            for goal, return_val in enumerate(goal_returns)
+        }
+        
+        log_values({"eval/mean_return/overall": eval_return} | goal_returns_dict)
         jax.debug.print("eval mean return {}", eval_return)
 
         # debug training procedure
@@ -1113,6 +1123,7 @@ def make_train(config: TrainConfig):
             nrows=num_envs * rows_per_env,
             figsize=(2 * fig_width, 4 * num_envs * rows_per_env),
         )
+        fig_stats.subplots_adjust(hspace=0.5)
         for i in range(num_envs):
             j = 0
 
@@ -1195,6 +1206,7 @@ def make_train(config: TrainConfig):
                 squeeze=False,
                 figsize=(horizon * 2, num_envs * 3),
             )
+            fig_video.subplots_adjust(hspace=0.5)  # Add more vertical space between subplots
 
             # wandb.Video(np.asarray(video), fps=10),
 
@@ -1218,7 +1230,10 @@ def make_train(config: TrainConfig):
                     ax_stats.yaxis.set_major_locator(plt.MultipleLocator(1))
                     env_state = tree_slice(trajectories.timestep.state, (i, h))
                     ax_stats.set_title(
-                        f"{h=} {step_type} {a=}{get_env_state_frame_label(config.env.name, env_state)}"
+                        f"{h=}\n"
+                        f"{step_type}\n"
+                        f"{a=}\n"
+                        f"{get_env_state_frame_label(config.env.name, env_state)}"
                     )
                     ax_stats.axis("off")
             obj[f"{prefix}/trajectories"] = wandb.Image(fig_video)
