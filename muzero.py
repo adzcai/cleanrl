@@ -1351,3 +1351,4 @@ def make_train(config: TrainConfig):
 
 if __name__ == "__main__":
     main(TrainConfig, make_train, Path(__file__).name)
+
