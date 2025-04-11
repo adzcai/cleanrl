@@ -228,13 +228,24 @@ def main(
     """
     # merge configuration
     cfg_paths, cli_args = [], []
+    dry_run = False
     for arg in sys.argv[1:]:
         if arg in ["-h", "--help"]:
             print(__doc__.format(file=file))
-            sys.exit(0)
-        ary = cli_args if "=" in arg else cfg_paths
-        ary.append(arg)
+            return
+        elif arg == "--dry-run":
+            dry_run = True
+        else:
+            ary = cli_args if "=" in arg else cfg_paths
+            ary.append(arg)
     cfg: TConfig = get_args(cfg_paths, cli_args)
+
+    if dry_run:
+        cfg = dict_to_dataclass(ConfigClass, cfg)
+        train, _ = make_train(cfg)
+        jaxpr = jax.make_jaxpr(train)(jr.key(cfg.seed))
+        print(jaxpr)
+        return
 
     if cfg.sweep:
         cfg = dict_to_dataclass(ConfigClass, cfg)
