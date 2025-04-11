@@ -26,7 +26,7 @@ except ImportError:
     pass
 
 
-if not TYPE_CHECKING:  # runtime check dataclasses
+if False and not TYPE_CHECKING:  # runtime check dataclasses
     _dataclass = dataclass
 
     def dataclass(cls=None, /, **kwargs):

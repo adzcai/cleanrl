@@ -249,11 +249,24 @@ def main(
 
     if cfg.sweep:
         cfg = dict_to_dataclass(ConfigClass, cfg)
-        sweep_cfg = as_sweep_config(cfg, file)
+        sweep_params, parameters = to_wandb_sweep_parameters(cfg)
+        sweep_cfg = {
+            "program": file,
+            "method": cfg.sweep_method,
+            "name": f"{file} sweep {' '.join(sweep_params)}",
+            "metric": {"goal": "maximize", "name": "eval/mean_return"},
+            "parameters": parameters,
+            "command": [
+                r"${env}",
+                r"${interpreter}",
+                r"${program}",
+                r"agent=True",
+            ],
+        }
         sweep_id = wandb.sweep(sweep_cfg)
         print(
             "To launch a SLURM batch job:\n"
-            f"SWEEP_ID={sweep_id} sbatch --job-name {sweep_cfg['name']} launch.sh\n"
+            f"SWEEP_ID={sweep_id} sbatch --job-name \"{sweep_cfg['name']}\" launch.sh\n"
             "Remember you can also pass sbatch arguments via the command line.\n"
             "Run `man sbatch` for details."
         )
@@ -273,24 +286,6 @@ def main(
             _, mean_eval_reward = jax.block_until_ready(outputs)
             mean_eval_reward = mean_eval_reward[mean_eval_reward != -jnp.inf]
         print(f"Done training. {mean_eval_reward=}")
-
-
-def as_sweep_config(config: Config, file: str) -> dict:
-    """Generates the wandb sweep config. Does not upload to wandb."""
-    sweep_params, parameters = to_wandb_sweep_parameters(config)
-    return {
-        "program": file,
-        "method": config.sweep_method,
-        "name": f"{file} sweep {' '.join(sweep_params)}",
-        "metric": {"goal": "maximize", "name": "eval/mean_return"},
-        "parameters": parameters,
-        "command": [
-            r"${env}",
-            r"${interpreter}",
-            r"${program}",
-            r"agent=True",
-        ],
-    }
 
 
 def to_wandb_sweep_parameters(config: Config) -> tuple[set[str], dict]:
