@@ -204,13 +204,20 @@ class OptimConfig:
     num_minibatches: int  # number of gradient descent updates per iteration
     batch_size: int  # reduce gradient variance
     num_timesteps: int
-    lr_init: float
     max_grad_norm: float
+
+    # learning rate
+    lr: float
+    warmup_frac: float
+    decay_rate: float
+    num_stairs: int
+    # end learning rate
+
     value_coef: float  # scale the value loss
     reward_coef: float  # scale the reward loss
+    world_model_gradient_scale: float  # scale the world model gradients per step
     priority_exponent: float  # prioritized replay
     importance_exponent: float
-    p_reanalyze: float
     """Probability to recompute policy targets."""
 
     def __post_init__(self):

@@ -33,6 +33,7 @@ from utils.log_util import (
     log_values,
     print_bytes,
     roll_into_matrix,
+    scale_gradient,
     tree_slice,
     typecheck,
 )
@@ -75,12 +76,15 @@ class WorldModelRNN(eqx.Module):
     """Embed actions to `rnn_size`."""
     mlp: eqx.nn.MLP
     """MLP embedding."""
+    gradient_scale: float
+    """Scale the gradients at each step."""
 
     def __init__(
         self,
         config: ArchConfig,
         num_actions: int,
         num_value_bins: int,
+        gradient_scale: float,
         *,
         key: Key[Array, ""],
     ):
@@ -101,6 +105,7 @@ class WorldModelRNN(eqx.Module):
             activation=getattr(jax.nn, config.activation),
             key=key_mlp,
         )
+        self.gradient_scale = gradient_scale
 
     @typecheck
     def step(
@@ -118,6 +123,7 @@ class WorldModelRNN(eqx.Module):
         out_dyn = jax.nn.relu(self.norm(hidden_dyn)) + self.embed_action(action)
         out_dyn = hidden_dyn + self.linear(out_dyn)  # "fake env.step"
         out_dyn = out_dyn + self.mlp(out_dyn)
+        out_dyn = scale_gradient(out_dyn, self.gradient_scale)
         reward = self.reward_head(jnp.concat([out_dyn, goal_embedding]))
         return out_dyn, reward
 
@@ -279,6 +285,7 @@ class MuZeroNetwork(eqx.Module):
         num_actions: int,
         num_value_bins: int,
         num_goals: int,
+        world_model_gradient_scale: float,
         *,
         key: Key[Array, ""],
     ):
@@ -310,6 +317,7 @@ class MuZeroNetwork(eqx.Module):
             config=config,
             num_actions=num_actions,
             num_value_bins=num_value_bins,
+            gradient_scale=world_model_gradient_scale,
             key=key_world_model,
         )
         self.actor_critic = ActorCritic(
@@ -446,10 +454,19 @@ def make_train(config: TrainConfig):
         env.step, in_axes=(0, 0, None)
     )  # map over state and action
 
-    lr = optax.cosine_decay_schedule(config.optim.lr_init, num_grad_updates)
+    lr = optax.warmup_exponential_decay_schedule(
+        init_value=0.0,
+        peak_value=config.optim.lr,
+        warmup_steps=int(config.optim.warmup_frac * num_grad_updates),
+        transition_steps=(
+            ((1 - config.optim.warmup_frac) * num_grad_updates) // config.optim.num_stairs
+        ),
+        decay_rate=config.optim.decay_rate,
+        staircase=True,
+    )
     optim = optax.chain(
+        optax.contrib.ademamix(lr, weight_decay=1e-4),
         optax.clip_by_global_norm(config.optim.max_grad_norm),
-        optax.contrib.ademamix(lr),
     )
 
     buffer_time_axis = int(
@@ -510,6 +527,7 @@ def make_train(config: TrainConfig):
             num_actions=num_actions,
             num_value_bins=num_value_bins,
             num_goals=num_goals,
+            world_model_gradient_scale=config.optim.world_model_gradient_scale,
             key=key_net,
         )
         print("network size (bytes):")

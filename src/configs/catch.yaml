@@ -36,10 +36,16 @@ optim:
   batch_size: 64
   num_timesteps: 20
   p_reanalyze: 0.0
-  lr_init: 0.01
   max_grad_norm: 3.14
+
+  lr: 0.1
+  warmup_frac: 0.1
+  decay_rate: 0.5
+  num_stairs: 12
+
   value_coef: 0.5
   reward_coef: 0.99
+  world_model_gradient_scale: 0.5
   priority_exponent: 0.8
   importance_exponent: 0.0
 
