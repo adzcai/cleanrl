@@ -4,7 +4,6 @@ arch:
   mlp_size: 64
   mlp_depth: 1
   goal_dim: 4
-  action_dim: 4
   activation: relu
 
 env:

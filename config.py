@@ -114,7 +114,6 @@ class ArchConfig:
     mlp_size: int
     mlp_depth: int
     goal_dim: int
-    action_dim: int
     activation: str
     obs_dim: int | None = None
     """Dimension of observation embedding. The number of "orthogonal directions" among observation components."""

@@ -8,7 +8,6 @@ arch:
     values: [16, 32, 64]
   mlp_depth: 2
   goal_dim: 8
-  action_dim: 8
   obs_dim: 32
   activation: relu
 
