@@ -83,8 +83,9 @@ class Timestep(Generic[TObs, TEnvState]):
         return cls(
             obs=obs,
             state=state,
-            reward=jnp.float_(None),
-            discount=jnp.float_(None),
+            # insert a sentinel for reward and discount
+            reward=jnp.asarray(-1 << 30, float),
+            discount=jnp.asarray(-1 << 30, float),
             step_type=jnp.asarray(StepType.FIRST),
             info=info,
         )

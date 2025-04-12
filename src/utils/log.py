@@ -32,16 +32,12 @@ class Metrics:
     """Stores episode length and return.
 
     Properties:
-        current_return (Float ()): Cumulative return of the current episode (undiscounted).
-        current_length (Integer ()): Number of steps taken in current episode.
-        episode_return (Float ()): Returned episode return on termination.
-        episode_length (Integer ()): Returned episode length on termination.
+        cum_return (Float ()): Cumulative undiscounted return including the reward obtained upon entering this timestep.
+        step (Integer ()): Zero-based index of this timestep in the current episode.
     """
 
-    current_return: Float[Array, ""]
-    current_length: Integer[Array, ""]
-    episode_return: Float[Array, ""]
-    episode_length: Integer[Array, ""]
+    cum_return: Float[Array, ""]
+    step: Integer[Array, ""]
 
 
 @dataclass
@@ -58,10 +54,8 @@ def log_wrapper(
     """
 
     init_metrics = Metrics(
-        current_return=jnp.zeros((), float),
-        current_length=jnp.zeros((), int),
-        episode_return=jnp.zeros((), float),
-        episode_length=jnp.zeros((), int),
+        cum_return=jnp.zeros((), float),
+        step=jnp.zeros((), int),
     )
 
     def reset(
@@ -82,13 +76,11 @@ def log_wrapper(
         key: Key[Array, ""],
     ) -> Timestep[TObs, LogState[TEnvState]]:
         timestep = env.step(state._inner, action, params, key=key)
-        updated_return = state.metrics.current_return + timestep.reward
-        updated_length = state.metrics.current_length + 1
-        done_metrics = Metrics(
-            current_return=init_metrics.current_return,
-            current_length=init_metrics.current_length,
-            episode_return=updated_return,
-            episode_length=updated_length,
+        updated_return = state.metrics.cum_return + timestep.reward
+        updated_length = state.metrics.step + 1
+        metrics = Metrics(
+            cum_return=jnp.where(timestep.is_first, 0.0, updated_return),
+            step=jnp.where(timestep.is_first, 0, updated_length),
         )
         continue_metrics = Metrics(
             current_return=updated_return,

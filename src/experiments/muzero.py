@@ -70,8 +70,10 @@ class WorldModelRNN(eqx.Module):
     """The recurrent cell for the dynamics model."""
     reward_head: eqx.nn.Linear
     """The reward model."""
-    norm: eqx.nn.LayerNorm
+    norm1: eqx.nn.LayerNorm
     """Layer normalization for the state-action representation."""
+    norm2: eqx.nn.LayerNorm
+    """Layer normalization for the MLP."""
     embed_action: eqx.nn.Embedding
     """Embed actions to `rnn_size`."""
     mlp: eqx.nn.MLP
@@ -89,10 +91,9 @@ class WorldModelRNN(eqx.Module):
         key: Key[Array, ""],
     ):
         key_cell, key_reward, key_embed_action, key_mlp = jr.split(key, 4)
-        self.embed_action = eqx.nn.Embedding(
-            num_actions, config.rnn_size, key=key_embed_action
-        )
-        self.norm = eqx.nn.LayerNorm(config.rnn_size)
+        self.embed_action = eqx.nn.Embedding(num_actions, config.rnn_size, key=key_embed_action)
+        self.norm1 = eqx.nn.LayerNorm(config.rnn_size)
+        self.norm2 = eqx.nn.LayerNorm(config.rnn_size)
         self.linear = eqx.nn.Linear(config.rnn_size, config.rnn_size, key=key_cell)
         self.reward_head = eqx.nn.Linear(
             config.rnn_size + config.goal_dim, num_value_bins, key=key_reward
@@ -120,15 +121,12 @@ class WorldModelRNN(eqx.Module):
         Refer to the `Transition` module in `neurorl/library/muzero_mlps.py`.
         """
         # TODO handle continue predictor
-        out_dyn = jax.nn.relu(self.norm(hidden_dyn)) + self.embed_action(action)
-        out_dyn = hidden_dyn + self.linear(out_dyn)  # "fake env.step"
-        out_dyn = out_dyn + self.mlp(out_dyn)
+        out_dyn = jax.nn.relu(hidden_dyn) + self.embed_action(action)
+        out_dyn = hidden_dyn + self.linear(self.norm1(out_dyn))  # "fake env.step"
+        out_dyn = out_dyn + self.mlp(self.norm2(out_dyn))
         out_dyn = scale_gradient(out_dyn, self.gradient_scale)
         reward = self.reward_head(jnp.concat([out_dyn, goal_embedding]))
         return out_dyn, reward
-
-    def init_hidden(self):
-        return jnp.zeros(self.linear.in_features)
 
 
 class ActorCritic(eqx.Module):
@@ -455,7 +453,7 @@ def make_train(config: TrainConfig):
     )  # map over state and action
 
     lr = optax.warmup_exponential_decay_schedule(
-        init_value=0.0,
+        init_value=1e-5,
         peak_value=config.optim.lr,
         warmup_steps=int(config.optim.warmup_frac * num_grad_updates),
         transition_steps=(
@@ -582,9 +580,8 @@ def make_train(config: TrainConfig):
             buffer_state = buffer.add(iter_state.param_state.buffer_state, trajectories)
 
             metrics: Metrics = trajectories.timestep.info["metrics"]
-            final_step_mask = trajectories.timestep.step_type == StepType.LAST
-            mean_return = jnp.mean(metrics.episode_return, where=final_step_mask)
-            mean_length = jnp.mean(metrics.episode_length, where=final_step_mask)
+            mean_return = jnp.mean(metrics.cum_return, where=trajectories.timestep.is_last)
+            mean_length = jnp.mean(metrics.step, where=trajectories.timestep.is_last)
             log_values(
                 {
                     "iter/step": iter_state.step,
@@ -667,7 +664,7 @@ def make_train(config: TrainConfig):
                 params: MuZeroNetwork = optax.apply_updates(param_state.params, updates)  # type: ignore
 
                 # prioritize trajectories with high TD error
-                priorities = jnp.mean(jnp.abs(aux.td_error), axis=-1)
+                priorities = jnp.max(jnp.abs(aux.td_error), axis=-1)
                 buffer_state = buffer.set_priorities(
                     param_state.buffer_state,
                     batch.idx,
@@ -683,6 +680,7 @@ def make_train(config: TrainConfig):
                     | get_norm_data(params, "params/norm")
                 )
 
+                # carry updated ParamState (scanned loop)
                 return (
                     ParamState(
                         params=params,
@@ -736,7 +734,7 @@ def make_train(config: TrainConfig):
                 available=buffer_available,
                 mean_return=mean_return,
                 mean_length=mean_length,
-                num_episodes=jnp.sum(final_step_mask),
+                num_episodes=jnp.sum(trajectories.timestep.is_last),
             )
 
             if config.eval.warnings:
@@ -774,7 +772,7 @@ def make_train(config: TrainConfig):
 
         @exec_loop(config.collection.num_timesteps)
         def rollout_step(timesteps=init_timesteps, key=key):
-            """Take a single step using MCTS."""
+            """Take a single step in the true environment using the MCTS policy."""
             key_action, key_step = jr.split(key)
 
             preds, outs = act_mcts(net, timesteps, key=key_action)
@@ -833,7 +831,7 @@ def make_train(config: TrainConfig):
             _: None,  # closure net
             key: Key[Array, ""],
             actions: Integer[Array, " num_envs"],
-            hiddens: Float[Array, " num_envs rnn_size"],
+            hidden_dyns: Float[Array, " num_envs rnn_size"],
         ) -> tuple[mctx.RecurrentFnOutput, Float[Array, " num_envs rnn_size"]]:
             """World model transition function.
 
@@ -842,10 +840,10 @@ def make_train(config: TrainConfig):
                     computed by the actor-critic network for the newly created node;
                     The hidden state representing the state following `hiddens`.
             """
-            hiddens, rewards = jax.vmap(net.world_model.step)(
-                hiddens, actions, goal_embeddings
+            hidden_dyns, rewards = jax.vmap(net.world_model.step)(
+                hidden_dyns, actions, goal_embeddings
             )
-            preds = jax.vmap(net.actor_critic)(hiddens, goal_embeddings)
+            preds = jax.vmap(net.actor_critic)(hidden_dyns, goal_embeddings)
             return (
                 mctx.RecurrentFnOutput(
                     reward=config.value.logits_to_value(rewards),  # type: ignore
@@ -854,7 +852,7 @@ def make_train(config: TrainConfig):
                     prior_logits=preds.policy_logits,  # type: ignore
                     value=config.value.logits_to_value(preds.value_logits),  # type: ignore
                 ),
-                hiddens,
+                hidden_dyns,
             )
 
         out = mctx.gumbel_muzero_policy(
@@ -888,6 +886,7 @@ def make_train(config: TrainConfig):
         action_rolled = roll_into_matrix(trajectory.action)
         reward_rolled = roll_into_matrix(trajectory.timestep.reward)
         discount_rolled = roll_into_matrix(trajectory.timestep.discount)
+        last_rolled = roll_into_matrix(trajectory.timestep.is_last)
 
         # i.e. pred.value_logits[i, j] is the array of predicted value logits at time i+j,
         # based on the observation at time i
@@ -904,7 +903,9 @@ def make_train(config: TrainConfig):
                 config.bootstrap.lambda_gae,
             )
         )
-        return pred_rolled, bootstrapped_return
+
+        # ensure terminal states get zero value
+        return pred_rolled, jnp.where(last_rolled[:, :-1], 0.0, bootstrapped_return)
 
     # jit to ease debugging
     @ft.partial(jax.jit, static_argnames=("net_static",))
@@ -950,7 +951,7 @@ def make_train(config: TrainConfig):
         # cross-entropy of policy predictions on MCTS action visit proportions
         # replace terminal timesteps with uniform
         mcts_probs: Float[Array, " horizon num_actions"] = jnp.where(
-            trajectory.timestep.step_type[:, jnp.newaxis] == StepType.LAST,
+            trajectory.timestep.is_last[:, jnp.newaxis],
             jnp.ones_like(trajectory.mcts_probs) / num_actions,
             trajectory.mcts_probs,
         )
@@ -960,8 +961,8 @@ def make_train(config: TrainConfig):
         policy_losses = mcts_dist.cross_entropy(online_policy_dist)
 
         # reward model loss
-        # online_reward[i, j] is the reward _after_ state i+j
-        # while reward_rolled[i, j] is the reward _before_ (entering) state i+j
+        # online_reward[i, j] is the reward obtained from acting in state i+j
+        # while reward_rolled[i, j] is the reward obtained upon entering state i+j
         reward_rolled = roll_into_matrix(trajectory.timestep.reward[1:])
         reward_dist = distrax.Categorical(
             probs=config.value.value_to_probs(reward_rolled)
@@ -1108,9 +1109,9 @@ def make_train(config: TrainConfig):
 
         def compute_goal_return(goal):
             goal_mask = final_step_mask & (trajectories.timestep.obs.goal == goal)
-            return jnp.mean(metrics.episode_return, where=goal_mask)
+            return jnp.mean(metrics.cum_return, where=goal_mask)
 
-        eval_return = jnp.mean(metrics.episode_return, where=final_step_mask)
+        eval_return = jnp.mean(metrics.cum_return, where=final_step_mask)
         goal_returns = jax.vmap(compute_goal_return)(jnp.arange(num_goals))
         goal_returns_dict = {
             f"eval/mean_return/goal_{goal}": return_val

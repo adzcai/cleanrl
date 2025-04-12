@@ -21,7 +21,7 @@ collection:
   num_mcts_simulations: 8
 
 value:
-  num_value_bins: 7
+  num_value_bins: 51
   min_value: -1.0
   max_value: 1.0
 
