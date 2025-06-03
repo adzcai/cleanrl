@@ -13,15 +13,15 @@ env:
     num_goals: 2
 
 collection:
-  total_transitions: 100000
+  total_transitions: 10_000
   num_envs: 64
   buffer_size_denominator: 1
   num_timesteps: 10
   mcts_depth: 10
-  num_mcts_simulations: 8
+  num_mcts_simulations: 4
 
 value:
-  num_value_bins: 51
+  num_value_bins: 7
   min_value: -1.0
   max_value: 1.0
 
@@ -40,8 +40,8 @@ optim:
 
   lr: 0.1
   warmup_frac: 0.1
-  decay_rate: 0.5
-  num_stairs: 12
+  decay_rate: 0.8
+  num_stairs: 8
 
   value_coef: 0.5
   reward_coef: 0.99

@@ -55,6 +55,35 @@ class MLPConcatArgs(eqx.nn.MLP):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
+    def __init__(
+        self,
+        in_size: int,
+        out_size: int,
+        width_size: int,
+        depth: int,
+        activation: callable,
+        *,
+        key: Key[Array, ""],
+    ):
+        """Initialize the MLP with concatenated inputs.
+
+        Args:
+            in_size: Size of each input after concatenation
+            out_size: Size of the output
+            width_size: Width of the hidden layers
+            depth: Number of hidden layers
+            activation: Activation function to use
+            key: Random key for initialization
+        """
+        super().__init__(
+            in_size=in_size,
+            out_size=out_size,
+            width_size=width_size,
+            depth=depth,
+            activation=activation,
+            key=key,
+        )
+
     def __call__(self, *x, key=None):
         return super().__call__(jnp.concat(x), key=key)
 
@@ -94,10 +123,11 @@ class WorldModelRNN(eqx.Module):
         self.embed_action = eqx.nn.Embedding(num_actions, config.rnn_size, key=key_embed_action)
         self.norm1 = eqx.nn.LayerNorm(config.rnn_size)
         self.norm2 = eqx.nn.LayerNorm(config.rnn_size)
-        self.linear = eqx.nn.Linear(config.rnn_size, config.rnn_size, key=key_cell)
+        self.linear = eqx.nn.Linear(config.rnn_size, config.rnn_size, use_bias=False, key=key_cell)
         self.reward_head = eqx.nn.Linear(
             config.rnn_size + config.goal_dim, num_value_bins, key=key_reward
         )
+        # TODO use haiku initialization
         self.mlp = eqx.nn.MLP(
             in_size=config.rnn_size,
             out_size=config.rnn_size,
@@ -121,12 +151,13 @@ class WorldModelRNN(eqx.Module):
         Refer to the `Transition` module in `neurorl/library/muzero_mlps.py`.
         """
         # TODO handle continue predictor
-        out_dyn = jax.nn.relu(hidden_dyn) + self.embed_action(action)
-        out_dyn = hidden_dyn + self.linear(self.norm1(out_dyn))  # "fake env.step"
-        out_dyn = out_dyn + self.mlp(self.norm2(out_dyn))
-        out_dyn = scale_gradient(out_dyn, self.gradient_scale)
-        reward = self.reward_head(jnp.concat([out_dyn, goal_embedding]))
-        return out_dyn, reward
+        out = jax.nn.relu(hidden_dyn) + self.embed_action(action)
+        out = hidden_dyn + self.linear(self.norm1(out))  # "fake env.step"
+        out = out + self.mlp(self.norm2(out))
+        # TODO also use resnet-like structure for policy
+        out = scale_gradient(out, self.gradient_scale)
+        reward = self.reward_head(jnp.concat([out, goal_embedding]))
+        return out, reward
 
 
 class ActorCritic(eqx.Module):
@@ -300,6 +331,7 @@ class MuZeroNetwork(eqx.Module):
                 out_size=config.rnn_size,
                 width_size=config.mlp_size,
                 depth=config.mlp_depth,
+                activation=getattr(jax.nn, config.activation),
                 key=key_projection,
             )
         elif config.projection_kind == "cnn":
@@ -393,8 +425,15 @@ class MuZeroNetwork(eqx.Module):
                 The predicted reward for taking the given action;
                 The predicted policy logits and value of `hidden`.
         """
-        pred = self.actor_critic(hidden_dyn, goal_embedding)
+        # First update the hidden state through the world model
         hidden_dyn, reward = self.world_model.step(hidden_dyn, action, goal_embedding)
+
+        # Then make predictions based on the updated hidden state
+        pred = self.actor_critic(hidden_dyn, goal_embedding)
+
+        # Scale gradients to prevent vanishing/exploding
+        hidden_dyn = scale_gradient(hidden_dyn, self.world_model.gradient_scale)
+
         return hidden_dyn, (reward, pred)
 
 
@@ -528,8 +567,6 @@ def make_train(config: TrainConfig):
             world_model_gradient_scale=config.optim.world_model_gradient_scale,
             key=key_net,
         )
-        print("network size (bytes):")
-        print_bytes(init_net)
 
         init_params, net_static = eqx.partition(init_net, eqx.is_inexact_array)
         init_hiddens = jnp.broadcast_to(
@@ -599,6 +636,7 @@ def make_train(config: TrainConfig):
                 param_state=iter_state.param_state._replace(buffer_state=buffer_state),
                 key=key_optim,
             ):
+                """Sample batch of trajectories and do a single 'SGD step'"""
                 key_sample, key_reanalyze = jr.split(key, 2)
                 batch = jax.vmap(buffer.sample, in_axes=(None, None))(
                     param_state.buffer_state,
@@ -609,9 +647,10 @@ def make_train(config: TrainConfig):
                     batch.experience
                 )
 
-                # "reanalyze" the policy targets via mcts with current parameters
+                # if False:
+                # "reanalyze" the policy targets via mcts with target parameters
                 horizon = trajectories.action.shape[1]
-                net = eqx.combine(param_state.params, net_static)
+                net = eqx.combine(iter_state.target_params, net_static)
                 _, mcts_out = jax.vmap(act_mcts, in_axes=(None, 1), out_axes=1)(
                     net, trajectories.timestep, key=jr.split(key_reanalyze, horizon)
                 )
@@ -664,13 +703,14 @@ def make_train(config: TrainConfig):
                 params: MuZeroNetwork = optax.apply_updates(param_state.params, updates)  # type: ignore
 
                 # prioritize trajectories with high TD error
-                priorities = jnp.max(jnp.abs(aux.td_error), axis=-1)
-                buffer_state = buffer.set_priorities(
-                    param_state.buffer_state,
-                    batch.idx,
-                    priorities**config.optim.priority_exponent,
-                )
+                # priorities = jnp.mean(jnp.abs(aux.td_error), axis=-1)
+                # buffer_state = buffer.set_priorities(
+                #     param_state.buffer_state,
+                #     batch.idx,
+                #     priorities**config.optim.priority_exponent,
+                # )
 
+                # Get the current learning rate from the optimizer
                 log_values(
                     {
                         f"train/mean_{key}": jnp.mean(value)
@@ -685,7 +725,7 @@ def make_train(config: TrainConfig):
                     ParamState(
                         params=params,
                         opt_state=opt_state,
-                        buffer_state=buffer_state,
+                        buffer_state=param_state.buffer_state,
                     ),
                     None,
                 )
@@ -955,8 +995,7 @@ def make_train(config: TrainConfig):
             jnp.ones_like(trajectory.mcts_probs) / num_actions,
             trajectory.mcts_probs,
         )
-        mcts_probs_rolled = roll_into_matrix(mcts_probs)
-        mcts_dist = distrax.Categorical(probs=mcts_probs_rolled)
+        mcts_dist = distrax.Categorical(probs=mcts_probs)
         online_policy_dist = distrax.Categorical(logits=online_pred.policy_logits)
         policy_losses = mcts_dist.cross_entropy(online_policy_dist)
 
@@ -1078,9 +1117,6 @@ def make_train(config: TrainConfig):
             lambda x: x.swapaxes(0, 1), rollout_step[1]
         )
         trajectories: Batched[Transition, " num_envs horizon"]
-        # reward_preds: Batched[Transition, " num_envs horizon num_value_bins"] = jnp.roll(
-        #     reward_preds, 1, axis=-2
-        # )
 
         target_net = eqx.combine(target_params, net_static)
         _, bootstrapped_returns = jax.vmap(bootstrap, in_axes=(None, 0))(
@@ -1105,7 +1141,7 @@ def make_train(config: TrainConfig):
         )
 
         metrics: Batched[Metrics, " num_envs"] = trajectories.timestep.info["metrics"]
-        final_step_mask = trajectories.timestep.step_type == StepType.LAST
+        final_step_mask = trajectories.timestep.is_last
 
         def compute_goal_return(goal):
             goal_mask = final_step_mask & (trajectories.timestep.obs.goal == goal)
