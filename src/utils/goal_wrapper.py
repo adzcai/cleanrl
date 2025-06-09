@@ -1,11 +1,12 @@
 """Wrapper for multitask environments."""
 
+import dataclasses as dc
+
 import jax.numpy as jnp
 from dm_env.specs import DiscreteArray as DiscreteArraySpec
 from jaxtyping import Array, Integer, Key
 
-from log_util import dataclass
-from wrappers.base import (
+from utils.base import (
     Environment,
     GoalObs,
     TAction,
@@ -15,6 +16,7 @@ from wrappers.base import (
     TObs,
     Wrapper,
 )
+from utils.log_util import dataclass
 
 
 @dataclass
@@ -32,12 +34,16 @@ def goal_wrapper(
     Sets there to be a singleton goal.
     """
 
-    def reset(params: TEnvParams, *, key: Key[Array, ""]):
+    def reset(
+        params: TEnvParams, *, key: Key[Array, ""]
+    ) -> Timestep[GoalObs[TObs], GoalState[TEnvState]]:
         timestep = env.reset(params, key=key)
         goal = jnp.zeros((), int)
-        timestep.obs = GoalObs(obs=timestep.obs, goal=goal)
-        timestep.state = GoalState(_inner=timestep.state, goal=goal)
-        return timestep
+        return dc.replace(
+            timestep,
+            obs=GoalObs(obs=timestep.obs, goal=goal),
+            state=GoalState(_inner=timestep.state, goal=goal),
+        )  # type: ignore
 
     def step(
         state: GoalState[TEnvState],
@@ -48,13 +54,16 @@ def goal_wrapper(
     ) -> Timestep[GoalObs[TObs], GoalState[TEnvState]]:
         """Persist the goal throughout a rollout."""
         timestep = env.step(state._inner, action, params, key=key)
-        # keep the goal
-        timestep.obs = GoalObs(obs=timestep.obs, goal=state.goal)
-        timestep.state = GoalState(_inner=timestep.state, goal=state.goal)
-        return timestep
+        return dc.replace(
+            timestep,
+            obs=GoalObs(obs=timestep.obs, goal=state.goal),
+            state=GoalState(_inner=timestep.state, goal=state.goal),
+        )  # type: ignore
 
-    def observation_space(params: TEnvParams):
-        space = env.observation_space(params)
-        return [space, DiscreteArraySpec(1, name="goal")]
-
-    return env.wrap(name="goal", step=step, reset=reset, observation_space=observation_space)
+    return Wrapper.overwrite(
+        env,
+        name="goal_wrapper",
+        step=step,
+        reset=reset,
+        goal_space=lambda params: DiscreteArraySpec(1, name="goal"),
+    )

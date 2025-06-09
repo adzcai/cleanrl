@@ -11,12 +11,11 @@
             "program": "${file}",
             "console": "integratedTerminal",
             "env": {
-                "JAX_DISABLE_JIT": "True",
-                "JAX_DEBUG_NANS": "True"
+                "WANDB_MODE": "disabled",
+                "JAX_DISABLE_JIT": "True"
             },
             "args": [
-                "conf/housemaze.yaml",
-                // "conf/debug.yaml"
+                "${workspaceFolder}/src/configs/catch.yaml"
             ]
         }
     ]

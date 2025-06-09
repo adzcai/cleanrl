@@ -25,7 +25,7 @@ import jax.numpy as jnp
 from dm_env.specs import Array as ArraySpec
 from jaxtyping import Array, Float, Integer, Key, PyTree
 
-from log_util import T, dataclass
+from utils.log_util import TDataclass, dataclass
 
 try:
     import gymnax
@@ -44,8 +44,8 @@ except ImportError:
 P = ParamSpec("P")
 TEnvState = TypeVar("TEnvState")
 TObs = TypeVar("TObs")
-TAction = TypeVar("TAction")
-TEnvParams = TypeVar("TEnvParams")
+TAction = TypeVar("TAction", contravariant=True)
+TEnvParams = TypeVar("TEnvParams", contravariant=True)
 
 
 class StepType(IntEnum):
@@ -55,6 +55,11 @@ class StepType(IntEnum):
     """A standard environment transition."""
     LAST = auto()
     """Final state of an episode (not necessarily terminal)."""
+
+
+class Prediction(NamedTuple):
+    policy_logits: Float[Array, " num_actions"]
+    value_logits: Float[Array, " num_value_bins"]
 
 
 @dataclass
@@ -78,35 +83,37 @@ class Timestep(Generic[TObs, TEnvState]):
         return cls(
             obs=obs,
             state=state,
-            reward=jnp.asarray(0.0),  # TODO should be None
-            discount=jnp.asarray(0.0),  # same
+            reward=jnp.float_(None),
+            discount=jnp.float_(None),
             step_type=jnp.asarray(StepType.FIRST),
             info=info,
         )
 
     @property
-    def first(self):
+    def is_first(self):
         return self.step_type == StepType.FIRST
 
     @property
-    def mid(self):
+    def is_mid(self):
         return self.step_type == StepType.MID
 
     @property
-    def last(self):
+    def is_last(self):
         return self.step_type == StepType.LAST
 
 
 @dataclass
-class Wrapper(Generic[T]):
+class Wrapper(Generic[TDataclass]):
     """Base dataclass for assigning additional properties to an object.
 
     Delegates property lookups to the inner object."""
 
-    _inner: T | None
+    _inner: TDataclass
 
-    def wrap(self, **kwargs):
-        return dc.replace(self, **kwargs, _inner=self)
+    @classmethod
+    def overwrite(cls, obj, **kwargs):
+        """Replace the properties of the inner object"""
+        return dc.replace(obj, **kwargs, _inner=obj)
 
     if not TYPE_CHECKING:  # better static type hints
 
@@ -116,8 +123,14 @@ class Wrapper(Generic[T]):
 
 @runtime_checkable
 class ResetFn(Protocol[TObs, TEnvState, TEnvParams]):
-    def __call__(self, params: TEnvParams, *, key: Key[Array, ""]) -> Timestep[TObs, TEnvState]:
+    def __call__(
+        self, params: TEnvParams, *, key: Key[Array, ""]
+    ) -> Timestep[TObs, TEnvState]:
         """Sample a new state."""
+        raise NotImplementedError(
+            "ResetFn must be implemented by the environment. "
+            "It should return an initial Timestep with the state, observation, and info."
+        )
 
 
 @runtime_checkable
@@ -131,10 +144,16 @@ class StepFn(Protocol[TObs, TEnvState, TAction, TEnvParams]):
         key: Key[Array, ""],
     ) -> Timestep[TObs, TEnvState]:
         """Step the environment. See `Timestep`."""
+        raise NotImplementedError(
+            "StepFn must be implemented by the environment. "
+            "It should return a Timestep with the new state, observation, and info."
+        )
 
 
 @dataclass
-class Environment(Wrapper["Environment"], Generic[TObs, TEnvState, TAction, TEnvParams]):
+class Environment(
+    Wrapper["Environment"], Generic[TObs, TEnvState, TAction, TEnvParams]
+):
     """An interface for an interactive environment.
 
     We allow the action, observation, and goal spaces to vary.
@@ -163,3 +182,16 @@ class GoalObs(NamedTuple, Generic[TObs]):
     """The original observation."""
     goal: Integer[Array, ""]
     """The goal (for multitask environments)."""
+
+
+class Transition(NamedTuple, Generic[TObs, TEnvState]):
+    """A single transition. May be batched into a trajectory."""
+
+    timestep: Timestep[GoalObs[TObs], TEnvState]
+    """The timestep that was acted in."""
+    action: Integer[Array, ""]
+    """The action taken from `timestep`."""
+    pred: Prediction
+    """The prediction of the value of `timestep`."""
+    mcts_probs: Float[Array, " num_actions"]
+    """The MCTS action probability distribution from acting in timestep."""

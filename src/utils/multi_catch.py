@@ -11,8 +11,8 @@ import jax.numpy as jnp
 import jax.random as jr
 from jaxtyping import Array, Float, Integer, Key
 
-from log_util import dataclass
-from wrappers.base import Environment, GoalObs, StepType, Timestep
+from utils.base import Environment, GoalObs, StepType, Timestep
+from utils.log_util import dataclass
 
 Obs = Float[Array, " rows columns"]
 

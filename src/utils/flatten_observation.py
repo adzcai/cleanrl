@@ -1,17 +1,20 @@
 import math
-from typing import Annotated
+from typing import Annotated, TypeVar
 
 import dm_env.specs as specs
 import jax
 import jax.numpy as jnp
-from jaxtyping import Array, Key
+from jaxtyping import Array, Key, PyTree
 
-from wrappers.base import Environment, TAction, TEnvParams, TEnvState, TObs
+from utils.base import Environment, TAction, TEnvParams, TEnvState, Wrapper
 
 
 def _flatten(x: Array):
     """Flatten and preserve scalars."""
     return jax.tree.map(lambda x: x if jnp.ndim(x) == 0 else x.ravel(), x)
+
+
+TObs = TypeVar("TObs", bound=PyTree[Array])
 
 
 def flatten_observation_wrapper(
@@ -30,19 +33,19 @@ def flatten_observation_wrapper(
         return timestep
 
     def observation_space(params: TEnvParams) -> specs.Array:
+        """Flatten the shape of each array in the observation."""
         obs_spec = env.observation_space(params)
-        assert isinstance(obs_spec, specs.BoundedArray), (
-            f"Base environment observation space must be BoundedArray. Got {obs_spec}"
-        )
-        return specs.BoundedArray(
-            shape=(math.prod(obs_spec.shape),),
-            dtype=obs_spec.dtype,
-            minimum=obs_spec.minimum,
-            maximum=obs_spec.maximum,
-            name=obs_spec.name,
+        return jax.tree.map(
+            lambda spec: (
+                spec.replace(shape=(math.prod(spec.shape),))
+                if isinstance(spec, specs.Array) and len(spec.shape) > 0
+                else spec
+            ),
+            obs_spec,
         )
 
-    return env.wrap(
+    return Wrapper.overwrite(
+        env,
         name="flatten_observation",
         reset=reset,
         step=step,

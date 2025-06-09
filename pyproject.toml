@@ -22,10 +22,20 @@ dependencies = [
     "wandb[media]>=0.19.4",
 ]
 
-[tool.ruff]
-line-length = 100
-lint.ignore = ["F722"]
+[project.scripts]
+muzero = "experiments.muzero:main"
+
+[tool.uv]
+package = true
+
+[[tool.uv.index]]
+name = "jax"
+url = "https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/"
 
 [tool.uv.sources]
 optax = { git = "https://github.com/google-deepmind/optax.git" }
-housemaze = { path = "../JaxHouseMaze", editable = true }
+housemaze = { git = "https://github.com/adzcai/JaxHouseMaze.git" }
+
+[tool.ruff.lint]
+select = [ "I" ]
+ignore = ["F722"]

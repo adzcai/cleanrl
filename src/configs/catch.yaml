@@ -1,7 +1,7 @@
 arch:
   projection_kind: mlp
   rnn_size: 128
-  mlp_size: 64
+  mlp_size: 48
   mlp_depth: 1
   goal_dim: 4
   activation: relu

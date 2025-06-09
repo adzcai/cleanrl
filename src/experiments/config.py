@@ -55,19 +55,22 @@ For example, in your algorithm file,
 import dataclasses as dc
 import sys
 from collections.abc import Callable, Iterable
-from typing import Any, Literal, TypeVar, get_origin
+from typing import Annotated as Batched
+from typing import Any, Literal, Protocol, TypeVar, get_origin
 
 import jax
 import jax.numpy as jnp
 import jax.random as jr
 import matplotlib
-from jaxtyping import Array, Key
-from omegaconf import OmegaConf
+import rlax
+from jaxtyping import Array, Float, Key
+from omegaconf import DictConfig, OmegaConf
 
 import wandb
-from log_util import dataclass, dict_to_dataclass
+from utils.log_util import dataclass, dict_to_dataclass, typecheck
+from wandb.sdk.wandb_run import Run
 
-TConfig = TypeVar("TConfig", bound="Config")
+TConfig = TypeVar("TConfig", bound="Config", contravariant=True)
 
 # warnings.filterwarnings("error")  # turn warnings into errors
 
@@ -82,11 +85,11 @@ class Config:
     seed: int
     num_seeds: int
     sweep_method: str  # omegaconf doesn't support Literal["grid", "random", "bayes"]
-    sweep: bool = dc.field(
-        metadata={"help": "Output a wandb sweep configuration yaml instead of executing the run."},
-    )
-    agent: bool = dc.field(
-        metadata={"help": "Load config from wandb instead of cli."},
+    command: Literal["run", "sweep", "agent", "jaxpr"] = dc.field(
+        metadata={
+            "help": "Set to `sweep` to output a wandb sweep configuration yaml instead of executing the run."
+            "Set to `agent` to load config from wandb instead of cli."
+        },
     )
 
     @property
@@ -100,8 +103,7 @@ DEFAULT_CONFIG = Config(
     seed=0,
     num_seeds=1,
     sweep_method="random",
-    sweep=False,
-    agent=False,
+    command="run",
 )
 
 
@@ -109,12 +111,12 @@ DEFAULT_CONFIG = Config(
 class ArchConfig:
     """Network architecture"""
 
-    projection_kind: Literal["mlp", "cnn", "housemaze"]
     rnn_size: int
     mlp_size: int
     mlp_depth: int
     goal_dim: int
     activation: str
+    projection_kind: Literal["mlp", "cnn", "housemaze"]
     obs_dim: int | None = None
     """Dimension of observation embedding. The number of "orthogonal directions" among observation components."""
 
@@ -135,7 +137,9 @@ class CollectionConfig:
     total_transitions: int
     num_timesteps: int
     buffer_size_denominator: int | float
-    """The buffer has size (num_envs, int(total_transitions / (num_envs * buffer_size_denominator)))"""
+    """The time axis of the buffer is int(total_transitions / (num_envs * buffer_size_denominator)).
+    i.e. throughout training, the buffer will be filled `buffer_size_denominator` times.
+    """
     num_envs: int  # more parallel data collection
     mcts_depth: int
     num_mcts_simulations: int  # stronger policy improvement
@@ -149,6 +153,38 @@ class ValueConfig:
     min_value: float
     max_value: float
 
+    @typecheck
+    def logits_to_value(
+        self,
+        value_logits: Float[Array, " *horizon num_value_bins"],
+    ) -> Float[Array, " *horizon"]:
+        """Convert from logits for two-hot encoding to scalar values."""
+        assert self.num_value_bins != "scalar"
+        return jnp.asarray(
+            rlax.transform_from_2hot(
+                jax.nn.softmax(value_logits, axis=-1),
+                self.min_value,
+                self.max_value,
+                self.num_value_bins,
+            )
+        )
+
+    @typecheck
+    def value_to_probs(
+        self,
+        value: Float[Array, " *horizon"],
+    ) -> Float[Array, " *horizon num_value_bins"]:
+        """Convert from scalar values to probabilities for two-hot encoding."""
+        assert self.num_value_bins != "scalar"
+        return jnp.asarray(
+            rlax.transform_to_2hot(
+                value,
+                self.min_value,
+                self.max_value,
+                self.num_value_bins,
+            )
+        )
+
 
 @dataclass
 class BootstrapConfig:
@@ -158,6 +194,7 @@ class BootstrapConfig:
     lambda_gae: float
     target_update_freq: int  # in global iterations
     target_update_size: float
+    """The target network is updated `target_update_size` of the way to the online network."""
 
 
 @dataclass
@@ -191,31 +228,40 @@ class EvalConfig:
 class TrainConfig(Config):
     """Training parameters."""
 
-    arch: ArchConfig
-    env: EnvConfig
-    collection: CollectionConfig
-    value: ValueConfig
-    bootstrap: BootstrapConfig
-    optim: OptimConfig
-    eval: EvalConfig
+    arch: ArchConfig  # type: ignore
+    env: EnvConfig  # type: ignore
+    collection: CollectionConfig  # type: ignore
+    value: ValueConfig  # type: ignore
+    bootstrap: BootstrapConfig  # type: ignore
+    optim: OptimConfig  # type: ignore
+    eval: EvalConfig  # type: ignore
 
     @property
     def name(self):
         return f"{self.env.name} {self.collection.total_transitions}"
 
 
-def get_args(cfg_paths: Iterable[str] = (), cli_args: Iterable[str] = ()):
-    return OmegaConf.merge(
+def get_args(cfg_paths: Iterable[str] = (), cli_args: list[str] | None = None) -> dict:
+    assert cfg_paths or cli_args, "No configuration files or CLI arguments provided."
+    cfg = OmegaConf.merge(
         # using `structured` prevents addition of ConfigClass fields
         OmegaConf.create(dc.asdict(DEFAULT_CONFIG)),
         *map(OmegaConf.load, cfg_paths),
         OmegaConf.from_cli(cli_args),
     )
+    assert OmegaConf.is_dict(cfg), "Configuration must be a dictionary."
+    return OmegaConf.to_object(cfg)  # type: ignore
+
+
+class MakeTrainFn(Protocol[TConfig]):
+    def __call__(self, config: TConfig) -> Callable[[Key[Array, ""]], Any]:
+        """Returns a jittable `train` function that accepts the merged configuration."""
+        raise NotImplementedError
 
 
 def main(
     ConfigClass: type[TConfig],
-    make_train: Callable[[TConfig], Callable[[Key[Array, ""]], Any]],
+    make_train: MakeTrainFn[TConfig],
     file: str,
 ) -> None:
     """Merge configurations from yaml files and cli and pass it to `make_train`.
@@ -227,27 +273,29 @@ def main(
     """
     # merge configuration
     cfg_paths, cli_args = [], []
-    dry_run = False
     for arg in sys.argv[1:]:
         if arg in ["-h", "--help"]:
+            assert __doc__ is not None, "Docstring is required for help message."
             print(__doc__.format(file=file))
             return
-        elif arg == "--dry-run":
-            dry_run = True
         else:
             ary = cli_args if "=" in arg else cfg_paths
             ary.append(arg)
-    cfg: TConfig = get_args(cfg_paths, cli_args)
+    cfg_dict = get_args(cfg_paths, cli_args)
+    outputs = None
 
-    if dry_run:
-        cfg = dict_to_dataclass(ConfigClass, cfg)
-        train, _ = make_train(cfg)
+    if cfg_dict["command"] == "agent":
+        with wandb.init(config=None) as run:  # set config to None to load from wandb
+            outputs = run_train(run, ConfigClass, make_train)
+
+    elif cfg_dict["command"] == "jaxpr":
+        cfg = dict_to_dataclass(ConfigClass, cfg_dict)
+        train = make_train(cfg)
         jaxpr = jax.make_jaxpr(train)(jr.key(cfg.seed))
         print(jaxpr)
-        return
 
-    if cfg.sweep:
-        cfg = dict_to_dataclass(ConfigClass, cfg)
+    elif cfg_dict["command"] == "sweep":
+        cfg = dict_to_dataclass(ConfigClass, cfg_dict)
         sweep_params, parameters = to_wandb_sweep_parameters(cfg)
         sweep_cfg = {
             "program": file,
@@ -259,32 +307,46 @@ def main(
                 r"${env}",
                 r"${interpreter}",
                 r"${program}",
-                r"agent=True",
+                r"command=agent",
             ],
         }
         sweep_id = wandb.sweep(sweep_cfg)
         print(
             "To launch a SLURM batch job:\n"
-            f"SWEEP_ID={sweep_id} sbatch --job-name \"{sweep_cfg['name']}\" launch.sh\n"
+            f'SWEEP_ID={sweep_id} sbatch --job-name "{sweep_cfg["name"]}" launch.sh\n'
             "Remember you can also pass sbatch arguments via the command line.\n"
             "Run `man sbatch` for details."
         )
-    else:
+
+    elif cfg_dict["command"] == "run":
         matplotlib.use("agg")  # enable plotting inside jax callback
+        with wandb.init(config=cfg_dict) as run:
+            outputs = run_train(run, ConfigClass, make_train)
 
-        with wandb.init(config=None if cfg.agent else OmegaConf.to_object(cfg)) as run:
-            # setup config
-            cfg = dict_to_dataclass(ConfigClass, wandb.config)
-            run.name = cfg.name
-            train, _ = make_train(cfg)
-            keys = jr.split(jr.key(cfg.seed), cfg.num_seeds)
+    else:
+        raise ValueError(
+            f"Unknown command {cfg_dict['command']}. Use `run`, `sweep`, `agent`, or `jaxpr`."
+        )
 
-            # call train
-            # with jax.profiler.trace(f"/tmp/{os.environ['WANDB_PROJECT']}-trace", create_perfetto_link=True):
-            outputs = jax.jit(jax.vmap(train))(keys)
-            _, mean_eval_reward = jax.block_until_ready(outputs)
-            mean_eval_reward = mean_eval_reward[mean_eval_reward != -jnp.inf]
+    if outputs is not None:
+        _, mean_eval_reward = outputs
+        mean_eval_reward = mean_eval_reward[mean_eval_reward != -jnp.inf]
         print(f"Done training. {mean_eval_reward=}")
+
+
+def run_train(
+    run: Run, ConfigClass: type[TConfig], make_train: MakeTrainFn[TConfig]
+) -> Batched[Any, " num_seeds"]:
+    # setup config
+    cfg = dict_to_dataclass(ConfigClass, wandb.config)  # type: ignore
+    run.name = cfg.name
+    train = make_train(cfg)
+    keys = jr.split(jr.key(cfg.seed), cfg.num_seeds)
+
+    # call train
+    # with jax.profiler.trace(f"/tmp/{os.environ['WANDB_PROJECT']}-trace", create_perfetto_link=True):
+    outputs = jax.jit(jax.vmap(train))(keys)
+    return jax.block_until_ready(outputs)
 
 
 def to_wandb_sweep_parameters(config: Config) -> tuple[set[str], dict]:
