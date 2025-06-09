@@ -55,7 +55,7 @@ def make_multi_catch(
             goal=state.goal,
         )
 
-    def reset(params: EnvParams, *, key: Key[Array, ""]) -> tuple[GoalObs[Obs], EnvState]:
+    def reset(params: EnvParams, *, key: Key[Array, ""]) -> Timestep[GoalObs[Obs], EnvState]:
         """Randomly sample ball column and goal."""
         key_ball, key_goal = jr.split(key)
         state = EnvState(

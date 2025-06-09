@@ -207,7 +207,7 @@ class OptimConfig:
     max_grad_norm: float
 
     # learning rate
-    lr: float
+    lr_init: float
     warmup_frac: float
     decay_rate: float
     num_stairs: int

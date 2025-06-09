@@ -38,7 +38,7 @@ optim:
   p_reanalyze: 0.0
   max_grad_norm: 3.14
 
-  lr: 0.1
+  lr_init: 0.1
   warmup_frac: 0.1
   decay_rate: 0.8
   num_stairs: 8

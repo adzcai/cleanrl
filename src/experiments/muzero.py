@@ -493,7 +493,7 @@ def make_train(config: TrainConfig):
 
     lr = optax.warmup_exponential_decay_schedule(
         init_value=1e-5,
-        peak_value=config.optim.lr,
+        peak_value=config.optim.lr_init,
         warmup_steps=int(config.optim.warmup_frac * num_grad_updates),
         transition_steps=(
             ((1 - config.optim.warmup_frac) * num_grad_updates) // config.optim.num_stairs
