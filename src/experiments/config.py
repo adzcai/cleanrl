@@ -54,7 +54,7 @@ For example, in your algorithm file,
 
 import dataclasses as dc
 import sys
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from typing import Annotated as Batched
 from typing import Any, Literal, Protocol, TypeVar, get_origin
 
@@ -64,11 +64,13 @@ import jax.random as jr
 import matplotlib
 import rlax
 from jaxtyping import Array, Float, Key
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, ListConfig, OmegaConf
 
 import wandb
-from utils.log_util import dataclass, dict_to_dataclass, typecheck
+from utils.log_utils import dataclass, typecheck
 from wandb.sdk.wandb_run import Run
+
+from utils.structures import TDataclass
 
 TConfig = TypeVar("TConfig", bound="Config", contravariant=True)
 
@@ -96,6 +98,16 @@ class Config:
     def name(self):
         """The wandb run name. Can be overridden."""
         raise NotImplementedError
+
+    def validate(self):
+        """Validate the configuration.
+
+        This is called before training starts.
+        Override this in subclasses to add custom validation logic.
+        """
+        raise NotImplementedError(
+            "You must override the `validate` method in your Config subclass."
+        )
 
 
 # outside the class to allow subclasses to have arguments without defaults
@@ -220,10 +232,6 @@ class OptimConfig:
     importance_exponent: float
     """Probability to recompute policy targets."""
 
-    def __post_init__(self):
-        if self.num_timesteps <= 1:
-            raise ValueError("Updates must use at least two timesteps.")
-
 
 @dataclass
 class EvalConfig:
@@ -251,6 +259,12 @@ class TrainConfig(Config):
     def name(self):
         return f"{self.env.name} {self.collection.total_transitions}"
 
+    def validate(self):
+        if self.optim.num_timesteps <= 1 or self.eval.num_timesteps <= 1:
+            raise ValueError(
+                "Updates must use at least two timesteps for bootstrapping."
+            )
+
 
 def get_args(cfg_paths: Iterable[str] = (), cli_args: list[str] | None = None) -> dict:
     assert cfg_paths or cli_args, "No configuration files or CLI arguments provided."
@@ -268,6 +282,37 @@ class MakeTrainFn(Protocol[TConfig]):
     def __call__(self, config: TConfig) -> Callable[[Key[Array, ""]], Any]:
         """Returns a jittable `train` function that accepts the merged configuration."""
         raise NotImplementedError
+
+
+def dict_to_dataclass(cls: type[TDataclass], obj: Mapping[str, Any]) -> TDataclass:
+    """Cast a dictionary to a dataclass instance.
+
+    Args:
+        cls (type[T]): The dataclass to cast to.
+        obj (dict): The dictionary matching the dataclass fields.
+
+    Raises:
+        ValueError: If any required arguments are missing.
+
+    Returns:
+        T: The dataclass instance.
+    """
+    out = {}
+    for field in dc.fields(cls):
+        if field.name in obj:
+            value = obj[field.name]
+        elif field.default is not dc.MISSING:
+            value = field.default
+        elif field.default_factory is not dc.MISSING:
+            value = field.default_factory()
+        else:
+            raise ValueError(f"Field {field.name} missing when constructing {cls}")
+        if dc.is_dataclass(tp := field.type):
+            value = dict_to_dataclass(tp, value)  # type: ignore
+        if isinstance(value, (DictConfig, ListConfig)):
+            value = OmegaConf.to_object(value)
+        out[field.name] = value
+    return cls(**out)
 
 
 def main(
@@ -350,6 +395,7 @@ def run_train(
 ) -> Batched[Any, " num_seeds"]:
     # setup config
     cfg = dict_to_dataclass(ConfigClass, wandb.config)  # type: ignore
+    cfg.validate()
     run.name = cfg.name
     train = make_train(cfg)
     keys = jr.split(jr.key(cfg.seed), cfg.num_seeds)

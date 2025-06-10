@@ -6,7 +6,7 @@ import jax
 import jax.numpy as jnp
 from jaxtyping import Array, Key, PyTree
 
-from utils.base import Environment, TAction, TEnvParams, TEnvState, Wrapper
+from utils.structures import Environment, TAction, TEnvParams, TEnvState, Wrapper
 
 
 def _flatten(x: Array):

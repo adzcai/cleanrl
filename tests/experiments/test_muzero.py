@@ -8,8 +8,8 @@ from experiments.config import (
     TrainConfig,
     get_args,
 )
-from utils.base import GoalObs
-from utils.log_util import dict_to_dataclass
+from utils.structures import GoalObs
+from experiments.config import dict_to_dataclass
 
 
 @pytest.mark.parametrize("max_horizon", [3, 5])

@@ -1,6 +1,6 @@
 from typing import Any
 
-from utils.base import (
+from utils.structures import (
     GYMNAX_INSTALLED,
     NAVIX_INSTALLED,
     Environment,

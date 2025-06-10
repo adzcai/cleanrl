@@ -6,7 +6,7 @@ import jax
 import jax.numpy as jnp
 from jaxtyping import Array, Float, Integer, Key
 
-from utils.base import (
+from utils.structures import (
     Environment,
     TAction,
     TDataclass,
@@ -14,7 +14,7 @@ from utils.base import (
     TObs,
     Wrapper,
 )
-from utils.log_util import dataclass
+from utils.log_utils import dataclass
 
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
@@ -23,8 +23,8 @@ if TYPE_CHECKING:
     TEnvState = TypeVar("TEnvState", bound="DataclassInstance")
     TEnvParams = TypeVar("TEnvParams", bound="DataclassInstance")
 else:
-    TEnvState = TypeVar("TDataclass")
-    TEnvParams = TypeVar("TDataclass")
+    TEnvState = TypeVar("TEnvState")
+    TEnvParams = TypeVar("TEnvParams")
 
 
 @dataclass
@@ -81,15 +81,6 @@ def log_wrapper(
         metrics = Metrics(
             cum_return=jnp.where(timestep.is_first, 0.0, updated_return),
             step=jnp.where(timestep.is_first, 0, updated_length),
-        )
-        continue_metrics = Metrics(
-            current_return=updated_return,
-            current_length=updated_length,
-            episode_return=state.metrics.current_return,
-            episode_length=state.metrics.episode_length,
-        )
-        metrics = jax.tree.map(
-            ft.partial(jnp.where, timestep.is_last), done_metrics, continue_metrics
         )
         return dc.replace(
             timestep,

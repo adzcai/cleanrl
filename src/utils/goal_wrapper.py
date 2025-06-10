@@ -6,7 +6,7 @@ import jax.numpy as jnp
 from dm_env.specs import DiscreteArray as DiscreteArraySpec
 from jaxtyping import Array, Integer, Key
 
-from utils.base import (
+from utils.structures import (
     Environment,
     GoalObs,
     TAction,
@@ -16,7 +16,7 @@ from utils.base import (
     TObs,
     Wrapper,
 )
-from utils.log_util import dataclass
+from utils.log_utils import dataclass
 
 
 @dataclass

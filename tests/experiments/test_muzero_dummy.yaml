@@ -14,7 +14,7 @@ env:
 
 collection:
   total_transitions: 10
-  num_timesteps: ${env.kwargs.max_horizon}
+  num_timesteps: 2
   buffer_size_denominator: 2
   num_envs: 1
   mcts_depth: 1
@@ -23,7 +23,7 @@ collection:
 value:
   num_value_bins: 2
   min_value: 0
-  max_value: ${env.kwargs.max_horizon}
+  max_value: 1
 
 bootstrap:
   discount: 0.99
@@ -35,10 +35,14 @@ optim:
   num_minibatches: 1
   batch_size: 1
   num_timesteps: 2
-  lr_init: 0.01
+  lr_init: 0.1
+  warmup_frac: 0.1
+  decay_rate: 0.8
+  num_stairs: 81
   max_grad_norm: 2.0
   value_coef: 0.5
   reward_coef: 0.99
+  world_model_gradient_scale: 0.5
   priority_exponent: 0.8
   importance_exponent: 0.0
   p_reanalyze: 0.0
@@ -47,4 +51,4 @@ eval:
   warnings: False
   num_evals: 4
   num_eval_envs: 1
-  num_timesteps: ${env.kwargs.max_horizon}
+  num_timesteps: 2

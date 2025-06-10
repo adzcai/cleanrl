@@ -34,7 +34,7 @@ from matplotlib.axes import Axes
 
 import wandb
 from experiments.config import ArchConfig, TrainConfig, main
-from utils.log_util import exec_loop, get_norm_data, log_values, tree_slice
+from utils.log_utils import exec_loop, get_norm_data, log_values, tree_slice
 from utils.multi_catch import visualize_catch
 from utils.prioritized_buffer import BufferState, PrioritizedBuffer
 from utils.translate import make_env

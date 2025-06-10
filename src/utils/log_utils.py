@@ -1,9 +1,7 @@
-import dataclasses as dc
 import functools as ft
 import inspect
 import sys
-from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, Callable, TypeVar
+from typing import TYPE_CHECKING, Callable, TypeVar
 from typing import Annotated as Batched
 
 import equinox as eqx
@@ -14,16 +12,8 @@ import yaml
 from beartype import beartype as typechecker
 from chex import dataclass
 from jaxtyping import Array, Bool, Float, Key, PyTree, jaxtyped
-from omegaconf import DictConfig, ListConfig, OmegaConf
 
 import wandb
-
-if TYPE_CHECKING:
-    from _typeshed import DataclassInstance
-
-    TDataclass = TypeVar("TDataclass", bound="DataclassInstance")
-else:
-    TDataclass = TypeVar("TDataclass")
 
 if False and not TYPE_CHECKING:  # runtime check dataclasses
     _dataclass = dataclass
@@ -82,12 +72,6 @@ Carry = TypeVar("Carry")
 Y = TypeVar("Y")
 
 
-def roll_into_matrix(ary: Float[Array, " n *size"]) -> Float[Array, " n n *size"]:
-    return jax.vmap(jnp.roll, in_axes=(None, 0, None))(
-        ary, -jnp.arange(ary.shape[0]), 0
-    )
-
-
 def exec_loop(length: int, *, cond: Bool[Array, ""] | None = None):
     """Scan the decorated function for `length` steps.
 
@@ -114,37 +98,6 @@ def exec_loop(length: int, *, cond: Bool[Array, ""] | None = None):
             )
 
     return decorator
-
-
-def dict_to_dataclass(cls: type[TDataclass], obj: Mapping[str, Any]) -> TDataclass:
-    """Cast a dictionary to a dataclass instance.
-
-    Args:
-        cls (type[T]): The dataclass to cast to.
-        obj (dict): The dictionary matching the dataclass fields.
-
-    Raises:
-        ValueError: If any required arguments are missing.
-
-    Returns:
-        T: The dataclass instance.
-    """
-    out = {}
-    for field in dc.fields(cls):
-        if field.name in obj:
-            value = obj[field.name]
-        elif field.default is not dc.MISSING:
-            value = field.default
-        elif field.default_factory is not dc.MISSING:
-            value = field.default_factory()
-        else:
-            raise ValueError(f"Field {field.name} missing when constructing {cls}")
-        if dc.is_dataclass(tp := field.type):
-            value = dict_to_dataclass(tp, value)  # type: ignore
-        if isinstance(value, (DictConfig, ListConfig)):
-            value = OmegaConf.to_object(value)
-        out[field.name] = value
-    return cls(**out)
 
 
 def print_bytes(x) -> None:

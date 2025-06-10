@@ -4,8 +4,8 @@ import dm_env.specs as specs
 import jax.numpy as jnp
 from jaxtyping import Array, Integer
 
-from utils.base import Environment, StepType, Timestep
-from utils.log_util import dataclass
+from utils.structures import Environment, StepType, Timestep
+from utils.log_utils import dataclass
 
 
 @dataclass

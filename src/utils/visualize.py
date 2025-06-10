@@ -12,8 +12,8 @@ from matplotlib.axes import Axes
 
 import wandb
 from experiments.config import ValueConfig
-from utils.base import StepType, Transition
-from utils.log_util import tree_slice
+from utils.structures import StepType, Transition
+from utils.log_utils import tree_slice
 
 
 def get_action_name(env_name: str, action: int):
@@ -28,6 +28,8 @@ def get_action_name(env_name: str, action: int):
             raise ValueError(f"Invalid action {action}")
     elif env_name == "HouseMaze":
         return ["➡️", "⬇️", "⬅️", "⬆️", "done", "NONE", "reset"][action]
+    elif env_name == "dummy":
+        return f"{action}"
     else:
         raise ValueError(f"Env {env_name} not recognized")
 

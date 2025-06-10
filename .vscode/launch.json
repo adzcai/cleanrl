@@ -12,8 +12,7 @@
             "console": "integratedTerminal",
             "env": {
                 "WANDB_MODE": "disabled",
-                "JAX_DISABLE_JIT": "True",
-                "JAX_DEBUG_NANS": "True"
+                "JAX_DISABLE_JIT": "True"
             },
             "args": [
                 "${workspaceFolder}/tests/experiments/test_muzero_dummy.yaml"

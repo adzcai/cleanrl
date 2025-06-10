@@ -9,7 +9,7 @@ import jax.numpy as jnp
 import jax.random as jr
 from jaxtyping import Array, Float, Key, PyTree, UInt
 
-from utils.log_util import dataclass, exec_callback, tree_slice
+from utils.log_utils import dataclass, exec_callback, tree_slice
 
 TExperience = TypeVar("TExperience", bound=PyTree[Array])
 

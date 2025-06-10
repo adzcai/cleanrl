@@ -23,16 +23,16 @@ import yaml
 from jaxtyping import Array, Bool, Float, Integer, Key, PyTree, UInt
 
 from experiments.config import ArchConfig, TrainConfig, main
-from utils.base import Prediction, StepType, TEnvState, Timestep, TObs, Transition
+from utils.rl_utils import bootstrap, roll_into_matrix
+from utils.structures import Prediction, StepType, TEnvState, Timestep, TObs, Transition
 from utils.goal_wrapper import GoalObs
 from utils.housemaze import HouseMazeObs
 from utils.log import Metrics
-from utils.log_util import (
+from utils.log_utils import (
     exec_loop,
     get_norm_data,
     log_values,
     print_bytes,
-    roll_into_matrix,
     scale_gradient,
     tree_slice,
     typecheck,
@@ -120,10 +120,14 @@ class WorldModelRNN(eqx.Module):
         key: Key[Array, ""],
     ):
         key_cell, key_reward, key_embed_action, key_mlp = jr.split(key, 4)
-        self.embed_action = eqx.nn.Embedding(num_actions, config.rnn_size, key=key_embed_action)
+        self.embed_action = eqx.nn.Embedding(
+            num_actions, config.rnn_size, key=key_embed_action
+        )
         self.norm1 = eqx.nn.LayerNorm(config.rnn_size)
         self.norm2 = eqx.nn.LayerNorm(config.rnn_size)
-        self.linear = eqx.nn.Linear(config.rnn_size, config.rnn_size, use_bias=False, key=key_cell)
+        self.linear = eqx.nn.Linear(
+            config.rnn_size, config.rnn_size, use_bias=False, key=key_cell
+        )
         self.reward_head = eqx.nn.Linear(
             config.rnn_size + config.goal_dim, num_value_bins, key=key_reward
         )
@@ -158,6 +162,9 @@ class WorldModelRNN(eqx.Module):
         out = scale_gradient(out, self.gradient_scale)
         reward = self.reward_head(jnp.concat([out, goal_embedding]))
         return out, reward
+
+    def init_hidden(self):
+        return jnp.zeros(self.linear.in_features)
 
 
 class ActorCritic(eqx.Module):
@@ -496,7 +503,8 @@ def make_train(config: TrainConfig):
         peak_value=config.optim.lr_init,
         warmup_steps=int(config.optim.warmup_frac * num_grad_updates),
         transition_steps=(
-            ((1 - config.optim.warmup_frac) * num_grad_updates) // config.optim.num_stairs
+            ((1 - config.optim.warmup_frac) * num_grad_updates)
+            // config.optim.num_stairs
         ),
         decay_rate=config.optim.decay_rate,
         staircase=True,
@@ -583,7 +591,6 @@ def make_train(config: TrainConfig):
             mcts_probs=jnp.empty(num_actions, init_hiddens.dtype),
         )
         init_buffer_state = buffer.init(init_transition)
-        init_buffer_state = buffer.add(init_buffer_state, jax.tree.map(lambda x: x[..., jnp.newaxis], init_transition))
         print("buffer size (bytes)")
         print_bytes(init_buffer_state)
 
@@ -617,7 +624,9 @@ def make_train(config: TrainConfig):
             buffer_state = buffer.add(iter_state.param_state.buffer_state, trajectories)
 
             metrics: Metrics = trajectories.timestep.info["metrics"]
-            mean_return = jnp.mean(metrics.cum_return, where=trajectories.timestep.is_last)
+            mean_return = jnp.mean(
+                metrics.cum_return, where=trajectories.timestep.is_last
+            )
             mean_length = jnp.mean(metrics.step, where=trajectories.timestep.is_last)
             log_values(
                 {
@@ -907,46 +916,6 @@ def make_train(config: TrainConfig):
 
         return preds, out
 
-    def bootstrap(
-        net: MuZeroNetwork,
-        trajectory: Batched[Transition, " horizon"],
-    ) -> tuple[
-        Batched[Prediction, " horizon horizon"],
-        Float[Array, " horizon horizon-1"],
-    ]:
-        """Abstracted out for plotting.
-
-        Note that we use `Timestep.discount` rather than `Timestep.step_type`.
-
-        Returns:
-            tuple[Prediction (horizon, horizon), Float (horizon, horizon-1)]: The rolled matrix of network predictions;
-                the rolled matrix of bootstrapped returns along the imagined trajectories.
-        """
-        # see `loss_trajectory` for rolling details
-        action_rolled = roll_into_matrix(trajectory.action)
-        reward_rolled = roll_into_matrix(trajectory.timestep.reward)
-        discount_rolled = roll_into_matrix(trajectory.timestep.discount)
-        last_rolled = roll_into_matrix(trajectory.timestep.is_last)
-
-        # i.e. pred.value_logits[i, j] is the array of predicted value logits at time i+j,
-        # based on the observation at time i
-        # each row of the rolled matrix corresponds to a different starting time
-        # o0 | a0 a1 ...
-        # o1 | a1 a2 ...
-        _, (_, pred_rolled) = jax.vmap(net)(trajectory.timestep.obs, action_rolled)
-        value = config.value.logits_to_value(pred_rolled.value_logits)
-        bootstrapped_return: Float[Array, " horizon horizon-1"] = jnp.asarray(
-            jax.vmap(rlax.lambda_returns, in_axes=(0, 0, 0, None))(
-                reward_rolled[:, 1:],
-                discount_rolled[:, 1:] * config.bootstrap.discount,
-                value[:, 1:],
-                config.bootstrap.lambda_gae,
-            )
-        )
-
-        # ensure terminal states get zero value
-        return pred_rolled, jnp.where(last_rolled[:, :-1], 0.0, bootstrapped_return)
-
     # jit to ease debugging
     @ft.partial(jax.jit, static_argnames=("net_static",))
     @ft.partial(jax.vmap, in_axes=(None, None, 0, None))
@@ -973,7 +942,16 @@ def make_train(config: TrainConfig):
         )
 
         # bootstrap target values
-        target_pred, bootstrapped_return = bootstrap(target_net, trajectory)
+        def predict(
+            obs_seq: Batched[GoalObs, " horizon"],
+            action_seq: Integer[Array, " horizon"],
+        ):
+            """Predict the value sequence from the target network."""
+            _, (_, target_pred) = target_net(obs_seq, action_seq)
+            value_seq = config.value.logits_to_value(target_pred.value_logits)
+            return value_seq, target_pred
+
+        bootstrapped_return, target_pred = bootstrap(predict, trajectory, config)
 
         # value loss
         # cross-entropy of value predictions on n-step bootstrapped returns of target network
@@ -1119,8 +1097,19 @@ def make_train(config: TrainConfig):
         trajectories: Batched[Transition, " num_envs horizon"]
 
         target_net = eqx.combine(target_params, net_static)
-        _, bootstrapped_returns = jax.vmap(bootstrap, in_axes=(None, 0))(
-            target_net, trajectories
+
+        # bootstrap target values
+        def predict(
+            obs_seq: Batched[GoalObs, " horizon"],
+            action_seq: Integer[Array, " horizon"],
+        ):
+            """Predict the value sequence from the target network."""
+            _, (_, target_pred) = target_net(obs_seq, action_seq)
+            value_seq = config.value.logits_to_value(target_pred.value_logits)
+            return value_seq, None
+
+        bootstrapped_returns, _ = jax.vmap(bootstrap, in_axes=(None, 0, None))(
+            predict, trajectories, config
         )
 
         jax.debug.callback(

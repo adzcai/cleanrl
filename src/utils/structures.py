@@ -25,7 +25,16 @@ import jax.numpy as jnp
 from dm_env.specs import Array as ArraySpec
 from jaxtyping import Array, Float, Integer, Key, PyTree
 
-from utils.log_util import TDataclass, dataclass
+from utils.log_utils import dataclass
+
+
+if TYPE_CHECKING:
+    from _typeshed import DataclassInstance
+
+    TDataclass = TypeVar("TDataclass", bound="DataclassInstance")
+else:
+    TDataclass = TypeVar("TDataclass")
+
 
 try:
     import gymnax
@@ -84,9 +93,9 @@ class Timestep(Generic[TObs, TEnvState]):
             obs=obs,
             state=state,
             # insert a sentinel for reward and discount
-            reward=jnp.asarray(-1 << 30, float),
-            discount=jnp.asarray(-1 << 30, float),
-            step_type=jnp.asarray(StepType.FIRST),
+            reward=jnp.array(-1 << 30, dtype=float),
+            discount=jnp.array(-1 << 30, dtype=float),
+            step_type=jnp.array(StepType.FIRST, dtype=int),
             info=info,
         )
 

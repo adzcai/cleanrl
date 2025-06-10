@@ -8,7 +8,7 @@ import housemaze.utils as maze_utils
 import jax.numpy as jnp
 from jaxtyping import Array, Float, Integer, Key, PyTree
 
-from utils.base import Environment, GoalObs, StepType, Timestep
+from utils.structures import Environment, GoalObs, StepType, Timestep
 
 
 class HouseMazeObs(NamedTuple):

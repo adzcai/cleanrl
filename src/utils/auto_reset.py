@@ -8,7 +8,7 @@ import jax.numpy as jnp
 import jax.random as jr
 from jaxtyping import Array, Bool, Key
 
-from utils.base import (
+from utils.structures import (
     Environment,
     TAction,
     TEnvParams,
@@ -17,7 +17,7 @@ from utils.base import (
     TObs,
     Wrapper,
 )
-from utils.log_util import dataclass
+from utils.log_utils import dataclass
 
 
 @dataclass
