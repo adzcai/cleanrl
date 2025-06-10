@@ -2,49 +2,21 @@ arch:
   rnn_size: 1
   mlp_size: 1
   mlp_depth: 0
-  goal_dim: 1
-  activation: relu
-  projection_kind: mlp
-
-env:
-  name: debug
-  source: custom
-  kwargs:
-    max_horizon: 2
 
 collection:
   total_transitions: 100
-  num_timesteps: ${env.kwargs.max_horizon}
-  buffer_size_denominator: 2
   num_envs: 1
-  mcts_depth: 1
+  num_timesteps: 10
   num_mcts_simulations: 1
 
 value:
   num_value_bins: 2
-  min_value: 0
-  max_value: ${env.kwargs.max_horizon}
-
-bootstrap:
-  discount: 0.99
-  lambda_gae: 0.95
-  target_update_freq: 2
-  target_update_size: 1
 
 optim:
   num_minibatches: 1
   batch_size: 1
-  num_timesteps: ${env.kwargs.max_horizon}
-  lr_init: 0.01
-  max_grad_norm: 2.0
-  value_coef: 0.5
-  reward_coef: 0.99
-  priority_exponent: 0.8
-  importance_exponent: 0.0
-  p_reanalyze: 0.0
 
 eval:
-  warnings: False
   num_evals: 4
   num_eval_envs: 1
-  num_timesteps: ${env.kwargs.max_horizon}
+  num_timesteps: 10

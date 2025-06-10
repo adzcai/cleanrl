@@ -26,9 +26,9 @@ value:
   max_value: 1.0
 
 bootstrap:
-  discount: 0.997
+  discount: 0.988
   lambda_gae: 0.95
-  target_update_freq: 4
+  target_update_freq: 2500
   target_update_size: 0.99
 
 optim:

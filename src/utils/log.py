@@ -33,7 +33,7 @@ class Metrics:
 
     Properties:
         cum_return (Float ()): Cumulative undiscounted return including the reward obtained upon entering this timestep.
-        step (Integer ()): Zero-based index of this timestep in the current episode.
+        step (Integer ()): Number of steps taken before this timestep in the current episode.
     """
 
     cum_return: Float[Array, ""]
