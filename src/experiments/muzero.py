@@ -520,16 +520,17 @@ def make_train(config: TrainConfig):
             init_net.world_model.init_hidden(),
             (config.collection.num_envs, config.arch.rnn_size),
         )
-        init_buffer_state = buffer.init(
-            Transition(
-                timestep=tree_slice(init_timesteps, 0),
-                action=jnp.empty((), action_dtype),
-                pred=init_net.actor_critic(
-                    init_hiddens[0], init_net.embed_goal(init_timesteps.obs.goal[0])
-                ),
-                mcts_probs=jnp.empty(num_actions, init_hiddens.dtype),
-            )
+
+        init_transition = Transition(
+            timestep=tree_slice(init_timesteps, 0),
+            action=jnp.empty((), action_dtype),
+            pred=init_net.actor_critic(
+                init_hiddens[0], init_net.embed_goal(init_timesteps.obs.goal[0])
+            ),
+            mcts_probs=jnp.empty(num_actions, init_hiddens.dtype),
         )
+        init_buffer_state = buffer.init(init_transition)
+        init_buffer_state = buffer.add(init_buffer_state, jax.tree.map(lambda x: x[..., jnp.newaxis], init_transition))
         print("buffer size (bytes)")
         print_bytes(init_buffer_state)
 

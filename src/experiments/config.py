@@ -213,6 +213,10 @@ class OptimConfig:
     p_reanalyze: float
     """Probability to recompute policy targets."""
 
+    def __post_init__(self):
+        if self.num_timesteps <= 1:
+            raise ValueError("Updates must use at least two timesteps.")
+
 
 @dataclass
 class EvalConfig:

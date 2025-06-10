@@ -15,10 +15,9 @@ class Params:
 
 
 def dummy_reset(params: Params, *, key):
-    state = jnp.int_(0)
     return Timestep.initial(
-        obs=state.reshape((1,)),
-        state=state,
+        obs=jnp.zeros((1,)),
+        state=jnp.int_(0),
         info={},
     )
 
@@ -27,7 +26,7 @@ def dummy_step(env_state, action, params: Params, *, key):
     env_state = env_state + 1
     terminal = env_state >= params.max_horizon
     return Timestep(
-        obs=env_state.reshape((1,)),
+        obs=jnp.zeros((1,)),
         state=env_state,
         reward=jnp.float_(1.0),
         discount=1.0 - terminal,

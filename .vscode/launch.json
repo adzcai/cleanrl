@@ -12,10 +12,11 @@
             "console": "integratedTerminal",
             "env": {
                 "WANDB_MODE": "disabled",
-                "JAX_DISABLE_JIT": "True"
+                "JAX_DISABLE_JIT": "True",
+                "JAX_DEBUG_NANS": "True"
             },
             "args": [
-                "${workspaceFolder}/src/configs/catch.yaml"
+                "${workspaceFolder}/tests/experiments/test_muzero_dummy.yaml"
             ]
         }
     ]

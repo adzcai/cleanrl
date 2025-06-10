@@ -631,6 +631,19 @@ wheels = [
 ]
 
 [[package]]
+name = "ipdb"
+version = "0.13.13"
+source = { registry = "https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/" }
+dependencies = [
+    { name = "decorator" },
+    { name = "ipython" },
+]
+sdist = { url = "https://us-python.pkg.dev/ml-oss-artifacts-published/jax/ipdb/ipdb-0.13.13.tar.gz", hash = "sha256:e3ac6018ef05126d442af680aad863006ec19d02290561ac88b8b1c0b0cfc726" }
+wheels = [
+    { url = "https://us-python.pkg.dev/ml-oss-artifacts-published/jax/ipdb/ipdb-0.13.13-py3-none-any.whl", hash = "sha256:45529994741c4ab6d2388bfa5d7b725c2cf7fe9deffabdb8a6113aa5ed449ed4" },
+]
+
+[[package]]
 name = "ipykernel"
 version = "6.29.5"
 source = { registry = "https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/" }
@@ -917,6 +930,7 @@ dependencies = [
     { name = "distrax" },
     { name = "equinox" },
     { name = "housemaze" },
+    { name = "ipdb" },
     { name = "ipykernel" },
     { name = "jax" },
     { name = "jax", extra = ["cuda12"], marker = "sys_platform == 'linux'" },
@@ -936,6 +950,7 @@ requires-dist = [
     { name = "distrax", specifier = ">=0.1.5" },
     { name = "equinox", specifier = ">=0.11.11" },
     { name = "housemaze", git = "https://github.com/adzcai/JaxHouseMaze.git" },
+    { name = "ipdb", specifier = ">=0.13.13" },
     { name = "ipykernel", specifier = ">=6.29.5" },
     { name = "jax", marker = "sys_platform != 'linux'", specifier = ">=0.5.0" },
     { name = "jax", extras = ["cuda12"], marker = "sys_platform == 'linux'", specifier = ">=0.5.0" },

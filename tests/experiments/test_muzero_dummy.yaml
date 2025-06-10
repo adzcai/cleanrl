@@ -10,10 +10,10 @@ env:
   name: dummy
   source: custom
   kwargs:
-    max_horizon: 2
+    max_horizon: 1
 
 collection:
-  total_transitions: 100
+  total_transitions: 10
   num_timesteps: ${env.kwargs.max_horizon}
   buffer_size_denominator: 2
   num_envs: 1
@@ -34,7 +34,7 @@ bootstrap:
 optim:
   num_minibatches: 1
   batch_size: 1
-  num_timesteps: ${env.kwargs.max_horizon}
+  num_timesteps: 2
   lr_init: 0.01
   max_grad_norm: 2.0
   value_coef: 0.5
