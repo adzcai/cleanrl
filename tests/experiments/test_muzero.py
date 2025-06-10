@@ -21,10 +21,12 @@ def test_muzero_learns_value_on_dummy_env(max_horizon):
     key = jr.key(config.seed)
 
     final_iter_state, _ = train_fn(key)
+
     # Get trained params and net
     params = final_iter_state.param_state.params
     net_static = params  # eqx.partition not needed for dummy
     # Evaluate value prediction at initial state
+
     dummy_obs = jnp.int_(0)
     dummy_goal = jnp.int_(0)
     goal_obs = GoalObs(obs=dummy_obs, goal=dummy_goal)
@@ -51,4 +53,3 @@ def test_muzero_catch():
     key = jr.key(config.seed)
 
     final_iter_state, _ = train_fn(key)
-    

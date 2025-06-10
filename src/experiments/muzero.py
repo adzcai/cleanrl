@@ -498,11 +498,11 @@ def make_train(config: TrainConfig):
         env.step, in_axes=(0, 0, None)
     )  # map over state and action
 
-    lr = optax.warmup_exponential_decay_schedule(
+    lr_schedule = optax.warmup_exponential_decay_schedule(
         init_value=1e-5,
         peak_value=config.optim.lr_init,
         warmup_steps=int(config.optim.warmup_frac * num_grad_updates),
-        transition_steps=(
+        transition_steps=int(
             ((1 - config.optim.warmup_frac) * num_grad_updates)
             // config.optim.num_stairs
         ),
@@ -510,8 +510,11 @@ def make_train(config: TrainConfig):
         staircase=True,
     )
     optim = optax.chain(
-        optax.contrib.ademamix(lr, weight_decay=1e-4),
         optax.clip_by_global_norm(config.optim.max_grad_norm),
+        # https://optax.readthedocs.io/en/latest/getting_started.html#accessing-learning-rate
+        optax.inject_hyperparams(optax.contrib.ademamix)(
+            learning_rate=lr_schedule, weight_decay=1e-4
+        ),
     )
 
     buffer_time_axis = int(
@@ -727,6 +730,7 @@ def make_train(config: TrainConfig):
                     }
                     | get_norm_data(updates, "updates/norm")
                     | get_norm_data(params, "params/norm")
+                    | {"train/lr": opt_state[1].hyperparams["learning_rate"]}  # type: ignore
                 )
 
                 # carry updated ParamState (scanned loop)

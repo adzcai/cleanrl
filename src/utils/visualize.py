@@ -4,11 +4,18 @@ import chex
 import distrax
 import jax
 import jax.numpy as jnp
+import matplotlib as mpl
 import matplotlib.pyplot as plt
 import mctx
 import rlax
 from jaxtyping import Array, Float
 from matplotlib.axes import Axes
+
+# Add colorbar for reference (for p0 only)
+from matplotlib.cm import ScalarMappable
+
+# Add legend manually
+from matplotlib.patches import Patch
 
 import wandb
 from experiments.config import ValueConfig
@@ -292,27 +299,51 @@ def plot_compare_dists(
     labels: list[str],
 ):
     chex.assert_equal_shape([p0, p1])
-    horizon, num_actions = p0.shape
+    horizon, num_bins = p0.shape
     x = jnp.arange(horizon)
 
-    # Use matplotlib's built-in colormap to get evenly spaced colors around the color wheel
-    import matplotlib.cm as cm
+    # Plot p0 as blue, p1 as red, with alpha blending
+    ax.imshow(
+        p0.T,
+        aspect="auto",
+        origin="lower",
+        cmap="Blues",
+        alpha=0.6,
+        extent=(0, horizon, 0, num_bins),
+        vmin=0,
+        vmax=1,
+    )
+    ax.imshow(
+        p1.T,
+        aspect="auto",
+        origin="lower",
+        cmap="Reds",
+        alpha=0.4,
+        extent=(0, horizon, 0, num_bins),
+        vmin=0,
+        vmax=1,
+    )
 
-    colors = []
-    for i in range(num_actions):
-        # Use the 'hsv' colormap to get colors around the hue wheel
-        color = cm.hsv(i / num_actions)  # type: ignore
-        colors.append(color)
+    ax.set_xticks(x)
+    ax.set_xticklabels(x)
+    ax.set_yticks(jnp.arange(num_bins))
+    if labels is not None and len(labels) == num_bins:
+        ax.set_yticklabels(labels)
+    else:
+        ax.set_yticklabels(jnp.arange(num_bins))
 
-    # Repeat colors for MCTS distributions
-    all_colors = colors * 2  # repeat colors for policy and MCTS
+    ax.set_xlabel("Horizon")
+    ax.set_ylabel("Bin")
+    ax.set_title("Distribution (Blue: Policy, Red: MCTS)")
 
-    ax.stackplot(x, jnp.concat([p0, p1], axis=1).T, labels=labels, colors=all_colors)
+    sm = ScalarMappable(cmap="Blues", norm=mpl.colors.Normalize(vmin=0, vmax=1))  # type: ignore
+    plt.colorbar(sm, ax=ax, fraction=0.046, pad=0.04, label="Probability")
 
-    ax.set_xticks(x, x)
-    ax.set_ylim(0, 2)
-
-    ax.legend(loc="center left", bbox_to_anchor=(1, 0.5))
+    legend_handles = [
+        Patch(facecolor="blue", edgecolor="blue", alpha=0.6, label="Policy"),
+        Patch(facecolor="red", edgecolor="red", alpha=0.4, label="MCTS"),
+    ]
+    ax.legend(handles=legend_handles, loc="center left", bbox_to_anchor=(1, 0.5))
 
 
 def convert_tree_to_graph(

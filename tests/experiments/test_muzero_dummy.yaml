@@ -38,7 +38,7 @@ optim:
   lr_init: 0.1
   warmup_frac: 0.1
   decay_rate: 0.8
-  num_stairs: 81
+  num_stairs: 10
   max_grad_norm: 2.0
   value_coef: 0.5
   reward_coef: 0.99
