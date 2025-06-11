@@ -48,6 +48,7 @@ from utils.structures import (
     TObs,
     Transition,
 )
+from utils.visualize import visualize
 from wrappers.goal_wrapper import GoalObs
 
 
@@ -932,6 +933,20 @@ def make_train(config: TrainConfig):
                 def debug(valid):
                     if not valid:
                         raise ValueError("NaN parameters.")
+
+            # evaluate every eval_freq steps
+            jax.lax.cond(
+                (iter_state.step % eval_freq == 0) & buffer_available,
+                ft.partial(
+                    visualize, num_envs=config.eval.num_eval_envs, net_static=net_static
+                ),
+                lambda *_: -jnp.inf,  # avoid nan to support debugging
+                # cond only accepts positional arguments
+                param_state.params,
+                target_params,
+                param_state.buffer_state,
+                key_evaluate,
+            )
 
             return (
                 IterState(
