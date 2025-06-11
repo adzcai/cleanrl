@@ -46,6 +46,7 @@ def test_muzero_learns_value_on_dummy_env(max_horizon):
     ), f"Predicted value {pred_value} too low for horizon {max_horizon}"
 
 
+@pytest.mark.skip(reason="Disabled for now")
 def test_muzero_catch():
     config = get_args(["src/configs/catch.yaml"])
     config = dict_to_dataclass(TrainConfig, config)

@@ -1,6 +1,6 @@
 from typing import Any
 
-from utils.housemaze import housemaze_wrapper, new_housemaze, visualize_housemaze
+from envs.housemaze import housemaze_wrapper, new_housemaze, visualize_housemaze
 from utils.structures import (
     GYMNAX_INSTALLED,
     NAVIX_INSTALLED,
@@ -21,13 +21,13 @@ import jax.numpy as jnp
 import jax.random as jr
 from jaxtyping import Array, Float, Key, PyTree
 
+from envs.multi_catch import make_multi_catch, visualize_catch
 from experiments.config import EnvConfig
 from testing.dummy_env import Params, make_dummy_env
-from utils.auto_reset import auto_reset_wrapper
-from utils.flatten_observation import flatten_observation_wrapper
-from utils.goal_wrapper import goal_wrapper
-from utils.log import log_wrapper
-from utils.multi_catch import make_multi_catch, visualize_catch
+from wrappers.auto_reset import auto_reset_wrapper
+from wrappers.flatten_observation import flatten_observation_wrapper
+from wrappers.goal_wrapper import goal_wrapper
+from wrappers.metrics import metrics_wrapper
 
 if GYMNAX_INSTALLED:
 
@@ -140,7 +140,7 @@ def make_env(env_config: EnvConfig, goal=True) -> tuple[Environment, Any]:
             f"Unrecognized environment {env_config.name} in {env_config.source}"
         )
 
-    env = log_wrapper(env)
+    env = metrics_wrapper(env)
     return env, params
 
 

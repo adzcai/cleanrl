@@ -1,22 +1,16 @@
 from collections.abc import Callable
 from typing import Annotated as Batched
-from typing import Any, Protocol
+from typing import Any
 
 import jax
 import jax.numpy as jnp
-import jax.random as jr
 import rlax
-from jaxtyping import Array, Float, Integer, Key
+from jaxtyping import Array, Float, Integer
 
-from experiments.config import TrainConfig
-from utils.log_utils import exec_loop
+from experiments.config import BootstrapConfig
 from utils.structures import (
-    GoalObs,
     Prediction,
-    StepFn,
-    TAction,
-    TEnvParams,
-    TimeStep,
+    TEnvState,
     TObs,
     Transition,
 )
@@ -24,11 +18,11 @@ from utils.structures import (
 
 def bootstrap(
     predict_s: Callable[
-        [Batched[GoalObs[TObs], " horizon"], Integer[Array, " horizon"]],
+        [TObs, Integer[Array, " horizon"]],
         tuple[Float[Array, " horizon"], Any],
     ],
-    txn_s: Batched[Transition, " horizon"],
-    config: TrainConfig,
+    txn_s: Batched[Transition[TObs, TEnvState], " horizon"],
+    config: BootstrapConfig,
 ) -> tuple[
     Float[Array, " horizon-1 horizon-1"],
     Batched[Prediction, " horizon horizon"],
@@ -57,9 +51,9 @@ def bootstrap(
     bootstrapped_return: Float[Array, " horizon-1 horizon-1"] = jnp.asarray(
         jax.vmap(rlax.lambda_returns, in_axes=(0, 0, 0, None))(
             reward_sh[:-1, 1:],
-            discount_sh[:-1, 1:] * config.bootstrap.discount,
+            discount_sh[:-1, 1:] * config.discount,
             value[:-1, 1:],
-            config.bootstrap.lambda_gae,
+            config.lambda_gae,
         )
     )
 

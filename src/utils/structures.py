@@ -70,14 +70,17 @@ class Prediction(NamedTuple):
     value_logits: Float[Array, " num_value_bins"]
 
 
+SENTINEL = -1 << 30  # sentinel for initial reward and discount
+
+
 @dataclass
 class TimeStep(Generic[TObs, TEnvState]):
+    reward: Float[Array, ""]
+    """The reward emitted upon entering `state` (i.e. from acting in the previous state). `nan` for initial states."""
     state: TEnvState
     """The whole state of the environment."""
     obs: TObs
     """The observation of `state`."""
-    reward: Float[Array, ""]
-    """The reward emitted upon entering `state` (i.e. from acting in the previous state). `nan` for initial states."""
     discount: Float[Array, ""]
     """The discount between `reward` and the value of `state`. `nan` for initial states."""
     step_type: Annotated[Integer[Array, ""], StepType]
@@ -88,12 +91,12 @@ class TimeStep(Generic[TObs, TEnvState]):
     @classmethod
     def initial(cls, obs: TObs, state: TEnvState, info: dict[str, Any]):
         """Construct an initial timestep."""
+        # insert a sentinel for reward and discount
         return cls(
-            obs=obs,
+            reward=jnp.array(SENTINEL, dtype=float),
             state=state,
-            # insert a sentinel for reward and discount
-            reward=jnp.array(-1 << 30, dtype=float),
-            discount=jnp.array(-1 << 30, dtype=float),
+            obs=obs,
+            discount=jnp.array(SENTINEL, dtype=float),
             step_type=jnp.array(StepType.FIRST, dtype=int),
             info=info,
         )
@@ -150,7 +153,7 @@ class StepFn(Protocol[TObs, TEnvState, TAction, TEnvParams]):
         action: TAction,
         params: TEnvParams,
         *,
-        key: Key[Array, ""],
+        key: Key[Array, ""] | None = None,
     ) -> TimeStep[TObs, TEnvState]:
         """Step the environment. See `Timestep`."""
         raise NotImplementedError(
@@ -196,7 +199,7 @@ class GoalObs(NamedTuple, Generic[TObs]):
 class Transition(NamedTuple, Generic[TObs, TEnvState]):
     """A single transition. May be batched into a trajectory."""
 
-    time_step: TimeStep[GoalObs[TObs], TEnvState]
+    time_step: TimeStep[TObs, TEnvState]
     """The timestep that was acted in."""
     action: Integer[Array, ""]
     """The action taken from `timestep`."""

@@ -13,23 +13,23 @@ from utils.structures import (
     Environment,
     TAction,
     TEnvParams,
-    TEnvState,
     TimeStep,
     TObs,
     Wrapper,
 )
+from wrappers.metrics import TEnvStateDC
 
 
 @dataclass
-class PrevDone(Wrapper[TEnvState]):
+class PrevDone(Wrapper[TEnvStateDC]):
     """We follow the dm_env convention of returning terminal states."""
 
     is_last: Bool[Array, ""]
 
 
 def auto_reset_wrapper(
-    env: Environment[TObs, TEnvState, TAction, TEnvParams],
-) -> Environment[TObs, PrevDone[TEnvState], TAction, TEnvParams]:
+    env: Environment[TObs, TEnvStateDC, TAction, TEnvParams],
+) -> Environment[TObs, PrevDone[TEnvStateDC], TAction, TEnvParams]:
     """Automatically reset the environment after an episode."""
 
     def reset(params: TEnvParams, *, key: Key[Array, ""]):
@@ -40,7 +40,7 @@ def auto_reset_wrapper(
         )
 
     def step(
-        env_state: PrevDone[TEnvState],
+        env_state: PrevDone[TEnvStateDC],
         action: TAction,
         params: TEnvParams,
         *,
@@ -49,11 +49,13 @@ def auto_reset_wrapper(
         key_reset, key_step = jr.split(key)
         timestep_reset = env.reset(params, key=key_reset)
         timestep_step = env.step(env_state._inner, action, params, key=key_step)
-        timestep: TimeStep[TObs, TEnvState] = jax.tree.map(
+        timestep: TimeStep[TObs, TEnvStateDC] = jax.tree.map(
             ft.partial(jnp.where, env_state.is_last),
             timestep_reset,
             timestep_step,
         )
-        return dc.replace(timestep, state=PrevDone(_inner=timestep.state, is_last=timestep.is_last))
+        return dc.replace(
+            timestep, state=PrevDone(_inner=timestep.state, is_last=timestep.is_last)
+        )
 
     return Wrapper.overwrite(env, name="auto_reset", reset=reset, step=step)

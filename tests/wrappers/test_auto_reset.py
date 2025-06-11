@@ -3,12 +3,12 @@ import jax.random as jr
 import numpy.testing as npt
 
 from testing.dummy_env import Params
-from utils.auto_reset import PrevDone, auto_reset_wrapper
+from wrappers.auto_reset import PrevDone, auto_reset_wrapper
 
 
-def test_auto_reset_wrapper(dummy_env):
+def test_auto_reset_wrapper(dummy_env_params):
     params = Params(max_horizon=2)
-    wrapped = auto_reset_wrapper(dummy_env)
+    wrapped = auto_reset_wrapper(dummy_env_params)
     key = jr.key(0)
 
     # Initial reset

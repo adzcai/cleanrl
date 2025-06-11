@@ -147,7 +147,7 @@ class CollectionConfig:
 
     total_transitions: int
     num_time_steps: int
-    buffer_size_denominator: int | float
+    num_buffer_fills: int | float
     """The time axis of the buffer is int(total_transitions / (num_envs * buffer_size_denominator)).
     i.e. throughout training, the buffer will be filled `buffer_size_denominator` times.
     """
@@ -162,7 +162,7 @@ class CollectionConfig:
     @property
     def buffer_time_axis(self) -> int:
         return int(
-            self.total_transitions / (self.num_envs * self.buffer_size_denominator)
+            self.total_transitions / (self.num_envs * self.num_buffer_fills)
         )
 
 
@@ -213,9 +213,6 @@ class BootstrapConfig:
 
     discount: float
     lambda_gae: float
-    target_update_freq: int  # in global iterations
-    target_update_size: float
-    """The target network is updated `target_update_size` of the way to the online network."""
 
 
 @dataclass
@@ -227,19 +224,32 @@ class OptimConfig:
     num_time_steps: int
     max_grad_norm: float
 
-    # learning rate
-    lr_init: float
-    warmup_frac: float
-    decay_rate: float
-    num_stairs: int
-    # end learning rate
+    target_update_freq: int  # in global iterations
+    target_update_size: float
+    """The target network is updated `target_update_size` of the way to the online network."""
 
-    value_coef: float  # scale the value loss
-    reward_coef: float  # scale the reward loss
     world_model_gradient_scale: float  # scale the world model gradients per step
     priority_exponent: float  # prioritized replay
     importance_exponent: float
     """Probability to recompute policy targets."""
+
+
+@dataclass
+class LossConfig:
+    """Loss coefficients for the different components of the loss function."""
+
+    value_coef: float  # scale the value loss
+    reward_coef: float  # scale the reward loss
+
+
+@dataclass
+class LRConfig:
+    """Learning rate schedule parameters."""
+
+    lr_init: float
+    warmup_frac: float
+    decay_rate: float
+    num_stairs: int
 
 
 @dataclass
@@ -262,6 +272,8 @@ class TrainConfig(Config):
     value: ValueConfig  # type: ignore
     bootstrap: BootstrapConfig  # type: ignore
     optim: OptimConfig  # type: ignore
+    lr: LRConfig  # type: ignore
+    loss: LossConfig  # type: ignore
     eval: EvalConfig  # type: ignore
 
     @property
@@ -273,10 +285,7 @@ class TrainConfig(Config):
             raise ValueError(
                 "Updates must use at least two timesteps for bootstrapping."
             )
-        if (
-            self.optim.num_stairs
-            > self.collection.num_iters * self.optim.num_minibatches
-        ):
+        if self.lr.num_stairs > self.collection.num_iters * self.optim.num_minibatches:
             raise ValueError(
                 "Number of learning rate stairs must be less than the number of gradient updates."
             )

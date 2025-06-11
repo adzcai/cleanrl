@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 from testing.pytree_env import Observation
-from utils.flatten_observation import flatten_observation_wrapper
+from wrappers.flatten_observation import flatten_observation_wrapper
 
 
 @pytest.fixture

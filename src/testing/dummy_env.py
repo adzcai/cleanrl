@@ -1,11 +1,21 @@
 """A minimal dummy environment for testing wrappers and environment interfaces."""
 
 import dm_env.specs as specs
+import jax
 import jax.numpy as jnp
-from jaxtyping import Array, Integer
+import jax.random as jr
+from jaxtyping import Array, Float, Integer, Key
 
 from utils.log_utils import dataclass
-from utils.structures import Environment, StepType, TimeStep
+from utils.structures import (
+    Environment,
+    StepType,
+    TAction,
+    TEnvParams,
+    TEnvState,
+    TimeStep,
+    TObs,
+)
 
 
 @dataclass
@@ -22,7 +32,7 @@ def dummy_reset(params: Params, *, key):
     )
 
 
-def dummy_step(env_state, action, params: Params, *, key):
+def dummy_step(env_state, action, params: Params, *, key=None):
     env_state = env_state + 1
     terminal = env_state >= params.max_horizon
     return TimeStep(
@@ -35,9 +45,10 @@ def dummy_step(env_state, action, params: Params, *, key):
     )
 
 
-def make_dummy_env(
-    max_horizon: int,
-) -> Environment[Integer[Array, ""], Integer[Array, ""], None, Params]:
+DummyEnv = Environment[Float[Array, " 1"], Integer[Array, ""], None, Params]
+
+
+def make_dummy_env(max_horizon: int) -> tuple[DummyEnv, Params]:
     return Environment(
         _inner=None,  # type: ignore
         name="dummy",
@@ -53,3 +64,30 @@ def make_dummy_env(
         ),
         goal_space=lambda params: None,
     ), Params(max_horizon=max_horizon)
+
+
+def simple_rollout(
+    env: Environment[TObs, TEnvState, TAction, TEnvParams],
+    params: TEnvParams,
+    action: TAction,
+    horizon: int,
+    *,
+    key: Key[Array, ""],
+) -> TimeStep[TObs, TEnvState]:
+    """For testing. Run a rollout that takes a constant action."""
+    init_ts = env.reset(params, key=key)
+
+    def step_fn(ts: TimeStep, key: Key[Array, ""]):
+        next_ts = env.step(ts.state, action, params, key=key)
+        return next_ts, next_ts
+
+    _, ts_s = jax.lax.scan(step_fn, init_ts, jr.split(key, horizon))
+
+    # append init_ts to the sequence
+    ts_s = jax.tree.map(
+        lambda init, xs: jnp.concatenate([init[jnp.newaxis, ...], xs], axis=0),
+        init_ts,
+        ts_s,
+    )
+
+    return ts_s

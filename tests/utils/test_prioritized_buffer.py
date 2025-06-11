@@ -1,5 +1,6 @@
 import jax
 import jax.numpy as jnp
+import numpy.testing as npt
 import pytest
 from jaxtyping import PyTree
 
@@ -120,17 +121,30 @@ def test_num_available(buffer, dummy_experience):
 
 def test_new_experience_priority_is_max(buffer, dummy_experience):
     buf, state = buffer
-    # Set a known max priority
-    state = state.replace(
-        priority_state=state.priority_state.replace(max_priority=jnp.array(7.0))
-    )
+    max_priority = state.priority_state.max_priority
     # Add a new experience
     batch = {"obs": jnp.ones((buf.batch_size, buf.horizon, 4))}
+
     state = buf.add(state, batch)
-    # The last written positions should have priority equal to max_priority
-    # Compute the indices that were just enabled
-    pos = (state.pos - 1) % buf.max_time
-    idx = buf.pos_to_flat(jnp.full((buf.batch_size,), pos, dtype=jnp.uint32))
-    # Check priorities at those indices
-    priorities = state.priority_state.nodes[buf.priority_tree.leaf_idx + idx]
-    assert jnp.allclose(priorities, state.priority_state.max_priority)
+    assert state.pos == buf.horizon
+    idx = buf.pos_to_flat(jnp.zeros((buf.batch_size,), dtype=int))
+    priorities = state.priority_state.nodes[buf.priority_tree.leaf_idx :]
+    desired = jnp.zeros_like(priorities).at[idx].set(max_priority)
+    npt.assert_array_equal(priorities, desired)
+
+    new_priorities = max_priority + jnp.arange(buf.batch_size, dtype=float)
+    state = buf.set_priorities(state, idx, new_priorities)
+    state = buf.add(state, batch)
+    next_idx = jax.vmap(buf.pos_to_flat)(
+        jnp.ones((buf.batch_size,), dtype=int)[jnp.newaxis, :]
+        + jnp.arange(buf.horizon)[:, jnp.newaxis]
+    ).ravel()
+    priorities = state.priority_state.nodes[buf.priority_tree.leaf_idx :]
+    desired = (
+        jnp.zeros_like(priorities)
+        .at[idx]
+        .set(new_priorities)
+        .at[next_idx]
+        .set(jnp.max(new_priorities))
+    )
+    npt.assert_array_equal(priorities, desired)

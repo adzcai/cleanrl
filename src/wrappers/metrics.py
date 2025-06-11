@@ -20,10 +20,10 @@ if TYPE_CHECKING:
     from _typeshed import DataclassInstance
 
     # redefine TEnvState and TEnvParams to be dataclasses
-    TEnvState = TypeVar("TEnvState", bound="DataclassInstance")
+    TEnvStateDC = TypeVar("TEnvState", bound="DataclassInstance")
     TEnvParams = TypeVar("TEnvParams", bound="DataclassInstance")
 else:
-    TEnvState = TypeVar("TEnvState")
+    TEnvStateDC = TypeVar("TEnvState")
     TEnvParams = TypeVar("TEnvParams")
 
 
@@ -45,9 +45,9 @@ class LogState(Wrapper[TDataclass]):
     metrics: Metrics
 
 
-def log_wrapper(
-    env: Environment[TObs, TEnvState, TAction, TEnvParams],
-) -> Environment[TObs, LogState[TEnvState], TAction, TEnvParams]:
+def metrics_wrapper(
+    env: Environment[TObs, TEnvStateDC, TAction, TEnvParams],
+) -> Environment[TObs, LogState[TEnvStateDC], TAction, TEnvParams]:
     """Log interactions and episode rewards.
 
     env, env_params = log_wrapper(env, env_params)
@@ -60,7 +60,7 @@ def log_wrapper(
 
     def reset(
         params: TEnvParams, *, key: Key[Array, ""]
-    ) -> TimeStep[TObs, LogState[TEnvState]]:
+    ) -> TimeStep[TObs, LogState[TEnvStateDC]]:
         time_step = env.reset(params, key=key)
         return dc.replace(
             time_step,
@@ -68,12 +68,12 @@ def log_wrapper(
         )  # type: ignore
 
     def step(
-        state: LogState[TEnvState],
+        state: LogState[TEnvStateDC],
         action: TAction,
         params: TEnvParams,
         *,
         key: Key[Array, ""],
-    ) -> TimeStep[TObs, LogState[TEnvState]]:
+    ) -> TimeStep[TObs, LogState[TEnvStateDC]]:
         time_step = env.step(state._inner, action, params, key=key)
         metrics = Metrics(
             cum_return=state.metrics.cum_return + time_step.reward,
