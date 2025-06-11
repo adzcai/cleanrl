@@ -31,7 +31,7 @@ def visualize_trajectory(
 
     figs = dict(
         value_fig=value_figure(
-            txn_s.pred.value_logits,
+            value_cfg.logits_to_value(txn_s.pred.value_logits),
             boot_value_s,
             ylabel="Value",
         ),
@@ -74,7 +74,7 @@ def visualize_trajectory(
 
     output = {}
     for k, fig in figs.items():
-        output[k] = wandb.Image(fig)
+        output[f"visualize/{k}"] = wandb.Image(fig)
         plt.close(fig)
 
     wandb.log(output)
@@ -108,7 +108,10 @@ def policy_figure(
 ) -> Figure:
     """Plot the policy over the trajectory with improved colorbar and clearer axis labeling."""
     horizon, num_actions = pred_probs_s.shape
-    fig, ax = plt.subplots(figsize=(horizon, (num_actions / horizon) * 4))
+    # Dynamically set figure size for better readability
+    fig_width = max(8, min(16, horizon * 0.5))
+    fig_height = max(3, min(10, num_actions * 0.7))
+    fig, ax = plt.subplots(figsize=(fig_width, fig_height))
     im = ax.imshow(
         pred_probs_s.T,
         aspect="auto",

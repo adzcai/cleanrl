@@ -13,7 +13,7 @@ env:
     num_goals: 2
 
 collection:
-  total_transitions: 200_000
+  total_transitions: 50_000
   num_envs: 64
   num_buffer_fills: 2
   num_time_steps: 10
@@ -41,8 +41,8 @@ optim:
   num_time_steps: 20
   max_grad_norm: 3.14
 
-  target_update_freq: 2500
-  target_update_size: 0.99
+  target_update_freq: 100
+  target_update_size: 1.0
   world_model_gradient_scale: 0.5
   priority_exponent: 0.8
   importance_exponent: 0.0

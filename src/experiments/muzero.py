@@ -142,8 +142,8 @@ class WorldModelRNN(eqx.Module):
         out = out + self.mlp(self.norm2(out))
         # TODO also use resnet-like structure for policy
         out = scale_gradient(out, self.gradient_scale)
-        reward = self.reward_head(jnp.concat([out, goal_embedding]))
-        return out, reward
+        reward_logits = self.reward_head(jnp.concat([out, goal_embedding]))
+        return out, reward_logits
 
 
 class ActorCritic(eqx.Module):
@@ -647,7 +647,6 @@ def make_train(config: TrainConfig):
     action_space: specs.DiscreteArray = env.action_space(env_params)
     num_actions = action_space.num_values
     num_goals = env.goal_space(env_params).num_values
-    action_dtype = action_space.dtype
 
     env_reset_b = jax.vmap(env.reset, in_axes=(None,))
     env_step_b = jax.vmap(env.step, in_axes=(0, 0, None))  # map over state and action
@@ -727,7 +726,7 @@ def make_train(config: TrainConfig):
         )
         init_transition = Transition(
             time_step=tree_slice(init_timestep_b, 0),
-            action=jnp.empty((), action_dtype),
+            action=jnp.empty((), int),
             pred=init_net.actor_critic(
                 jnp.empty(config.arch.rnn_size, float),
                 init_net.embed_goal(init_timestep_b.obs.goal[0]),
@@ -992,8 +991,8 @@ def make_train(config: TrainConfig):
         return (
             config.value,
             txn_s,
-            viz_boot_value_s,
-            viz_reward_logits_s,
+            viz_boot_value_s[:, 0],  # first prediction (no rollout)
+            viz_reward_logits_s[:, 0],  # first prediction (no rollout)
             video,
         )
 
@@ -1013,7 +1012,7 @@ def make_train(config: TrainConfig):
             key_action, key_step = jr.split(key)
 
             pred_b, mcts_out_b = act_mcts(net, time_step_b.obs, key=key_action)
-            action_b = jnp.asarray(mcts_out_b.action, dtype=action_dtype)
+            action_b = jnp.asarray(mcts_out_b.action, dtype=int)
             next_time_step_b = env_step_b(
                 time_step_b.state,
                 action_b,
@@ -1025,7 +1024,7 @@ def make_train(config: TrainConfig):
                 time_step=time_step_b,
                 action=action_b,
                 pred=pred_b,
-                mcts_probs=jnp.asarray(mcts_out_b.action_weights, dtype=action_dtype),
+                mcts_probs=jnp.asarray(mcts_out_b.action_weights, dtype=float),
             )
 
         final_timestep_b, txn_sb = rollout_step
