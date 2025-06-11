@@ -6,10 +6,10 @@ import pytest
 from experiments import muzero
 from experiments.config import (
     TrainConfig,
+    dict_to_dataclass,
     get_args,
 )
 from utils.structures import GoalObs
-from experiments.config import dict_to_dataclass
 
 
 @pytest.mark.parametrize("max_horizon", [3, 5])
@@ -32,7 +32,7 @@ def test_muzero_learns_value_on_dummy_env(max_horizon):
     goal_obs = GoalObs(obs=dummy_obs, goal=dummy_goal)
     # The value function should predict close to max_horizon (all rewards are 1)
     pred = params.actor_critic(
-        params.world_model.init_hidden(), params.embed_goal(dummy_goal)
+        params.world_model.init_hidden_dyn(), params.embed_goal(dummy_goal)
     )
     # Convert logits to value
     value = jax.nn.softmax(pred.value_logits)

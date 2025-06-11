@@ -28,14 +28,18 @@ def test_init_shape(buffer, dummy_experience):
     assert state.data["obs"].shape == (buf.batch_size, buf.max_time, 4)
     # Check pos and priority_state
     assert state.pos == 0
-    assert state.priority_state.nodes.shape[0] == (1 << (buf.priority_tree.depth + 1)) - 1
+    assert (
+        state.priority_state.nodes.shape[0] == (1 << (buf.priority_tree.depth + 1)) - 1
+    )
 
 
 def test_add_and_sample(buffer, dummy_experience):
     buf, state = buffer
     # Add a batch of experiences
     batch = {
-        "obs": jnp.arange(buf.batch_size * buf.horizon * 4).reshape(buf.batch_size, buf.horizon, 4)
+        "obs": jnp.arange(buf.batch_size * buf.horizon * 4).reshape(
+            buf.batch_size, buf.horizon, 4
+        )
     }
     state = buf.add(state, batch)
     # After adding, pos should be advanced
@@ -62,7 +66,9 @@ def test_priority_sum_matches_root(buffer, dummy_experience):
     buf, state = buffer
     # Add a batch of experiences
     batch = {
-        "obs": jnp.arange(buf.batch_size * buf.horizon * 4).reshape(buf.batch_size, buf.horizon, 4)
+        "obs": jnp.arange(buf.batch_size * buf.horizon * 4).reshape(
+            buf.batch_size, buf.horizon, 4
+        )
     }
     state = buf.add(state, batch)
     # Set known priorities for all possible indices
@@ -80,7 +86,9 @@ def test_multiple_priority_updates(buffer, dummy_experience):
     buf, state = buffer
     # Add a batch of experiences
     batch = {
-        "obs": jnp.arange(buf.batch_size * buf.horizon * 4).reshape(buf.batch_size, buf.horizon, 4)
+        "obs": jnp.arange(buf.batch_size * buf.horizon * 4).reshape(
+            buf.batch_size, buf.horizon, 4
+        )
     }
     state = buf.add(state, batch)
     num_leaves = buf.priority_tree.size
@@ -92,9 +100,9 @@ def test_multiple_priority_updates(buffer, dummy_experience):
         # After each update, root should be sum of all priorities
         root_val = state.priority_state.nodes[0]
         expected_sum = priorities.sum()
-        assert jnp.isclose(root_val, expected_sum), (
-            f"Cycle {i}: Root {root_val}, sum {expected_sum}"
-        )
+        assert jnp.isclose(
+            root_val, expected_sum
+        ), f"Cycle {i}: Root {root_val}, sum {expected_sum}"
         # Max priority should be updated
         assert jnp.isclose(state.priority_state.max_priority, float(i))
 
@@ -108,3 +116,21 @@ def test_num_available(buffer, dummy_experience):
     state = buf.add(state, batch)
     # Now should have available trajectories
     assert buf.num_available(state) > 0
+
+
+def test_new_experience_priority_is_max(buffer, dummy_experience):
+    buf, state = buffer
+    # Set a known max priority
+    state = state.replace(
+        priority_state=state.priority_state.replace(max_priority=jnp.array(7.0))
+    )
+    # Add a new experience
+    batch = {"obs": jnp.ones((buf.batch_size, buf.horizon, 4))}
+    state = buf.add(state, batch)
+    # The last written positions should have priority equal to max_priority
+    # Compute the indices that were just enabled
+    pos = (state.pos - 1) % buf.max_time
+    idx = buf.pos_to_flat(jnp.full((buf.batch_size,), pos, dtype=jnp.uint32))
+    # Check priorities at those indices
+    priorities = state.priority_state.nodes[buf.priority_tree.leaf_idx + idx]
+    assert jnp.allclose(priorities, state.priority_state.max_priority)

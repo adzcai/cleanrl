@@ -6,15 +6,15 @@ import jax
 import jax.numpy as jnp
 from jaxtyping import Array, Float, Integer, Key
 
+from utils.log_utils import dataclass
 from utils.structures import (
     Environment,
     TAction,
     TDataclass,
-    Timestep,
+    TimeStep,
     TObs,
     Wrapper,
 )
-from utils.log_utils import dataclass
 
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
@@ -60,12 +60,11 @@ def log_wrapper(
 
     def reset(
         params: TEnvParams, *, key: Key[Array, ""]
-    ) -> Timestep[TObs, LogState[TEnvState]]:
-        timestep = env.reset(params, key=key)
+    ) -> TimeStep[TObs, LogState[TEnvState]]:
+        time_step = env.reset(params, key=key)
         return dc.replace(
-            timestep,
-            state=LogState(_inner=timestep.state, metrics=init_metrics),
-            info=timestep.info | {"metrics": init_metrics},
+            time_step,
+            state=LogState(_inner=time_step.state, metrics=init_metrics),
         )  # type: ignore
 
     def step(
@@ -74,18 +73,15 @@ def log_wrapper(
         params: TEnvParams,
         *,
         key: Key[Array, ""],
-    ) -> Timestep[TObs, LogState[TEnvState]]:
-        timestep = env.step(state._inner, action, params, key=key)
-        updated_return = state.metrics.cum_return + timestep.reward
-        updated_length = state.metrics.step + 1
+    ) -> TimeStep[TObs, LogState[TEnvState]]:
+        time_step = env.step(state._inner, action, params, key=key)
         metrics = Metrics(
-            cum_return=jnp.where(timestep.is_first, 0.0, updated_return),
-            step=jnp.where(timestep.is_first, 0, updated_length),
+            cum_return=state.metrics.cum_return + time_step.reward,
+            step=state.metrics.step + 1,
         )
         return dc.replace(
-            timestep,
-            state=LogState(_inner=timestep.state, metrics=metrics),
-            info=timestep.info | {"metrics": metrics},
+            time_step,
+            state=LogState(_inner=time_step.state, metrics=metrics),
         )  # type: ignore
 
     return Wrapper.overwrite(env, name="log", reset=reset, step=step)

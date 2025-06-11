@@ -2,8 +2,8 @@ import jax.random as jr
 import pytest
 
 from testing.dummy_env import Params
-from utils.structures import GoalObs
 from utils.goal_wrapper import GoalState, goal_wrapper
+from utils.structures import GoalObs
 
 
 @pytest.fixture

@@ -2,8 +2,8 @@ import dm_env.specs as specs
 import jax.numpy as jnp
 from jaxtyping import Array, Float, Integer
 
-from utils.structures import Environment, StepType, Timestep
 from utils.log_utils import dataclass
+from utils.structures import Environment, StepType, TimeStep
 
 
 @dataclass
@@ -19,7 +19,7 @@ def reset(params, *, key):
         b=jnp.zeros((2, 2)),
         scalar=jnp.float_(0.0),
     )
-    return Timestep.initial(obs=obs, state=0, info={})
+    return TimeStep.initial(obs=obs, state=0, info={})
 
 
 def step(env_state: int, action, params, *, key):
@@ -29,7 +29,7 @@ def step(env_state: int, action, params, *, key):
         b=jnp.full((2, 2), state, dtype=jnp.float32),
         scalar=jnp.float_(jnp.pi * state),
     )
-    return Timestep(
+    return TimeStep(
         obs=obs,
         state=state,
         reward=jnp.float_(1.0),

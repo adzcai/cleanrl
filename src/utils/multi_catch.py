@@ -11,8 +11,8 @@ import jax.numpy as jnp
 import jax.random as jr
 from jaxtyping import Array, Float, Integer, Key
 
-from utils.structures import Environment, GoalObs, StepType, Timestep
 from utils.log_utils import dataclass
+from utils.structures import Environment, GoalObs, StepType, TimeStep
 
 Obs = Float[Array, " rows columns"]
 
@@ -55,7 +55,7 @@ def make_multi_catch(
             goal=state.goal,
         )
 
-    def reset(params: EnvParams, *, key: Key[Array, ""]) -> Timestep[GoalObs[Obs], EnvState]:
+    def reset(params: EnvParams, *, key: Key[Array, ""]) -> TimeStep[GoalObs[Obs], EnvState]:
         """Randomly sample ball column and goal."""
         key_ball, key_goal = jr.split(key)
         state = EnvState(
@@ -64,7 +64,7 @@ def make_multi_catch(
             paddle_x=jnp.asarray(params.columns // 2, int),
             goal=jr.randint(key_goal, (), 0, params.num_goals),
         )
-        return Timestep.initial(obs=_get_obs(state, params), state=state, info={})
+        return TimeStep.initial(obs=_get_obs(state, params), state=state, info={})
 
     def step(
         state: EnvState,
@@ -72,7 +72,7 @@ def make_multi_catch(
         params: EnvParams,
         *,
         key: Key[Array, ""],
-    ) -> Timestep[GoalObs[Obs], EnvState]:
+    ) -> TimeStep[GoalObs[Obs], EnvState]:
         """Perform single timestep state transition."""
 
         dx = action - 1  # [-1, 0, 1] = left, no-op, right
@@ -90,7 +90,7 @@ def make_multi_catch(
         success = jnp.logical_xor(missed, state.goal)
         reward = terminal * jnp.where(success, 1.0, -1.0)
 
-        return Timestep(
+        return TimeStep(
             obs=_get_obs(next_state, params),
             state=next_state,
             reward=reward,

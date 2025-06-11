@@ -27,7 +27,6 @@ from jaxtyping import Array, Float, Integer, Key, PyTree
 
 from utils.log_utils import dataclass
 
-
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
 
@@ -72,7 +71,7 @@ class Prediction(NamedTuple):
 
 
 @dataclass
-class Timestep(Generic[TObs, TEnvState]):
+class TimeStep(Generic[TObs, TEnvState]):
     state: TEnvState
     """The whole state of the environment."""
     obs: TObs
@@ -135,7 +134,7 @@ class Wrapper(Generic[TDataclass]):
 class ResetFn(Protocol[TObs, TEnvState, TEnvParams]):
     def __call__(
         self, params: TEnvParams, *, key: Key[Array, ""]
-    ) -> Timestep[TObs, TEnvState]:
+    ) -> TimeStep[TObs, TEnvState]:
         """Sample a new state."""
         raise NotImplementedError(
             "ResetFn must be implemented by the environment. "
@@ -152,7 +151,7 @@ class StepFn(Protocol[TObs, TEnvState, TAction, TEnvParams]):
         params: TEnvParams,
         *,
         key: Key[Array, ""],
-    ) -> Timestep[TObs, TEnvState]:
+    ) -> TimeStep[TObs, TEnvState]:
         """Step the environment. See `Timestep`."""
         raise NotImplementedError(
             "StepFn must be implemented by the environment. "
@@ -197,7 +196,7 @@ class GoalObs(NamedTuple, Generic[TObs]):
 class Transition(NamedTuple, Generic[TObs, TEnvState]):
     """A single transition. May be batched into a trajectory."""
 
-    timestep: Timestep[GoalObs[TObs], TEnvState]
+    time_step: TimeStep[GoalObs[TObs], TEnvState]
     """The timestep that was acted in."""
     action: Integer[Array, ""]
     """The action taken from `timestep`."""

@@ -1,13 +1,13 @@
 from typing import Any
 
+from utils.housemaze import housemaze_wrapper, new_housemaze, visualize_housemaze
 from utils.structures import (
     GYMNAX_INSTALLED,
     NAVIX_INSTALLED,
     Environment,
     StepType,
-    Timestep,
+    TimeStep,
 )
-from utils.housemaze import housemaze_wrapper, new_housemaze, visualize_housemaze
 
 if GYMNAX_INSTALLED:
     import gymnax.environments.environment as ge
@@ -42,7 +42,7 @@ if GYMNAX_INSTALLED:
 
         def reset(params: ge.TEnvParams, *, key: Key[Array, ""]):
             obs, state = env.reset(key, params)
-            return Timestep.initial(obs, state, init_info)
+            return TimeStep.initial(obs, state, init_info)
 
         def step(
             state: ge.TEnvState,
@@ -52,7 +52,7 @@ if GYMNAX_INSTALLED:
             key: Key[Array, ""],
         ):
             obs, state, reward, done, info = env.step(key, state, action, params)
-            return Timestep(
+            return TimeStep(
                 obs=obs,
                 state=state,
                 reward=reward,
@@ -84,7 +84,7 @@ if NAVIX_INSTALLED:
                 [StepType.TERMINATION, StepType.TRUNCATION],
                 default=StepType.TRANSITION,
             )
-            return Timestep(
+            return TimeStep(
                 obs=timestep.observation,
                 state=timestep,
                 reward=timestep.reward,

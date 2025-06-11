@@ -1,24 +1,36 @@
 from collections.abc import Callable
-from typing import Annotated as Batched, Any
+from typing import Annotated as Batched
+from typing import Any, Protocol
 
 import jax
 import jax.numpy as jnp
-from jaxtyping import Array, Float, Integer
+import jax.random as jr
 import rlax
+from jaxtyping import Array, Float, Integer, Key
 
 from experiments.config import TrainConfig
-from utils.structures import GoalObs, Prediction, TAction, TObs, Transition
+from utils.log_utils import exec_loop
+from utils.structures import (
+    GoalObs,
+    Prediction,
+    StepFn,
+    TAction,
+    TEnvParams,
+    TimeStep,
+    TObs,
+    Transition,
+)
 
 
 def bootstrap(
-    predict: Callable[
+    predict_s: Callable[
         [Batched[GoalObs[TObs], " horizon"], Integer[Array, " horizon"]],
         tuple[Float[Array, " horizon"], Any],
     ],
-    trajectory: Batched[Transition, " horizon"],
+    txn_s: Batched[Transition, " horizon"],
     config: TrainConfig,
 ) -> tuple[
-    Float[Array, " horizon horizon-1"],
+    Float[Array, " horizon-1 horizon-1"],
     Batched[Prediction, " horizon horizon"],
 ]:
     """Abstracted out for plotting.
@@ -30,28 +42,29 @@ def bootstrap(
             the rolled matrix of bootstrapped returns along the imagined trajectories.
     """
     # see `loss_trajectory` for rolling details
-    action_rolled = roll_into_matrix(trajectory.action)
-    reward_rolled = roll_into_matrix(trajectory.timestep.reward)
-    discount_rolled = roll_into_matrix(trajectory.timestep.discount)
-    last_rolled = roll_into_matrix(trajectory.timestep.is_last)
+    action_sh = roll_into_matrix(txn_s.action)
+    reward_sh = roll_into_matrix(txn_s.time_step.reward)
+    discount_sh = roll_into_matrix(txn_s.time_step.discount)
+    last_sh = roll_into_matrix(txn_s.time_step.is_last)
 
     # i.e. pred.value_logits[i, j] is the array of predicted value logits at time i+j,
     # based on the observation at time i
     # each row of the rolled matrix corresponds to a different starting time
     # o0 | a0 a1 ...
     # o1 | a1 a2 ...
-    value, aux = jax.vmap(predict)(trajectory.timestep.obs, action_rolled)
-    bootstrapped_return: Float[Array, " horizon horizon-1"] = jnp.asarray(
+    # we remove the final row since there is only one transition (can't bootstrap)
+    value, aux = jax.vmap(predict_s)(txn_s.time_step.obs, action_sh)
+    bootstrapped_return: Float[Array, " horizon-1 horizon-1"] = jnp.asarray(
         jax.vmap(rlax.lambda_returns, in_axes=(0, 0, 0, None))(
-            reward_rolled[:, 1:],
-            discount_rolled[:, 1:] * config.bootstrap.discount,
-            value[:, 1:],
+            reward_sh[:-1, 1:],
+            discount_sh[:-1, 1:] * config.bootstrap.discount,
+            value[:-1, 1:],
             config.bootstrap.lambda_gae,
         )
     )
 
     # ensure terminal states get zero value
-    return jnp.where(last_rolled[:, :-1], 0.0, bootstrapped_return), aux
+    return jnp.where(last_sh[:-1, :-1], 0.0, bootstrapped_return), aux
 
 
 def roll_into_matrix(ary: Float[Array, " n *size"]) -> Float[Array, " n n *size"]:

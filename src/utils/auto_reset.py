@@ -8,16 +8,16 @@ import jax.numpy as jnp
 import jax.random as jr
 from jaxtyping import Array, Bool, Key
 
+from utils.log_utils import dataclass
 from utils.structures import (
     Environment,
     TAction,
     TEnvParams,
     TEnvState,
-    Timestep,
+    TimeStep,
     TObs,
     Wrapper,
 )
-from utils.log_utils import dataclass
 
 
 @dataclass
@@ -49,7 +49,7 @@ def auto_reset_wrapper(
         key_reset, key_step = jr.split(key)
         timestep_reset = env.reset(params, key=key_reset)
         timestep_step = env.step(env_state._inner, action, params, key=key_step)
-        timestep: Timestep[TObs, TEnvState] = jax.tree.map(
+        timestep: TimeStep[TObs, TEnvState] = jax.tree.map(
             ft.partial(jnp.where, env_state.is_last),
             timestep_reset,
             timestep_step,

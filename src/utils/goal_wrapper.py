@@ -6,17 +6,17 @@ import jax.numpy as jnp
 from dm_env.specs import DiscreteArray as DiscreteArraySpec
 from jaxtyping import Array, Integer, Key
 
+from utils.log_utils import dataclass
 from utils.structures import (
     Environment,
     GoalObs,
     TAction,
     TEnvParams,
     TEnvState,
-    Timestep,
+    TimeStep,
     TObs,
     Wrapper,
 )
-from utils.log_utils import dataclass
 
 
 @dataclass
@@ -36,7 +36,7 @@ def goal_wrapper(
 
     def reset(
         params: TEnvParams, *, key: Key[Array, ""]
-    ) -> Timestep[GoalObs[TObs], GoalState[TEnvState]]:
+    ) -> TimeStep[GoalObs[TObs], GoalState[TEnvState]]:
         timestep = env.reset(params, key=key)
         goal = jnp.zeros((), int)
         return dc.replace(
@@ -51,7 +51,7 @@ def goal_wrapper(
         params: TEnvParams,
         *,
         key: Key[Array, ""],
-    ) -> Timestep[Array, GoalState[TEnvState]]:
+    ) -> TimeStep[Array, GoalState[TEnvState]]:
         timestep = env.step(state._inner, action, params, key=key)
         return dc.replace(
             timestep,

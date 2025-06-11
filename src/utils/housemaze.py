@@ -8,7 +8,7 @@ import housemaze.utils as maze_utils
 import jax.numpy as jnp
 from jaxtyping import Array, Float, Integer, Key, PyTree
 
-from utils.structures import Environment, GoalObs, StepType, Timestep
+from utils.structures import Environment, GoalObs, StepType, TimeStep
 
 
 class HouseMazeObs(NamedTuple):
@@ -116,7 +116,7 @@ def housemaze_wrapper(
 
     def reset(params: maze.EnvParams, *, key: Key[Array, ""]):
         env_timestep = env.reset(key, params)
-        return Timestep.initial(
+        return TimeStep.initial(
             obs=_translate_obs(env_timestep.observation, params),
             state=env_timestep,
             info={},
@@ -139,7 +139,7 @@ def housemaze_wrapper(
             [StepType.FIRST, StepType.MID, StepType.LAST],
             default=-1,
         )
-        return Timestep(
+        return TimeStep(
             state=env_timestep,
             obs=_translate_obs(obs, params),
             # small negative reward to encourage short trajectories

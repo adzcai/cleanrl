@@ -68,9 +68,8 @@ from omegaconf import DictConfig, ListConfig, OmegaConf
 
 import wandb
 from utils.log_utils import dataclass, typecheck
-from wandb.sdk.wandb_run import Run
-
 from utils.structures import TDataclass
+from wandb.sdk.wandb_run import Run
 
 TConfig = TypeVar("TConfig", bound="Config", contravariant=True)
 
@@ -147,7 +146,7 @@ class CollectionConfig:
     """For episode rollouts."""
 
     total_transitions: int
-    num_timesteps: int
+    num_time_steps: int
     buffer_size_denominator: int | float
     """The time axis of the buffer is int(total_transitions / (num_envs * buffer_size_denominator)).
     i.e. throughout training, the buffer will be filled `buffer_size_denominator` times.
@@ -155,6 +154,16 @@ class CollectionConfig:
     num_envs: int  # more parallel data collection
     mcts_depth: int
     num_mcts_simulations: int  # stronger policy improvement
+
+    @property
+    def num_iters(self) -> int:
+        return self.total_transitions // (self.num_envs * self.num_time_steps)
+
+    @property
+    def buffer_time_axis(self) -> int:
+        return int(
+            self.total_transitions / (self.num_envs * self.buffer_size_denominator)
+        )
 
 
 @dataclass
@@ -215,7 +224,7 @@ class OptimConfig:
 
     num_minibatches: int  # number of gradient descent updates per iteration
     batch_size: int  # reduce gradient variance
-    num_timesteps: int
+    num_time_steps: int
     max_grad_norm: float
 
     # learning rate
@@ -238,7 +247,7 @@ class EvalConfig:
     """Evaluation of the learned policy and value function."""
 
     warnings: bool
-    num_timesteps: int
+    num_time_steps: int
     num_evals: int
     num_eval_envs: int
 
@@ -260,9 +269,16 @@ class TrainConfig(Config):
         return f"{self.env.name} {self.collection.total_transitions}"
 
     def validate(self):
-        if self.optim.num_timesteps <= 1 or self.eval.num_timesteps <= 1:
+        if self.optim.num_time_steps <= 1 or self.eval.num_time_steps <= 1:
             raise ValueError(
                 "Updates must use at least two timesteps for bootstrapping."
+            )
+        if (
+            self.optim.num_stairs
+            > self.collection.num_iters * self.optim.num_minibatches
+        ):
+            raise ValueError(
+                "Number of learning rate stairs must be less than the number of gradient updates."
             )
 
 

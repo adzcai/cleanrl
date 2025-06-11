@@ -4,8 +4,8 @@ import dm_env.specs as specs
 import jax.numpy as jnp
 from jaxtyping import Array, Integer
 
-from utils.structures import Environment, StepType, Timestep
 from utils.log_utils import dataclass
+from utils.structures import Environment, StepType, TimeStep
 
 
 @dataclass
@@ -15,7 +15,7 @@ class Params:
 
 
 def dummy_reset(params: Params, *, key):
-    return Timestep.initial(
+    return TimeStep.initial(
         obs=jnp.zeros((1,)),
         state=jnp.int_(0),
         info={},
@@ -25,8 +25,8 @@ def dummy_reset(params: Params, *, key):
 def dummy_step(env_state, action, params: Params, *, key):
     env_state = env_state + 1
     terminal = env_state >= params.max_horizon
-    return Timestep(
-        obs=jnp.zeros((1,)),
+    return TimeStep(
+        obs=jnp.full((1,), env_state, dtype=float),
         state=env_state,
         reward=jnp.float_(1.0),
         discount=1.0 - terminal,
