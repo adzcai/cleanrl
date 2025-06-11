@@ -2,10 +2,10 @@
 
 import dataclasses as dc
 import functools as ft
+import importlib.util
 import math
 import sys
 from collections.abc import Callable
-from pathlib import Path
 from typing import Annotated as Batched
 from typing import NamedTuple
 
@@ -1058,4 +1058,8 @@ def make_train(config: TrainConfig):
 
 
 if __name__ == "__main__":
-    main(TrainConfig, make_train, Path(__file__).name)
+    spec = importlib.util.find_spec("experiments.muzero")
+    if spec and spec.origin:
+        main(TrainConfig, make_train, spec.origin)
+    else:
+        print("Could not find the path to the module.")

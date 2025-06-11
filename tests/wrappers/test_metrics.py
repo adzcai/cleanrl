@@ -5,8 +5,8 @@ import numpy.testing as npt
 import pytest
 
 from envs.dummy_env import make_dummy_env, simple_rollout
-from wrappers.metrics import metrics_wrapper
 from wrappers.auto_reset import auto_reset_wrapper
+from wrappers.metrics import metrics_wrapper
 
 
 def test_metrics_accumulates_and_resets(dummy_env_params):
