@@ -168,7 +168,7 @@ class CollectionConfig:
 class ValueConfig:
     """For parameterizing value function."""
 
-    num_value_bins: int | Literal["scalar"]
+    num_value_bins: int
     min_value: float
     max_value: float
 

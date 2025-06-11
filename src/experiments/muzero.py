@@ -432,23 +432,6 @@ class IterState(NamedTuple):
     target_params: MuZeroNetwork
 
 
-class LossStatistics(NamedTuple):
-    """Quantities computed for the loss."""
-
-    loss: Float[Array, ""]
-    # policy
-    mcts_entropy: Float[Array | chex.Array, " horizon"]
-    policy_entropy: Float[Array | chex.Array, " horizon"]
-    policy_logits: Float[Array, " horizon num_actions"]
-    policy_loss: Float[Array | chex.Array, " horizon"]
-    # value
-    value_logits: Float[Array, " horizon num_value_bins"]
-    target_value_logits: Float[Array, " horizon num_value_bins"]
-    bootstrapped_return: Float[Array, " horizon-1"]
-    value_loss: Float[Array | chex.Array, " horizon"]
-    td_error: Float[Array, " horizon"]
-
-
 # jit to ease debugging
 # @ft.partial(jax.jit, static_argnames=("net_static",))
 @ft.partial(jax.vmap, in_axes=(None, None, 0, None, None, None, None))
@@ -460,82 +443,59 @@ def loss_trajectory(
     value_cfg: ValueConfig,
     bootstrap_cfg: BootstrapConfig,
     loss_cfg: LossConfig,
-):
+) -> tuple[Float[Array, ""], dict[str, Float[Array, ""]]]:
     """MuZero loss.
 
     Here we align the targets at each timestep to maximize signal.
-    Expects the `txn_s.mcts_probs` to be the MCTS distribution from the target network.
+    The return values get logged to wandb.
     """
-    net = eqx.combine(params, net_static)
-    target_net = eqx.combine(target_params, net_static)
-
     # e.g. online_value_logits[i, j] is the array of predicted value logits at time i+j,
     # based on the observation at time i
     # o0 | a0 a1 ...
     # o1 | a1 a2 ...
     action_sh = roll_into_matrix(txn_s.action)
+    net = eqx.combine(params, net_static)
     _, (online_reward_sh, online_pred_sh) = jax.vmap(net.world_model_rollout)(
         txn_s.time_step.obs, action_sh
     )
-
-    # bootstrap target values
-    def predict(
-        obs: GoalObs,
-        action_s: Integer[Array, " horizon"],
-    ):
-        """Predict the value sequence from the target network."""
-        _, (_, target_pred_s) = target_net.world_model_rollout(obs, action_s)
-        value_s = value_cfg.logits_to_value(target_pred_s.value_logits)
-        return value_s, target_pred_s
-
-    boot_return_sh, target_pred_sh = bootstrap(predict, txn_s, bootstrap_cfg)
-
-    # value loss
-    # cross-entropy of value predictions on n-step bootstrapped returns of target network
-    online_value_sh = value_cfg.logits_to_value(online_pred_sh.value_logits)
-    boot_value_dist_sh = distrax.Categorical(
-        probs=value_cfg.value_to_probs(boot_return_sh)
-    )
-    online_value_dist_sh = distrax.Categorical(
-        logits=online_pred_sh.value_logits[:-1, :-1, :]
-    )
-    value_loss_sh = boot_value_dist_sh.cross_entropy(online_value_dist_sh)
-
-    # policy loss
-    # cross-entropy of policy predictions on MCTS action visit proportions
-    # replace terminal timesteps with uniform
-    mcts_probs_s: Float[Array, " horizon num_actions"] = jnp.where(
-        txn_s.time_step.is_last[:, jnp.newaxis],
-        jnp.ones_like(txn_s.mcts_probs) / txn_s.mcts_probs.shape[1],
-        txn_s.mcts_probs,
-    )
-    mcts_dist_sh = distrax.Categorical(probs=roll_into_matrix(mcts_probs_s))
-    online_policy_dist_sh = distrax.Categorical(logits=online_pred_sh.policy_logits)
-    policy_loss_sh = mcts_dist_sh.cross_entropy(online_policy_dist_sh)
-
-    # reward model loss
-    # online_reward[i, j] is the reward obtained from *acting in* state i+j
-    # while reward_rolled[i, j] is the reward obtained upon *entering* state i+j
-    reward_sh = roll_into_matrix(txn_s.time_step.reward[1:])
-    reward_dist_sh = distrax.Categorical(probs=value_cfg.value_to_probs(reward_sh))
-    online_reward_dist_sh = distrax.Categorical(logits=online_reward_sh[:-1, :-1])
-    reward_loss_sh = reward_dist_sh.cross_entropy(online_reward_dist_sh)
+    del net
 
     # top left triangle of matrix
+    # multiplying by mask accounts for multiple-counting timesteps
+    # and taking the mean averages across the horizon
     horizon = txn_s.action.size
     axis_s = jnp.arange(horizon)
     mask_sh = axis_s[:, jnp.newaxis] + axis_s[jnp.newaxis, :]
     mask_sh = horizon - mask_sh
     mask_sh = mask_sh / (mask_sh.sum(where=mask_sh > 0, keepdims=True))
 
-    # multiplying by mask accounts for multiple-counting timesteps
-    # and taking the mean averages across the horizon
-    policy_loss = jnp.mean(policy_loss_sh * mask_sh, where=mask_sh > 0)
-    value_loss = jnp.mean(
-        value_loss_sh * mask_sh[:-1, :-1], where=mask_sh[:-1, :-1] > 0
+    def weighted_mean(
+        x: Float[chex.Array, " horizon horizon"],
+        mask: Float[Array, " horizon horizon"],
+    ) -> Float[Array, ""]:
+        """Compute the mean of the upper triangle of a matrix."""
+        return jnp.mean(x * mask, where=mask > 0)
+
+    policy_loss, policy_stats = compute_policy_loss(
+        txn_s.mcts_probs,
+        online_pred_sh.policy_logits,
+        weighted_mean=ft.partial(weighted_mean, mask=mask_sh),
     )
-    reward_loss = jnp.mean(
-        reward_loss_sh * mask_sh[:-1, :-1], where=mask_sh[:-1, :-1] > 0
+    target_net = eqx.combine(target_params, net_static)
+    value_loss, value_stats = compute_value_loss(
+        target_net,
+        txn_s,
+        value_logits_sh=online_pred_sh.value_logits,
+        weighted_mean=ft.partial(weighted_mean, mask=mask_sh[:-1, :-1]),
+        value_cfg=value_cfg,
+        bootstrap_cfg=bootstrap_cfg,
+    )
+    del target_net
+    reward_loss, reward_stats = compute_reward_loss(
+        txn_s.time_step.reward,
+        online_reward_sh,
+        value_cfg=value_cfg,
+        weighted_mean=ft.partial(weighted_mean, mask=mask_sh[:-1, :-1]),
     )
 
     loss = (
@@ -544,24 +504,129 @@ def loss_trajectory(
         + loss_cfg.reward_coef * reward_loss
     )
 
-    # logging
-    return loss, tree_slice(
-        LossStatistics(
-            loss=loss[jnp.newaxis],
-            # policy
-            mcts_entropy=mcts_dist_sh.entropy(),
-            policy_entropy=online_policy_dist_sh.entropy(),
-            policy_logits=online_pred_sh.policy_logits,
-            policy_loss=policy_loss_sh,
-            # value
-            value_logits=online_pred_sh.value_logits,
-            target_value_logits=target_pred_sh.value_logits,
-            bootstrapped_return=boot_return_sh,
-            value_loss=value_loss_sh,
-            td_error=boot_return_sh - online_value_sh[:-1, :-1],
-        ),
-        0,
+    return (
+        loss,
+        dict(
+            loss=loss,
+            policy_loss=policy_loss,
+            value_loss=value_loss,
+            reward_loss=reward_loss,
+        )
+        | policy_stats
+        | value_stats
+        | reward_stats,
     )
+
+
+def compute_value_loss(
+    target_net: MuZeroNetwork,
+    txn_s: Batched[Transition, " horizon"],
+    value_logits_sh: Float[Array, " horizon horizon num_value_bins"],
+    weighted_mean: Callable[[Float[chex.Array, " horizon horizon"]], Float[Array, ""]],
+    value_cfg: ValueConfig,
+    bootstrap_cfg: BootstrapConfig,
+):
+    """Compute the value loss.
+
+    The cross-entropy of the value predictions
+    on n-step bootstrapped returns of the target network.
+    """
+
+    def predict(
+        obs: GoalObs,
+        action_s: Integer[Array, " horizon"],
+    ):
+        """Predict the value sequence from the target network."""
+        _, (_, target_pred_s) = target_net.world_model_rollout(obs, action_s)
+        value_s = value_cfg.logits_to_value(target_pred_s.value_logits)
+        return value_s
+
+    boot_value_sh = bootstrap(predict, txn_s, bootstrap_cfg)
+    boot_value_dist_sh = distrax.Categorical(
+        probs=value_cfg.value_to_probs(boot_value_sh)
+    )
+    online_value_dist_sh = distrax.Categorical(logits=value_logits_sh[:-1, :-1, :])
+    value_loss = weighted_mean(boot_value_dist_sh.cross_entropy(online_value_dist_sh))  # type: ignore
+
+    # statistics
+    online_value_sh = value_cfg.logits_to_value(value_logits_sh)[:-1, :-1]
+    value_stats = dict(
+        online_value_entropy=online_value_dist_sh.entropy(),
+        online_value=online_value_sh,
+        bootstrapped_value_entropy=boot_value_dist_sh.entropy(),
+        bootstrapped_value=boot_value_sh,
+        td_error=boot_value_sh - online_value_sh,
+    )
+
+    return value_loss, jax.tree.map(weighted_mean, value_stats)
+
+
+def compute_policy_loss(
+    mcts_probs_s: Float[Array, " horizon num_actions"],
+    policy_logits_sh: Float[Array, " horizon horizon num_actions"],
+    weighted_mean: Callable[[Float[chex.Array, " horizon horizon"]], Float[Array, ""]],
+):
+    """Compute the policy loss.
+
+    The cross-entropy of the policy predictions on MCTS action visit proportions.
+    Expects `mcts_probs_s` to be the MCTS distribution from the target network
+    or the uniform distribution for the last step.
+    """
+
+    mcts_dist_sh = distrax.Categorical(probs=roll_into_matrix(mcts_probs_s))
+    online_policy_dist_sh = distrax.Categorical(logits=policy_logits_sh)
+    policy_loss = weighted_mean(mcts_dist_sh.cross_entropy(online_policy_dist_sh))
+
+    policy_stats = dict(
+        mcts_entropy=mcts_dist_sh.entropy(),
+        policy_entropy=online_policy_dist_sh.entropy(),
+    )
+
+    return policy_loss, jax.tree.map(weighted_mean, policy_stats)
+
+
+def compute_reward_loss(
+    reward_s: Float[Array, " horizon"],
+    online_reward_sh: Float[Array, " horizon horizon num_value_bins"],
+    value_cfg: ValueConfig,
+    weighted_mean: Callable[[Float[chex.Array, " horizon horizon"]], Float[Array, ""]],
+):
+    """Compute the reward loss.
+
+    The cross-entropy of the reward predictions on the rewards obtained from experience.
+    """
+    # careful for off-by-one:
+    # online_reward[i, j] is the reward obtained from *acting in* state i+j
+    # while reward_rolled[i, j] is the reward obtained upon *entering* state i+j
+    reward_sh = roll_into_matrix(reward_s[1:])
+    reward_dist_sh = distrax.Categorical(probs=value_cfg.value_to_probs(reward_sh))
+    online_reward_dist_sh = distrax.Categorical(logits=online_reward_sh[:-1, :-1])
+    reward_loss_sh = reward_dist_sh.cross_entropy(online_reward_dist_sh)
+
+    reward_stats = dict(reward_entropy=online_reward_dist_sh.entropy())
+
+    return weighted_mean(reward_loss_sh), jax.tree.map(weighted_mean, reward_stats)
+
+
+def get_static(config: TrainConfig):
+    # construct environment
+    env, env_params = make_env(config.env)
+    action_space: specs.DiscreteArray = env.action_space(env_params)
+    num_actions = action_space.num_values
+    num_goals = env.goal_space(env_params).num_values
+
+    net = MuZeroNetwork(
+        config=config.arch,
+        obs_spec=env.observation_space(env_params),
+        num_actions=num_actions,
+        num_value_bins=config.value.num_value_bins,
+        num_goals=num_goals,
+        world_model_gradient_scale=config.optim.world_model_gradient_scale,
+        key=jr.key(0),
+    )
+    _, net_static = eqx.partition(net, eqx.is_inexact_array)
+
+    return env, env_params, net_static
 
 
 def make_train(config: TrainConfig):
@@ -603,10 +668,6 @@ def make_train(config: TrainConfig):
     )
     buffer = PrioritizedBuffer.new(**buffer_args)
 
-    assert (num_value_bins := config.value.num_value_bins) != "scalar", (
-        "num_value_bins must be a dict with value parameters"
-    )
-
     if False:
 
         def get_invalid_actions(
@@ -640,21 +701,21 @@ def make_train(config: TrainConfig):
         yaml.safe_dump(buffer_args, sys.stdout)
         print("=" * 25)
 
-        init_timestep_b = env_reset_b(
-            env_params, key=jr.split(key_reset, config.collection.num_envs)
-        )
         # initialize all state
         init_net = MuZeroNetwork(
             config=config.arch,
             obs_spec=env.observation_space(env_params),
             num_actions=num_actions,
-            num_value_bins=num_value_bins,
+            num_value_bins=config.value.num_value_bins,
             num_goals=num_goals,
             world_model_gradient_scale=config.optim.world_model_gradient_scale,
             key=key_net,
         )
-
         init_params, net_static = eqx.partition(init_net, eqx.is_inexact_array)
+
+        init_timestep_b = env_reset_b(
+            env_params, key=jr.split(key_reset, config.collection.num_envs)
+        )
         init_transition = Transition(
             time_step=tree_slice(init_timestep_b, 0),
             action=jnp.empty((), action_dtype),
@@ -733,12 +794,21 @@ def make_train(config: TrainConfig):
                 txn_bs: Batched[Transition, " batch_size horizon"] = batch.experience
 
                 # "reanalyze" the policy targets via mcts with target parameters
-                _, mcts_out = jax.vmap(act_mcts, in_axes=(None, 1), out_axes=1)(
+                # predict uniform distribution for the last step
+                mcts_probs_bs = jax.vmap(act_mcts, in_axes=(None, 1), out_axes=1)(
                     eqx.combine(iter_state.target_params, net_static),
                     txn_bs.time_step.obs,
                     key=jr.split(key_reanalyze, config.optim.num_time_steps),
+                )[1].action_weights
+                txn_bs = txn_bs._replace(
+                    mcts_probs=jnp.where(
+                        # TODO this should be for terminal states not truncated
+                        # jnp.isclose(txn_bs.time_step.discount, 0.0),
+                        txn_bs.time_step.is_last[..., jnp.newaxis],
+                        jnp.ones(num_actions) / num_actions,
+                        mcts_probs_bs,
+                    )
                 )
-                txn_bs = txn_bs._replace(mcts_probs=mcts_out.action_weights)
 
                 if False:
 
@@ -785,7 +855,7 @@ def make_train(config: TrainConfig):
 
                 (_, aux), grads = loss_grad(param_state.params)
                 # value_and_grad drops types
-                aux: Batched[LossStatistics, " batch_size"]
+                aux: dict[str, Float[Array, " batch_size"]]
                 grads: MuZeroNetwork
                 updates, opt_state = optim.update(
                     grads,
@@ -804,10 +874,7 @@ def make_train(config: TrainConfig):
 
                 # Get the current learning rate from the optimizer
                 log_values(
-                    {
-                        f"train/mean_{key}": jnp.mean(value)
-                        for key, value in aux._asdict().items()
-                    }
+                    {f"train/{key}": jnp.mean(value) for key, value in aux.items()}
                     | get_norm_data(updates, "updates/norm")
                     | get_norm_data(params, "params/norm")
                     | {"train/lr": opt_state[1].hyperparams["learning_rate"]}  # type: ignore

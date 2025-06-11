@@ -1,6 +1,7 @@
-import jax
+import equinox as eqx
 import jax.numpy as jnp
 import jax.random as jr
+import numpy.testing as npt
 import pytest
 
 from experiments import muzero
@@ -9,7 +10,6 @@ from experiments.config import (
     dict_to_dataclass,
     get_args,
 )
-from utils.structures import GoalObs
 
 
 @pytest.mark.parametrize("max_horizon", [3, 5])
@@ -18,31 +18,22 @@ def test_muzero_learns_value_on_dummy_env(max_horizon):
     config = get_args(["src/configs/dummy.yaml"])
     config = dict_to_dataclass(TrainConfig, config)
     train_fn = muzero.make_train(config)
-    key = jr.key(config.seed)
+    env, env_params, net_static = muzero.get_static(config)
+    key_train, key_reset = jr.split(jr.key(config.seed), 2)
 
-    final_iter_state, _ = train_fn(key)
+    final_iter_state, _ = train_fn(key_train)
 
     # Get trained params and net
     params = final_iter_state.param_state.params
-    net_static = params  # eqx.partition not needed for dummy
-    # Evaluate value prediction at initial state
+    net = eqx.combine(params, net_static)
+    del params, net_static
 
-    dummy_obs = jnp.int_(0)
-    dummy_goal = jnp.int_(0)
-    goal_obs = GoalObs(obs=dummy_obs, goal=dummy_goal)
-    # The value function should predict close to max_horizon (all rewards are 1)
-    pred = params.actor_critic(
-        params.world_model.init_hidden_dyn(), params.embed_goal(dummy_goal)
-    )
-    # Convert logits to value
-    value = jax.nn.softmax(pred.value_logits)
-    # Weighted sum over bins
-    bin_vals = jnp.linspace(
-        config.value.min_value, config.value.max_value, config.value.num_value_bins
-    )
-    pred_value = (value * bin_vals).sum()
-    assert pred_value > max_horizon - 1, (
-        f"Predicted value {pred_value} too low for horizon {max_horizon}"
+    ts = env.reset(env_params, key=key_reset)
+    _, (reward_s, pred_s) = net.step(ts.obs, jnp.zeros((1,), dtype=int))
+
+    npt.assert_allclose(
+        pred_s.value_logits,
+        jnp.array([1.0, 0.0]),
     )
 
 
