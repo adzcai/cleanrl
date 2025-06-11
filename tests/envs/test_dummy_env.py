@@ -3,7 +3,7 @@ import jax.numpy as jnp
 import jax.random as jr
 import numpy.testing as npt
 
-from testing.dummy_env import simple_rollout
+from envs.dummy_env import simple_rollout
 from utils.structures import SENTINEL, StepType, TimeStep
 
 

@@ -15,7 +15,7 @@ env:
 collection:
   total_transitions: 50
   num_time_steps: 2
-  buffer_size_denominator: 2
+  num_buffer_fills: 2
   num_envs: 1
   mcts_depth: 1
   num_mcts_simulations: 1
@@ -28,23 +28,27 @@ value:
 bootstrap:
   discount: 0.99
   lambda_gae: 0.95
-  target_update_freq: 2
-  target_update_size: 1
 
 optim:
   num_minibatches: 2
   batch_size: 1
   num_time_steps: 2
+  max_grad_norm: 2.0
+  target_update_freq: 2
+  target_update_size: 1
+  world_model_gradient_scale: 0.5
+  priority_exponent: 0.8
+  importance_exponent: 0.0
+
+loss:
+  value_coef: 1
+  reward_coef: 0
+
+lr:
   lr_init: 0.1
   warmup_frac: 0.1
   decay_rate: 0.8
   num_stairs: 2
-  max_grad_norm: 2.0
-  value_coef: 1
-  reward_coef: 0
-  world_model_gradient_scale: 0.5
-  priority_exponent: 0.8
-  importance_exponent: 0.0
 
 eval:
   warnings: False

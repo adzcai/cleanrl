@@ -1,7 +1,7 @@
 import pytest
 
-from testing.dummy_env import make_dummy_env
-from testing.pytree_env import make_pytree_env
+from envs.dummy_env import make_dummy_env
+from envs.pytree_env import make_pytree_env
 
 
 @pytest.fixture(params=(1, 2, 5))

@@ -15,7 +15,7 @@
                 "JAX_DISABLE_JIT": "True"
             },
             "args": [
-                "${workspaceFolder}/tests/experiments/test_muzero_dummy.yaml"
+                "${workspaceFolder}/src/configs/dummy.yaml"
             ]
         }
     ]

@@ -4,7 +4,7 @@ import pytest
 import jax.random as jr
 import numpy.testing as npt
 
-from src.testing.dummy_env import make_dummy_env, simple_rollout
+from envs.dummy_env import make_dummy_env, simple_rollout
 from src.wrappers.metrics import metrics_wrapper
 from wrappers.auto_reset import auto_reset_wrapper
 

@@ -4,7 +4,7 @@ import jax.random as jr
 import numpy as np
 import pytest
 
-from testing.pytree_env import Observation
+from envs.pytree_env import Observation
 from wrappers.flatten_observation import flatten_observation_wrapper
 
 

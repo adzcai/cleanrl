@@ -7,7 +7,7 @@ from jaxtyping import Array, Float, Integer, Key
 
 from envs.multi_catch import BaseObs, make_multi_catch
 from experiments.config import BootstrapConfig
-from testing.dummy_env import make_dummy_env, simple_rollout
+from envs.dummy_env import make_dummy_env, simple_rollout
 from utils.rl_utils import bootstrap, roll_into_matrix
 from utils.structures import GoalObs, Prediction, TimeStep, Transition
 from wrappers.auto_reset import auto_reset_wrapper

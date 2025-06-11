@@ -23,7 +23,7 @@ from jaxtyping import Array, Float, Key, PyTree
 
 from envs.multi_catch import make_multi_catch, visualize_catch
 from experiments.config import EnvConfig
-from testing.dummy_env import Params, make_dummy_env
+from envs.dummy_env import Params, make_dummy_env
 from wrappers.auto_reset import auto_reset_wrapper
 from wrappers.flatten_observation import flatten_observation_wrapper
 from wrappers.goal_wrapper import goal_wrapper
@@ -137,6 +137,7 @@ def make_env(env_config: EnvConfig, goal=True) -> tuple[Environment, Any]:
             if goal:
                 env = goal_wrapper(env)
             env = metrics_wrapper(env)
+            env = auto_reset_wrapper(env)
 
     if env is None:
         raise ValueError(

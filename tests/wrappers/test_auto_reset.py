@@ -2,7 +2,7 @@ import jax.numpy as jnp
 import jax.random as jr
 import numpy.testing as npt
 
-from testing.dummy_env import Params
+from envs.dummy_env import Params
 from wrappers.auto_reset import PrevDone, auto_reset_wrapper
 
 

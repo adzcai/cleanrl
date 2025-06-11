@@ -15,7 +15,7 @@ from utils.structures import GoalObs
 @pytest.mark.parametrize("max_horizon", [3, 5])
 def test_muzero_learns_value_on_dummy_env(max_horizon):
     # Setup
-    config = get_args(["tests/experiments/test_muzero_dummy.yaml"])
+    config = get_args(["src/configs/dummy.yaml"])
     config = dict_to_dataclass(TrainConfig, config)
     train_fn = muzero.make_train(config)
     key = jr.key(config.seed)
