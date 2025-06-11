@@ -27,7 +27,9 @@ def flatten_observation_wrapper(
         timestep.obs = _flatten(timestep.obs)
         return timestep
 
-    def step(state: TEnvState, action: TAction, params: TEnvParams, *, key: Key[Array, ""]):
+    def step(
+        state: TEnvState, action: TAction, params: TEnvParams, *, key: Key[Array, ""]
+    ):
         timestep = env.step(state, action, params, key=key)
         timestep.obs = _flatten(timestep.obs)
         return timestep

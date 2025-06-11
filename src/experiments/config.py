@@ -161,9 +161,7 @@ class CollectionConfig:
 
     @property
     def buffer_time_axis(self) -> int:
-        return int(
-            self.total_transitions / (self.num_envs * self.num_buffer_fills)
-        )
+        return int(self.total_transitions / (self.num_envs * self.num_buffer_fills))
 
 
 @dataclass

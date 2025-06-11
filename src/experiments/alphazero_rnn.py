@@ -23,16 +23,13 @@ import jax
 import jax.numpy as jnp
 import jax.random as jr
 import matplotlib
-import matplotlib.pyplot as plt
 import mctx
 import optax
 import rlax
 import yaml
 from beartype import beartype as typechecker
 from jaxtyping import Array, Bool, Float, Integer, Key, jaxtyped
-from matplotlib.axes import Axes
 
-import wandb
 from envs.multi_catch import visualize_catch
 from envs.translate import make_env
 from experiments.config import ArchConfig, TrainConfig, main

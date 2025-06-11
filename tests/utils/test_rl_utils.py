@@ -1,15 +1,14 @@
-import jax
 import jax.numpy as jnp
 import jax.random as jr
 import numpy as np
 import numpy.testing as npt
-from jaxtyping import Array, Float, Integer, Key
+from jaxtyping import Array, Integer
 
+from envs.dummy_env import simple_rollout
 from envs.multi_catch import BaseObs, make_multi_catch
 from experiments.config import BootstrapConfig
-from envs.dummy_env import make_dummy_env, simple_rollout
 from utils.rl_utils import bootstrap, roll_into_matrix
-from utils.structures import GoalObs, Prediction, TimeStep, Transition
+from utils.structures import GoalObs, Prediction, Transition
 from wrappers.auto_reset import auto_reset_wrapper
 
 

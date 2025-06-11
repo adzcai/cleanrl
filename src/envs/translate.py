@@ -21,9 +21,9 @@ import jax.numpy as jnp
 import jax.random as jr
 from jaxtyping import Array, Float, Key, PyTree
 
+from envs.dummy_env import make_dummy_env
 from envs.multi_catch import make_multi_catch, visualize_catch
 from experiments.config import EnvConfig
-from envs.dummy_env import Params, make_dummy_env
 from wrappers.auto_reset import auto_reset_wrapper
 from wrappers.flatten_observation import flatten_observation_wrapper
 from wrappers.goal_wrapper import goal_wrapper

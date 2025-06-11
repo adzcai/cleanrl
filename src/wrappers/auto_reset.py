@@ -13,26 +13,27 @@ from utils.structures import (
     Environment,
     TAction,
     TEnvParams,
+    TEnvState,
     TimeStep,
     TObs,
     Wrapper,
 )
-from wrappers.metrics import TEnvStateDC
 
 
 @dataclass
-class PrevDone(Wrapper[TEnvStateDC]):
+class PrevDone(Wrapper[TEnvState]):
     """We follow the dm_env convention of returning terminal states.
 
-    Note that the TimeStep object has an is_last property but not necessarily each environment state.
+    Note that the TimeStep object has an is_last property
+    but not necessarily each environment state.
     """
 
     is_last: Bool[Array, ""]
 
 
 def auto_reset_wrapper(
-    env: Environment[TObs, TEnvStateDC, TAction, TEnvParams],
-) -> Environment[TObs, PrevDone[TEnvStateDC], TAction, TEnvParams]:
+    env: Environment[TObs, TEnvState, TAction, TEnvParams],
+) -> Environment[TObs, PrevDone[TEnvState], TAction, TEnvParams]:
     """Automatically reset the environment after an episode."""
 
     def reset(params: TEnvParams, *, key: Key[Array, ""]):
@@ -43,7 +44,7 @@ def auto_reset_wrapper(
         )
 
     def step(
-        env_state: PrevDone[TEnvStateDC],
+        env_state: PrevDone[TEnvState],
         action: TAction,
         params: TEnvParams,
         *,
@@ -52,7 +53,7 @@ def auto_reset_wrapper(
         key_reset, key_step = jr.split(key)
         timestep_reset = env.reset(params, key=key_reset)
         timestep_step = env.step(env_state._inner, action, params, key=key_step)
-        timestep: TimeStep[TObs, TEnvStateDC] = jax.tree.map(
+        timestep: TimeStep[TObs, TEnvState] = jax.tree.map(
             ft.partial(jnp.where, env_state.is_last),
             timestep_reset,
             timestep_step,

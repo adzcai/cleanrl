@@ -16,13 +16,11 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import jax.random as jr
-import matplotlib.pyplot as plt
 import mctx
 import optax
 import yaml
-from jaxtyping import Array, Bool, Float, Integer, Key, PyTree, UInt
+from jaxtyping import Array, Bool, Float, Integer, Key, PyTree
 
-import wandb
 from envs.housemaze import HouseMazeObs
 from envs.translate import make_env
 from experiments.config import (
@@ -44,9 +42,13 @@ from utils.log_utils import (
 )
 from utils.prioritized_buffer import BufferState, PrioritizedBuffer
 from utils.rl_utils import bootstrap, roll_into_matrix
-from utils.structures import Prediction, StepType, TEnvState, TimeStep, TObs, Transition
+from utils.structures import (
+    Prediction,
+    TimeStep,
+    TObs,
+    Transition,
+)
 from wrappers.goal_wrapper import GoalObs
-from wrappers.metrics import Metrics
 
 
 class MLPConcatArgs(eqx.nn.MLP):
@@ -601,9 +603,9 @@ def make_train(config: TrainConfig):
     )
     buffer = PrioritizedBuffer.new(**buffer_args)
 
-    assert (
-        num_value_bins := config.value.num_value_bins
-    ) != "scalar", "num_value_bins must be a dict with value parameters"
+    assert (num_value_bins := config.value.num_value_bins) != "scalar", (
+        "num_value_bins must be a dict with value parameters"
+    )
 
     if False:
 
@@ -786,7 +788,9 @@ def make_train(config: TrainConfig):
                 aux: Batched[LossStatistics, " batch_size"]
                 grads: MuZeroNetwork
                 updates, opt_state = optim.update(
-                    grads, param_state.opt_state, param_state.params  # type: ignore
+                    grads,
+                    param_state.opt_state,
+                    param_state.params,  # type: ignore
                 )
                 params: MuZeroNetwork = optax.apply_updates(param_state.params, updates)  # type: ignore
 

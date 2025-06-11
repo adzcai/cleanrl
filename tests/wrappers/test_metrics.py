@@ -1,8 +1,8 @@
 import jax
 import jax.numpy as jnp
-import pytest
 import jax.random as jr
 import numpy.testing as npt
+import pytest
 
 from envs.dummy_env import make_dummy_env, simple_rollout
 from src.wrappers.metrics import metrics_wrapper
@@ -63,7 +63,6 @@ def test_metrics_increments_each_step():
 
 
 def test_metrics_wrapper_outside_auto_reset_raises(pytree_env):
-    """Test that putting metrics_wrapper outside auto_reset_wrapper raises an error or fails."""
     with pytest.raises(ValueError):
         wrapped_env = auto_reset_wrapper(pytree_env)
         wrapped_env = metrics_wrapper(wrapped_env)
@@ -71,4 +70,3 @@ def test_metrics_wrapper_outside_auto_reset_raises(pytree_env):
     # correct order should not raise an error
     wrapped_env = metrics_wrapper(pytree_env)
     wrapped_env = auto_reset_wrapper(wrapped_env)
-

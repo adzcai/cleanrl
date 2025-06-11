@@ -1,5 +1,3 @@
-import dm_env.specs as specs
-import jax.numpy as jnp
 import jax.random as jr
 import numpy as np
 import pytest

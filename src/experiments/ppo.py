@@ -111,7 +111,9 @@ def make_train(config: Config):
         optax.adamw(lr, eps=1e-5),
     )
 
-    tx_pair = rlax.twohot_pair(config.min_value, config.max_value, config.num_value_bins)
+    tx_pair = rlax.twohot_pair(
+        config.min_value, config.max_value, config.num_value_bins
+    )
 
     def train(key: jr.PRNGKey):
         key_net, key_reset, key_iterate = jr.split(key, 3)
@@ -160,12 +162,16 @@ def make_train(config: Config):
                 key: jr.PRNGKey,
             ):
                 idx = jr.randint(key, config.batch_size, 0, config.num_envs)
-                batch = jax.tree.map(lambda x: x[idx], (trajectories, advantages, value_targets))
+                batch = jax.tree.map(
+                    lambda x: x[idx], (trajectories, advantages, value_targets)
+                )
 
                 @ft.partial(jax.value_and_grad, has_aux=True)
                 def loss_fn(params: Network):
                     net = eqx.combine(params, net_static)
-                    losses, aux = jax.vmap(loss_trajectory, (None, 0, 0, 0))(net, *batch)
+                    losses, aux = jax.vmap(loss_trajectory, (None, 0, 0, 0))(
+                        net, *batch
+                    )
                     return jnp.mean(losses), aux
 
                 loss_aux, grads = loss_fn(params_state.params)
@@ -194,7 +200,9 @@ def make_train(config: Config):
     def rollout(net: Network, init_rollout_state: RolloutState, key: jr.PRNGKey):
         """Collect a single trajectory."""
 
-        @ft.partial(jax.lax.scan, init=init_rollout_state, xs=jr.split(key, config.horizon))
+        @ft.partial(
+            jax.lax.scan, init=init_rollout_state, xs=jr.split(key, config.horizon)
+        )
         def rollout_step(rollout_state: RolloutState, key: jr.PRNGKey):
             key_action, key_step = jr.split(key)
             preds = net(rollout_state.obs)
@@ -233,7 +241,9 @@ def make_train(config: Config):
         # policy
         idx = (jnp.arange(config.horizon), trajectory.action)
         ratios = jnp.exp(preds.logits[idx] - trajectory.out.logits[idx])
-        policy_loss = rlax.clipped_surrogate_pg_loss(ratios, advantages, config.clip_eps)
+        policy_loss = rlax.clipped_surrogate_pg_loss(
+            ratios, advantages, config.clip_eps
+        )
 
         # value
         value_losses = rlax.categorical_cross_entropy(
@@ -249,7 +259,9 @@ def make_train(config: Config):
         entropy_loss = rlax.entropy_loss(preds.logits, jnp.ones(config.horizon))
 
         return (
-            policy_loss + config.value_coef * value_loss + config.entropy_coef * entropy_loss
+            policy_loss
+            + config.value_coef * value_loss
+            + config.entropy_coef * entropy_loss
         ), {
             "train/td_error": td_error,
             "train/value_loss": value_loss,
@@ -271,6 +283,8 @@ if __name__ == "__main__":
             out = train_jit(jr.PRNGKey(0))
             jax.block_until_ready(out)
     else:
-        with wandb.init(project="jax-rl", config=config._asdict(), tags=["ppo", "categorical"]):
+        with wandb.init(
+            project="jax-rl", config=config._asdict(), tags=["ppo", "categorical"]
+        ):
             out = train_jit(jr.PRNGKey(0))
             jax.block_until_ready(out)

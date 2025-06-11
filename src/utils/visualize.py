@@ -7,7 +7,6 @@ import jax.numpy as jnp
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 import mctx
-import rlax
 from jaxtyping import Array, Float
 from matplotlib.axes import Axes
 

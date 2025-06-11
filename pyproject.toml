@@ -38,5 +38,5 @@ optax = { git = "https://github.com/google-deepmind/optax.git" }
 housemaze = { git = "https://github.com/adzcai/JaxHouseMaze.git" }
 
 [tool.ruff.lint]
-select = [ "I" ]
+select = [ "E", "F", "I" ]
 ignore = ["F722"]

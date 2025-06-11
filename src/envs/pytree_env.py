@@ -41,8 +41,12 @@ def step(env_state: int, action, params, *, key):
 
 def observation_space(params):
     return Observation(
-        a=specs.BoundedArray(shape=(3,), dtype=jnp.float32, minimum=0.0, maximum=100.0, name="a"),  # type: ignore
-        b=specs.BoundedArray(shape=(2, 2), dtype=jnp.float32, minimum=0.0, maximum=100.0, name="b"),  # type: ignore
+        a=specs.BoundedArray(
+            shape=(3,), dtype=jnp.float32, minimum=0.0, maximum=100.0, name="a"
+        ),  # type: ignore
+        b=specs.BoundedArray(
+            shape=(2, 2), dtype=jnp.float32, minimum=0.0, maximum=100.0, name="b"
+        ),  # type: ignore
         scalar=specs.BoundedArray(
             shape=(),
             dtype=jnp.float32,

@@ -2,7 +2,6 @@ import jax
 import jax.numpy as jnp
 import numpy.testing as npt
 import pytest
-from jaxtyping import PyTree
 
 from utils.prioritized_buffer import PrioritizedBuffer
 
@@ -101,9 +100,9 @@ def test_multiple_priority_updates(buffer, dummy_experience):
         # After each update, root should be sum of all priorities
         root_val = state.priority_state.nodes[0]
         expected_sum = priorities.sum()
-        assert jnp.isclose(
-            root_val, expected_sum
-        ), f"Cycle {i}: Root {root_val}, sum {expected_sum}"
+        assert jnp.isclose(root_val, expected_sum), (
+            f"Cycle {i}: Root {root_val}, sum {expected_sum}"
+        )
         # Max priority should be updated
         assert jnp.isclose(state.priority_state.max_priority, float(i))
 

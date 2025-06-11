@@ -31,8 +31,12 @@ if TYPE_CHECKING:
     from _typeshed import DataclassInstance
 
     TDataclass = TypeVar("TDataclass", bound="DataclassInstance")
+    TEnvState = TypeVar("TEnvState", bound="DataclassInstance")
+    TEnvParams = TypeVar("TEnvParams", bound="DataclassInstance", contravariant=True)
 else:
     TDataclass = TypeVar("TDataclass")
+    TEnvState = TypeVar("TEnvState")
+    TEnvParams = TypeVar("TEnvParams", contravariant=True)
 
 
 try:
@@ -50,10 +54,8 @@ except ImportError:
     NAVIX_INSTALLED = False
 
 P = ParamSpec("P")
-TEnvState = TypeVar("TEnvState")
 TObs = TypeVar("TObs")
 TAction = TypeVar("TAction", contravariant=True)
-TEnvParams = TypeVar("TEnvParams", contravariant=True)
 
 
 class StepType(IntEnum):

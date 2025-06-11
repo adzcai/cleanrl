@@ -1,10 +1,9 @@
-import jax
 import jax.numpy as jnp
 import jax.random as jr
 import numpy.testing as npt
 
 from envs.dummy_env import simple_rollout
-from utils.structures import SENTINEL, StepType, TimeStep
+from utils.structures import SENTINEL, StepType
 
 
 def test_dummy_env(dummy_env_params):

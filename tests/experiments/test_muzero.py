@@ -41,9 +41,9 @@ def test_muzero_learns_value_on_dummy_env(max_horizon):
         config.value.min_value, config.value.max_value, config.value.num_value_bins
     )
     pred_value = (value * bin_vals).sum()
-    assert (
-        pred_value > max_horizon - 1
-    ), f"Predicted value {pred_value} too low for horizon {max_horizon}"
+    assert pred_value > max_horizon - 1, (
+        f"Predicted value {pred_value} too low for horizon {max_horizon}"
+    )
 
 
 @pytest.mark.skip(reason="Disabled for now")

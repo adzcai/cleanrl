@@ -1,6 +1,4 @@
 import dataclasses as dc
-import functools as ft
-from typing import TYPE_CHECKING, TypeVar
 
 import jax
 import jax.numpy as jnp
@@ -10,21 +8,12 @@ from utils.log_utils import dataclass
 from utils.structures import (
     Environment,
     TAction,
-    TDataclass,
+    TEnvParams,
+    TEnvState,
     TimeStep,
     TObs,
     Wrapper,
 )
-
-if TYPE_CHECKING:
-    from _typeshed import DataclassInstance
-
-    # redefine TEnvState and TEnvParams to be dataclasses
-    TEnvStateDC = TypeVar("TEnvState", bound="DataclassInstance")
-    TEnvParams = TypeVar("TEnvParams", bound="DataclassInstance")
-else:
-    TEnvStateDC = TypeVar("TEnvState")
-    TEnvParams = TypeVar("TEnvParams")
 
 
 @dataclass
@@ -32,7 +21,8 @@ class Metrics:
     """Stores episode length and return.
 
     Properties:
-        cum_return (Float ()): Cumulative undiscounted return including the reward obtained upon entering this timestep.
+        cum_return (Float ()): Cumulative undiscounted return
+            including the reward obtained upon entering this timestep.
         step (Integer ()): Number of steps taken before this timestep in the current episode.
     """
 
@@ -41,13 +31,13 @@ class Metrics:
 
 
 @dataclass
-class LogState(Wrapper[TDataclass]):
+class LogState(Wrapper[TEnvState]):
     metrics: Metrics
 
 
 def metrics_wrapper(
-    env: Environment[TObs, TEnvStateDC, TAction, TEnvParams],
-) -> Environment[TObs, LogState[TEnvStateDC], TAction, TEnvParams]:
+    env: Environment[TObs, TEnvState, TAction, TEnvParams],
+) -> Environment[TObs, LogState[TEnvState], TAction, TEnvParams]:
     """Log interactions and episode rewards.
 
     Ensure this goes inside any auto reset wrappers
@@ -68,7 +58,7 @@ def metrics_wrapper(
 
     def reset(
         params: TEnvParams, *, key: Key[Array, ""]
-    ) -> TimeStep[TObs, LogState[TEnvStateDC]]:
+    ) -> TimeStep[TObs, LogState[TEnvState]]:
         time_step = env.reset(params, key=key)
         return dc.replace(
             time_step,
@@ -76,12 +66,12 @@ def metrics_wrapper(
         )  # type: ignore
 
     def step(
-        state: LogState[TEnvStateDC],
+        state: LogState[TEnvState],
         action: TAction,
         params: TEnvParams,
         *,
         key: Key[Array, ""],
-    ) -> TimeStep[TObs, LogState[TEnvStateDC]]:
+    ) -> TimeStep[TObs, LogState[TEnvState]]:
         time_step = env.step(state._inner, action, params, key=key)
         metrics = jax.tree.map(
             lambda init, updated: jnp.where(time_step.is_first, init, updated),
