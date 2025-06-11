@@ -12,14 +12,14 @@ from wrappers.metrics import metrics_wrapper
 def test_metrics_accumulates_and_resets(dummy_env_params):
     # Create dummy env with horizon 3
     env, params = dummy_env_params
+    env = metrics_wrapper(env)
     env = auto_reset_wrapper(env)
-    wrapped_env = metrics_wrapper(env)
 
     key1, key2 = jr.split(jr.key(0))
 
     # Take a single rollout
     ts_seq = simple_rollout(
-        wrapped_env, params, action=None, horizon=params.max_horizon, key=key1
+        env, params, action=None, horizon=params.max_horizon, key=key1
     )
     npt.assert_array_equal(
         ts_seq.state.metrics.cum_return, jnp.arange(params.max_horizon + 1)
@@ -30,7 +30,7 @@ def test_metrics_accumulates_and_resets(dummy_env_params):
 
     # Reset and rollout again: metrics should start from zero
     ts_seq2 = simple_rollout(
-        wrapped_env, params, action=None, horizon=2 * params.max_horizon + 1, key=key2
+        env, params, action=None, horizon=2 * params.max_horizon + 1, key=key2
     )
     # first trajectory
     npt.assert_array_equal(

@@ -31,8 +31,9 @@ def test_goal_wrapper_reset_and_step(dummy_env_params, wrapped):
 
 
 def test_goal_wrapper_observation_space(dummy_env_params, wrapped):
+    _, params = dummy_env_params
     # Should be a list: [original_space, DiscreteArraySpec]
-    obs_space = wrapped.observation_space(dummy_env_params[1])
+    obs_space = wrapped.observation_space(params)
     assert isinstance(obs_space, list)
     assert obs_space[1].num_values == 1
     assert getattr(obs_space[1], "name", None) == "goal"

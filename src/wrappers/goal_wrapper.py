@@ -59,10 +59,15 @@ def goal_wrapper(
             state=GoalState(_inner=timestep.state, goal=state.goal),
         )  # type: ignore
 
+    def observation_space(params: TEnvParams):
+        space = env.observation_space(params)
+        return [space, DiscreteArraySpec(1, name="goal")]
+
     return Wrapper.overwrite(
         env,
         name="goal_wrapper",
         step=step,
         reset=reset,
         goal_space=lambda params: DiscreteArraySpec(1, name="goal"),
+        observation_space=observation_space,
     )
