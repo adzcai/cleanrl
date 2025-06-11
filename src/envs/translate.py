@@ -104,43 +104,45 @@ if NAVIX_INSTALLED:
 
 def make_env(env_config: EnvConfig, goal=True) -> tuple[Environment, Any]:
     env: Environment | None = None
+    params: Any | None = None
 
     if env_config.source == "gymnax":
         env, params = gymnax.make(env_config.name, **env_config.kwargs)
         env = gymnax_wrapper(env)
+        env = metrics_wrapper(env)
         env = flatten_observation_wrapper(env)
         if goal:
             env = goal_wrapper(env)
-    elif env_config.source == "brax":
-        # env = brax.envs.get_environment(env_config.env_name, **env_config.kwargs)
-        ...
     elif env_config.source == "navix":
         env = nx.make(env_config.name, **env_config.kwargs)
         env = navix_wrapper(env)
+        env = metrics_wrapper(env)
 
     elif env_config.source == "custom":
         if env_config.name == "MultiCatch":
             assert goal, "Multitask requires goal"
             env, params = make_multi_catch(**env_config.kwargs)
             env = flatten_observation_wrapper(env)
+            env = metrics_wrapper(env)
             env = auto_reset_wrapper(env)
 
         elif env_config.name == "HouseMaze":
             env, params = new_housemaze()
             env = housemaze_wrapper(env)
+            env = metrics_wrapper(env)
             env = auto_reset_wrapper(env)
 
         elif env_config.name == "dummy":
             env, params = make_dummy_env(**env_config.kwargs)
             if goal:
                 env = goal_wrapper(env)
+            env = metrics_wrapper(env)
 
     if env is None:
         raise ValueError(
             f"Unrecognized environment {env_config.name} in {env_config.source}"
         )
 
-    env = metrics_wrapper(env)
     return env, params
 
 

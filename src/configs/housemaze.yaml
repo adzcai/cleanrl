@@ -47,8 +47,6 @@ optim:
   reward_coef: 0.99
   priority_exponent: 0.8
   importance_exponent: 0.0
-  p_reanalyze:
-    values: [0.2, 0.5, 0.8]
 
 eval:
   warnings: False

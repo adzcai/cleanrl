@@ -50,8 +50,16 @@ def metrics_wrapper(
 ) -> Environment[TObs, LogState[TEnvStateDC], TAction, TEnvParams]:
     """Log interactions and episode rewards.
 
-    env, env_params = log_wrapper(env, env_params)
+    Ensure this goes inside any auto reset wrappers
     """
+
+    env_inner = env
+    while getattr(env_inner, "_inner", None) is not None:
+        if env_inner.name == "auto_reset":
+            raise ValueError(
+                "Metrics wrapper should be applied before auto_reset wrapper."
+            )
+        env_inner = env_inner._inner  # type: ignore
 
     init_metrics = Metrics(
         cum_return=jnp.zeros((), float),
@@ -75,9 +83,13 @@ def metrics_wrapper(
         key: Key[Array, ""],
     ) -> TimeStep[TObs, LogState[TEnvStateDC]]:
         time_step = env.step(state._inner, action, params, key=key)
-        metrics = Metrics(
-            cum_return=state.metrics.cum_return + time_step.reward,
-            step=state.metrics.step + 1,
+        metrics = jax.tree.map(
+            lambda init, updated: jnp.where(time_step.is_first, init, updated),
+            init_metrics,
+            Metrics(
+                cum_return=state.metrics.cum_return + time_step.reward,
+                step=state.metrics.step + 1,
+            ),
         )
         return dc.replace(
             time_step,

@@ -448,7 +448,7 @@ class LossStatistics(NamedTuple):
 
 
 # jit to ease debugging
-@ft.partial(jax.jit, static_argnames=("net_static",))
+# @ft.partial(jax.jit, static_argnames=("net_static",))
 @ft.partial(jax.vmap, in_axes=(None, None, 0, None, None, None, None))
 def loss_trajectory(
     params: MuZeroNetwork,
@@ -462,6 +462,7 @@ def loss_trajectory(
     """MuZero loss.
 
     Here we align the targets at each timestep to maximize signal.
+    Expects the `txn_s.mcts_probs` to be the MCTS distribution from the target network.
     """
     net = eqx.combine(params, net_static)
     target_net = eqx.combine(target_params, net_static)
@@ -729,12 +730,11 @@ def make_train(config: TrainConfig):
                 )
                 txn_bs: Batched[Transition, " batch_size horizon"] = batch.experience
 
-                # if False:
                 # "reanalyze" the policy targets via mcts with target parameters
-                horizon = txn_bs.action.shape[1]
-                net = eqx.combine(iter_state.target_params, net_static)
                 _, mcts_out = jax.vmap(act_mcts, in_axes=(None, 1), out_axes=1)(
-                    net, txn_bs.time_step.obs, key=jr.split(key_reanalyze, horizon)
+                    eqx.combine(iter_state.target_params, net_static),
+                    txn_bs.time_step.obs,
+                    key=jr.split(key_reanalyze, config.optim.num_time_steps),
                 )
                 txn_bs = txn_bs._replace(mcts_probs=mcts_out.action_weights)
 
@@ -762,7 +762,13 @@ def make_train(config: TrainConfig):
                 def loss_grad(params: MuZeroNetwork):
                     """Average the loss across a batch of trjaectories."""
                     losses, aux = loss_trajectory(
-                        params, iter_state.target_params, txn_bs, net_static
+                        params,
+                        iter_state.target_params,
+                        txn_bs,
+                        net_static,
+                        config.value,
+                        config.bootstrap,
+                        config.loss,
                     )
                     chex.assert_shape(losses, (config.optim.batch_size,))
                     return jnp.mean(losses), aux

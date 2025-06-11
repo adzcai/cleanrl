@@ -45,7 +45,6 @@ optim:
   world_model_gradient_scale: 0.5
   priority_exponent: 0.8
   importance_exponent: 0.0
-  p_reanalyze: 0.0
 
 eval:
   warnings: False

@@ -22,7 +22,10 @@ from wrappers.metrics import TEnvStateDC
 
 @dataclass
 class PrevDone(Wrapper[TEnvStateDC]):
-    """We follow the dm_env convention of returning terminal states."""
+    """We follow the dm_env convention of returning terminal states.
+
+    Note that the TimeStep object has an is_last property but not necessarily each environment state.
+    """
 
     is_last: Bool[Array, ""]
 

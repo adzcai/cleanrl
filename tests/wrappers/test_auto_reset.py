@@ -7,8 +7,8 @@ from wrappers.auto_reset import PrevDone, auto_reset_wrapper
 
 
 def test_auto_reset_wrapper(dummy_env_params):
-    params = Params(max_horizon=2)
-    wrapped = auto_reset_wrapper(dummy_env_params)
+    env, params = dummy_env_params
+    wrapped = auto_reset_wrapper(env)
     key = jr.key(0)
 
     # Initial reset
@@ -19,12 +19,12 @@ def test_auto_reset_wrapper(dummy_env_params):
     assert jnp.isnan(ts.discount)
 
     # First step (not done)
-    ts = wrapped.step(ts.state, None, params, key=key)
-    assert ts.state.is_last == False
-    assert ts.is_mid == True
-    assert ts.discount == 1.0
+    for step in range(params.max_horizon - 1):
+        ts = wrapped.step(ts.state, None, params, key=key)
+        assert ts.state.is_last == False
+        assert ts.is_mid == True
+        assert ts.discount == 1.0
 
-    # Second step (should trigger auto-reset)
     ts = wrapped.step(ts.state, None, params, key=key)
     assert ts.state.is_last == True
     assert ts.is_last == True
