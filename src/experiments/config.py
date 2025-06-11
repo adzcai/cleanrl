@@ -255,9 +255,7 @@ class EvalConfig:
     """Evaluation of the learned policy and value function."""
 
     warnings: bool
-    num_time_steps: int
     num_evals: int
-    num_eval_envs: int
 
 
 @dataclass
@@ -279,7 +277,7 @@ class TrainConfig(Config):
         return f"{self.env.name} {self.collection.total_transitions}"
 
     def validate(self):
-        if self.optim.num_time_steps <= 1 or self.eval.num_time_steps <= 1:
+        if self.optim.num_time_steps <= 1:
             raise ValueError(
                 "Updates must use at least two timesteps for bootstrapping."
             )

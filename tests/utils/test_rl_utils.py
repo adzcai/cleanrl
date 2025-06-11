@@ -59,8 +59,8 @@ def test_bootstrap_dummy(dummy_env_params):
 
     gamma = 0.9
 
-    boot_value_sh = bootstrap(
-        predict_s=lambda obs, action_s: obs * action_s,
+    boot_value_sh, _ = bootstrap(
+        predict_s=lambda obs, action_s: (obs * action_s, None),
         txn_s=txn_s,
         config=BootstrapConfig(
             discount=gamma,
@@ -90,9 +90,9 @@ def test_bootstrap_catch():
 
     def predict_s(obs: GoalObs[BaseObs], action_s: Integer[Array, " horizon"]):
         # ball_row = jnp.argmax(obs.obs[:-1, :], axis=0)
-        return jnp.arange(action_s.size, dtype=float)
+        return jnp.arange(action_s.size, dtype=float), None
 
-    boot_value_sh = bootstrap(
+    boot_value_sh, _ = bootstrap(
         predict_s=predict_s,
         txn_s=txn_s,
         config=BootstrapConfig(

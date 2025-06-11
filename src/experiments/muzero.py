@@ -48,7 +48,11 @@ from utils.structures import (
     TObs,
     Transition,
 )
-from utils.visualize import visualize
+from utils.visualize import (
+    SUPPORTED_VIDEO_ENVS,
+    visualize_env_state_frame,
+    visualize_trajectory,
+)
 from wrappers.goal_wrapper import GoalObs
 
 
@@ -414,6 +418,17 @@ class MuZeroNetwork(eqx.Module):
 
         return next_hidden_dyn, (reward, pred)
 
+    def predict_value_s(
+        self,
+        value_cfg: ValueConfig,
+        obs: GoalObs,
+        action_s: Integer[Array, " horizon"],
+    ):
+        """Predict the value sequence from the target network."""
+        _, (reward_s, target_pred_s) = self.world_model_rollout(obs, action_s)
+        value_s = value_cfg.logits_to_value(target_pred_s.value_logits)
+        return value_s, reward_s
+
 
 class ParamState(NamedTuple):
     """Carried during optimization."""
@@ -533,16 +548,9 @@ def compute_value_loss(
     on n-step bootstrapped returns of the target network.
     """
 
-    def predict(
-        obs: GoalObs,
-        action_s: Integer[Array, " horizon"],
-    ):
-        """Predict the value sequence from the target network."""
-        _, (_, target_pred_s) = target_net.world_model_rollout(obs, action_s)
-        value_s = value_cfg.logits_to_value(target_pred_s.value_logits)
-        return value_s
-
-    boot_value_sh = bootstrap(predict, txn_s, bootstrap_cfg)
+    boot_value_sh, _ = bootstrap(
+        ft.partial(target_net.predict_value_s, value_cfg), txn_s, bootstrap_cfg
+    )
     boot_value_dist_sh = distrax.Categorical(
         probs=value_cfg.value_to_probs(boot_value_sh)
     )
@@ -895,7 +903,7 @@ def make_train(config: TrainConfig):
             param_state, _ = optimize_step
 
             # occasionally update target
-            target_params = jax.tree.map(
+            target_params: MuZeroNetwork = jax.tree.map(
                 lambda online, target: jnp.where(
                     iter_state.step % config.optim.target_update_freq == 0,
                     optax.incremental_update(
@@ -934,18 +942,15 @@ def make_train(config: TrainConfig):
                     if not valid:
                         raise ValueError("NaN parameters.")
 
-            # evaluate every eval_freq steps
+            # visualization
             jax.lax.cond(
                 (iter_state.step % eval_freq == 0) & buffer_available,
-                ft.partial(
-                    visualize, num_envs=config.eval.num_eval_envs, net_static=net_static
+                # env name is invalid jax type (str) so pass statically
+                ft.partial(jax.debug.callback, visualize_trajectory, config.env.name),
+                lambda *args: None,
+                *compute_visualize_args(
+                    eqx.combine(target_params, net_static), tree_slice(txn_bs, 0)
                 ),
-                lambda *_: -jnp.inf,  # avoid nan to support debugging
-                # cond only accepts positional arguments
-                param_state.params,
-                target_params,
-                param_state.buffer_state,
-                key_evaluate,
             )
 
             return (
@@ -960,6 +965,37 @@ def make_train(config: TrainConfig):
 
         final_iter_state, _ = iterate
         return final_iter_state, None
+
+    def compute_visualize_args(
+        target_net: MuZeroNetwork, txn_s: Batched[Transition, " horizon"]
+    ):
+        """Compute the arguments for visualization.
+
+        All return values are passed to the jax callback
+        and must be valid jax types.
+        """
+        viz_boot_value_s, viz_reward_logits_s = bootstrap(
+            ft.partial(
+                target_net.predict_value_s,
+                config.value,
+            ),
+            txn_s,
+            config.bootstrap,
+        )
+        video = (
+            jax.vmap(ft.partial(visualize_env_state_frame, config.env.name))(
+                txn_s.time_step.state
+            )
+            if config.env.name in SUPPORTED_VIDEO_ENVS
+            else None
+        )
+        return (
+            config.value,
+            txn_s,
+            viz_boot_value_s,
+            viz_reward_logits_s,
+            video,
+        )
 
     def rollout(
         net: MuZeroNetwork,

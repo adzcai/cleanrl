@@ -5,6 +5,7 @@ import housemaze.env as maze
 import housemaze.levels as maze_levels
 import housemaze.renderer as renderer
 import housemaze.utils as maze_utils
+import jax
 import jax.numpy as jnp
 from jaxtyping import Array, Float, Integer, Key, PyTree
 
@@ -164,8 +165,8 @@ def housemaze_wrapper(
 
 def visualize_housemaze(
     timestep: maze.TimeStep,
-) -> Float[Array, " horizon channel height width"]:
-    video: Float[Array, " horizon height width channel"] = jax.vmap(
+) -> Float[Array, " channel height width"]:
+    video: Float[Array, " height width channel"] = jax.vmap(
         renderer.create_image_from_grid, in_axes=(0, 0, 0, None)
     )(
         timestep.state.grid,
@@ -173,4 +174,4 @@ def visualize_housemaze(
         timestep.state.agent_dir,
         image_dict,
     )
-    return video.transpose((0, 3, 1, 2))  # C H W
+    return video.transpose((2, 0, 1))  # C H W

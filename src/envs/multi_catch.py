@@ -131,32 +131,18 @@ def make_multi_catch(
 
 
 def visualize_catch(
-    env_states: Batched[EnvState, " horizon"],
-    maps: Float[Array, " horizon obs_size"] | None = None,
-) -> Float[Array, " horizon channel height width"]:
+    env_state: EnvState,
+) -> Float[Array, " channel height width"]:
     """Turn a sequence of Catch environment states into a wandb.Video matrix."""
 
     obs_shape = (10, 5)
-
-    horizon = env_states.paddle_x.size
-    horizon_grid = jnp.arange(horizon)
-    video_shape = (horizon, 3, *obs_shape)
-
-    if maps is not None:
-        # rescale to [0, 255]
-        maps_min = jnp.min(maps, keepdims=True)
-        maps = 255 * (maps - maps_min) / (jnp.max(maps, keepdims=True) - maps_min)
-        maps = maps.astype(jnp.uint8)
-        maps = jnp.reshape(maps, (horizon, 1, *obs_shape))
-        maps = jnp.broadcast_to(maps, video_shape)
-    else:
-        maps = jnp.full(video_shape, 255, dtype=jnp.uint8)
+    video_shape = (3, *obs_shape)
 
     video = (
-        maps.at[horizon_grid, :, env_states.ball_y, env_states.ball_x]
+        jnp.full(video_shape, 255, dtype=jnp.uint8)
+        .at[:, env_state.ball_y, env_state.ball_x]
         .set(jnp.array([255, 0, 0], dtype=jnp.uint8))
-        .at[horizon_grid, :, obs_shape[0] - 1, env_states.paddle_x]
+        .at[:, obs_shape[0] - 1, env_state.paddle_x]
         .set(jnp.array([0, 255, 0], dtype=jnp.uint8))
     )
-
     return video

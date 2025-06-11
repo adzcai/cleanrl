@@ -1,221 +1,210 @@
+import math
 from typing import Annotated as Batched
 
 import chex
 import distrax
 import jax
-import jax.numpy as jnp
-import matplotlib as mpl
 import matplotlib.pyplot as plt
 import mctx
-from jaxtyping import Array, Float
-from matplotlib.axes import Axes
-
-# Add colorbar for reference (for p0 only)
-from matplotlib.cm import ScalarMappable
-
-# Add legend manually
-from matplotlib.patches import Patch
+import numpy as np
+from jaxtyping import Array, Bool, Float, PyTree
+from matplotlib.figure import Figure
 
 import wandb
-from experiments.config import TrainConfig, ValueConfig
-from utils.log_utils import tree_slice
+from envs.housemaze import visualize_housemaze
+from envs.multi_catch import visualize_catch
+from experiments.config import ValueConfig
 from utils.structures import StepType, Transition
 
 
-def get_action_name(env_name: str, action: int):
-    if env_name in ["Catch-bsuite", "MultiCatch"]:
-        if action == 0:
-            return "L"
-        elif action == 1:
-            return "N"
-        elif action == 2:
-            return "R"
-        else:
-            raise ValueError(f"Invalid action {action}")
-    elif env_name == "HouseMaze":
-        return ["➡️", "⬇️", "⬅️", "⬆️", "done", "NONE", "reset"][action]
-    elif env_name == "dummy":
-        return f"{action}"
-    else:
-        raise ValueError(f"Env {env_name} not recognized")
-
-
-def get_env_state_frame_label(env_name: str, env_state):
-    """Label the frame in the generated video."""
-    if env_name in ["Catch-bsuite", "MultiCatch"]:
-        return f" task={env_state.goal}"
-    if env_name == "HouseMaze":
-        return f" task={env_state.state.task_w.argmax()}"
-    return ""
-
-
-def visualize(
-    config: TrainConfig,
-    txn_s: Batched[Transition, " horizon"],
-    boot_return_s: Float[Array, " horizon-1"],
-    video: Float[Array, " horizon 3 height width"] | None,
-    prefix: str,
-    reward_logits_s: Float[Array, " horizon num_value_bins"] | None = None,
-    priorities: Float[Array, " num_envs"] | None = None,
-) -> None:
-    """Visualize a trajectory."""
-    if not wandb.run or wandb.run.disabled:
-        return
-
-    fig_width = 4
-    rows_per_env = 2
-    if reward_logits_s is not None:
-        rows_per_env += 1
-
-    rows_per_env += 1
-
-    bin_labels = jnp.linspace(
-        value_cfg.min_value,
-        value_cfg.max_value,
-        value_cfg.num_value_bins,
-    )
-    bin_labels = [f"{v.item():.02f}" for v in bin_labels]
-    bin_labels += [f"{label} (bs)" for label in bin_labels]
-
-    num_envs, horizon = txn_s.time_step.reward.shape
-
-    fig_stats, ax = plt.subplots(
-        nrows=num_envs * rows_per_env,
-        figsize=(2 * fig_width, 4 * num_envs * rows_per_env),
-    )
-    fig_stats.subplots_adjust(hspace=0.5)
-    for i in range(num_envs):
-        j = 0
-
-        ax_stats: Axes = ax[rows_per_env * i + j]
-        j += 1
-        ax_stats.set_title(
-            f"T{i}"
-            + (f" priority {priorities[i]:.2f}" if priorities is not None else "")
-        )
-        plot_statistics(
-            value_cfg,
-            ax_stats,
-            tree_slice(txn_s, i),
-            boot_return_s[i],
-        )
-
-        ax_policy: Axes = ax[rows_per_env * i + j]
-        j += 1
-        ax_policy.set_title(f"Trajectory {i} Policy and MCTS")
-        action_names = [get_action_name(env_name, i) for i in range(3)]
-        action_names += [f"{name} (mc)" for name in action_names]
-        plot_compare_dists(
-            ax_policy,
-            jax.nn.softmax(txn_s.pred.policy_logits[i], axis=-1),
-            txn_s.mcts_probs[i],
-            labels=action_names,
-        )
-
-        if reward_logits_s is not None:
-            ax_reward: Axes = ax[rows_per_env * i + j]
-            j += 1
-            ax_reward.set_title(f"T{i} reward")
-            plot_compare_dists(
-                ax_reward,
-                jax.nn.softmax(reward_logits_s[i], axis=-1),
-                value_cfg.value_to_probs(txn_s.time_step.reward[i]),
-                labels=bin_labels,
-            )
-
-        ax_value: Axes = ax[rows_per_env * i + j]
-        j += 1
-        ax_value.set_title(f"Trajectory {i} Value and Bootstrapped")
-        plot_compare_dists(
-            ax_value,
-            jax.nn.softmax(txn_s.pred.value_logits[i, :-1], axis=-1),
-            value_cfg.value_to_probs(boot_return_s[i]),
-            labels=bin_labels,
-        )
-
-        # legend above first axes
-        if i == 0:
-            # move legend to right of plot
-            box = ax_stats.get_position()
-            ax_stats.set_position(
-                (
-                    box.x0,
-                    box.y0,
-                    box.width * 0.8,
-                    box.height,
-                )
-            )
-            ax_stats.legend(loc="center left", bbox_to_anchor=(1, 0.5))
-
-    # use wandb.Image since otherwise wandb uses plotly,
-    # which breaks the legends
-    obj = {f"{prefix}/statistics": wandb.Image(fig_stats)}
-
-    # separate figure for plotting video
-    if video is not None:
-        fig_video, ax_video = plt.subplots(
-            nrows=num_envs,
-            ncols=horizon,
-            squeeze=False,
-            figsize=(horizon * 2, num_envs * 3),
-        )
-        fig_video.subplots_adjust(
-            hspace=0.5
-        )  # Add more vertical space between subplots
-
-        # wandb.Video(np.asarray(video), fps=10),
-
-        for i in range(num_envs):
-            for h in range(horizon):
-                ax_stats: Axes = ax_video[i, h]
-
-                step_type = txn_s.time_step.step_type[i, h].item()
-                if step_type == StepType.FIRST:
-                    step_type = "F"
-                elif step_type == StepType.MID:
-                    step_type = "M"
-                elif step_type == StepType.LAST:
-                    step_type = "L"
-
-                a = get_action_name(env_name, txn_s.action[i, h].item())
-                # c h w -> h w c
-                ax_stats.imshow(jnp.permute_dims(video[i, h], (1, 2, 0)))
-                ax_stats.grid(True)
-                ax_stats.xaxis.set_major_locator(plt.MultipleLocator(1))  # type: ignore
-                ax_stats.yaxis.set_major_locator(plt.MultipleLocator(1))  # type: ignore
-                env_state = tree_slice(txn_s.time_step.state, (i, h))
-                ax_stats.set_title(
-                    f"{h=}\n"
-                    f"{step_type}\n"
-                    f"{a=}\n"
-                    f"{get_env_state_frame_label(env_name, env_state)}"
-                )
-                ax_stats.axis("off")
-        obj[f"{prefix}/trajectories"] = wandb.Image(fig_video)
-
-    wandb.log(obj)
-    plt.close(fig_stats)
-    if video is not None:
-        plt.close(fig_video)  # type: ignore
-
-
-def plot_statistics(
+def visualize_trajectory(
+    env_name: str,
     value_cfg: ValueConfig,
-    ax: Axes,
-    trajectory: Batched[Transition, " horizon"],
-    bootstrapped_return: Float[Array, " horizon"],
+    txn_s: Batched[Transition, "horizon"],
+    boot_value_s: Float[Array, "horizon"],
+    reward_logits_s: Float[Array, "horizon num_value_bins"],
+    video: Float[Array, "horizon height width channels"],
 ):
-    """Plot various trajectory statistics:
+    """Visualize the given trajectory."""
 
-    - Beginning of episodes
-    - Rewards
-    - Predicted values vs bootstrapped values (td error)
-    - Policy and value entropy and kl error
-    """
-    horizon = jnp.arange(trajectory.action.size)
+    init_mask = txn_s.time_step.is_first
 
-    # misc
-    initial_idx = horizon[trajectory.time_step.step_type == StepType.FIRST]
+    figs = dict(
+        value_fig=value_figure(
+            txn_s.pred.value_logits,
+            boot_value_s,
+            ylabel="Value",
+        ),
+        policy_fig=policy_figure(
+            env_name,
+            distrax.Categorical(txn_s.pred.policy_logits).probs,  # type: ignore
+            title="Predicted Action Probabilities",
+        ),
+        mcts_fig=policy_figure(
+            env_name,
+            txn_s.mcts_probs,
+            title="MCTS Action Probabilities",
+        ),
+        reward_fig=value_figure(
+            value_cfg.logits_to_value(reward_logits_s[:-1]),
+            txn_s.time_step.reward[1:],
+            ylabel="Reward",
+        ),
+        entropy_fig=entropy_figure(
+            dict(
+                reward=distrax.Categorical(logits=reward_logits_s).entropy(),
+                value=distrax.Categorical(logits=txn_s.pred.value_logits).entropy(),
+                policy=distrax.Categorical(logits=txn_s.pred.policy_logits).entropy(),
+                mcts=distrax.Categorical(probs=txn_s.mcts_probs).entropy(),
+            )
+        ),
+    )
+
+    # add episode boundaries to all figures
+    for fig in figs.values():
+        add_episode_boundaries(fig.axes[0], init_mask)
+
+    # add video
+    if video is not None:
+        figs["video_fig"] = video_figure(
+            env_name,
+            txn_s,
+            video,
+        )
+
+    output = {}
+    for k, fig in figs.items():
+        output[k] = wandb.Image(fig)
+        plt.close(fig)
+
+    wandb.log(output)
+
+
+def value_figure(
+    pred_value_s: Float[Array, "horizon"],
+    boot_value_s: Float[Array, "horizon"],
+    ylabel: str = "Value",
+) -> Figure:
+    """Plot the value or reward over the trajectory."""
+    fig, ax = plt.subplots()
+    # Set legend labels and title based on ylabel
+    if ylabel.lower() == "reward":
+        boot_label = "Actual Reward"
+        title = "Reward Over Trajectory"
+    else:
+        boot_label = "Bootstrapped Value"
+        title = "Value Over Trajectory"
+    ax.plot(pred_value_s, label=f"Predicted {ylabel}", color="blue")
+    ax.plot(boot_value_s, label=boot_label, linestyle="--")
+    ax.set_xlabel("Time Step")
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.legend()
+    return fig
+
+
+def policy_figure(
+    env_name: str, pred_probs_s: Float[Array, "horizon num_actions"], title: str
+) -> Figure:
+    """Plot the policy over the trajectory with improved colorbar and clearer axis labeling."""
+    horizon, num_actions = pred_probs_s.shape
+    fig, ax = plt.subplots(figsize=(horizon, (num_actions / horizon) * 4))
+    im = ax.imshow(
+        pred_probs_s.T,
+        aspect="auto",
+        cmap="viridis",
+        interpolation="nearest",
+        vmin=0,
+        vmax=1,
+        origin="lower",
+    )
+    ax.set_xlabel("Time Step")
+    ax.set_ylabel("Action")
+    ax.set_title(title)
+    ax.set_yticks(range(num_actions))
+    ax.set_yticklabels([get_action_name(env_name, i) for i in range(num_actions)])
+    # ax.set_ylim(-0.5, num_actions - 0.5)
+    # ax.set_xlim(-0.5, horizon - 0.5)
+    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label("Probability")
+    fig.tight_layout()
+    return fig
+
+
+def entropy_figure(entropy_dict: dict[str, Float[chex.Array, "horizon"]]) -> Figure:
+    """Plot the entropy of various distributions over the trajectory."""
+    fig, ax = plt.subplots()
+    for key, entropy_s in entropy_dict.items():
+        ax.plot(entropy_s, label=f"{key.capitalize()} Entropy")
+    ax.set_xlabel("Time Step")
+    ax.set_ylabel("Entropy")
+    ax.set_title("Entropy Over Trajectory")
+    ax.legend()
+    return fig
+
+
+def video_figure(
+    env_name: str,
+    txn_s: Batched[Transition, " horizon"],
+    video: Float[Array, " horizon 3 height width"],
+) -> Figure:
+    """Create a matplotlib figure with the trajectory video frames in a grid, with colored borders for step types."""
+    horizon = txn_s.time_step.reward.shape[0]
+    n_cols = math.ceil(math.sqrt(horizon))
+    n_rows = math.ceil(horizon / n_cols)
+
+    fig, ax_video = plt.subplots(
+        nrows=n_rows,
+        ncols=n_cols,
+        squeeze=False,
+        figsize=(n_cols * 2, n_rows * 2),
+    )
+    fig.subplots_adjust(hspace=0.5)
+
+    for h in range(horizon):
+        row = h // n_cols
+        col = h % n_cols
+
+        ax_frame = ax_video[row, col]
+        step_type_val = txn_s.time_step.step_type[h].item()
+        if step_type_val == StepType.FIRST:
+            step_type = "F"
+            border_color = "green"
+        elif step_type_val == StepType.MID:
+            step_type = "M"
+            border_color = "blue"
+        elif step_type_val == StepType.LAST:
+            step_type = "L"
+            border_color = "red"
+        else:
+            step_type = "?"
+            border_color = "black"
+
+        action_name = get_action_name(env_name, txn_s.action[h].item())
+        ax_frame.imshow(np.permute_dims(video[h], (1, 2, 0)), aspect="auto")
+        # Remove grid and ticks for cleaner look
+        ax_frame.grid(False)
+        ax_frame.set_xticks([])
+        ax_frame.set_yticks([])
+        # Concise title
+        ax_frame.set_title(f"{h}: {action_name} ({step_type})", fontsize=8)
+        ax_frame.axis("off")
+        # Set border color
+        for spine in ax_frame.spines.values():
+            spine.set_edgecolor(border_color)
+            spine.set_linewidth(2)
+    # Hide unused axes
+    for h in range(horizon, n_rows * n_cols):
+        row = h // n_cols
+        col = h % n_cols
+        ax_video[row, col].axis("off")
+    fig.tight_layout()
+    fig.suptitle("Trajectory Video Frames", fontsize=12)
+    return fig
+
+
+def add_episode_boundaries(ax, mask_s: Bool[Array, "horizon"]):
+    initial_idx = np.arange(mask_s.size)[mask_s]
     for i, idx in enumerate(initial_idx):
         ax.axvline(
             x=idx,
@@ -224,107 +213,6 @@ def plot_statistics(
             label="initial" if i == 0 else None,
             alpha=0.5,
         )
-
-    # reward
-    ax.plot(horizon, trajectory.time_step.reward, "r+", label="reward")
-
-    # value
-    online_value = value_cfg.logits_to_value(trajectory.pred.value_logits)
-    ax.plot(horizon, online_value, "bo", label="online value")
-    ax.plot(
-        horizon[:-1],
-        bootstrapped_return,
-        "mo",
-        label="bootstrapped returns",
-        alpha=0.5,
-    )
-    ax.fill_between(
-        horizon[:-1],
-        bootstrapped_return,
-        online_value[:-1],
-        alpha=0.3,
-        label="TD error",
-    )
-
-    # entropy
-    policy_dist = distrax.Categorical(logits=trajectory.pred.policy_logits)
-    mcts_dist = distrax.Categorical(probs=trajectory.mcts_probs)
-    ax.plot(horizon, policy_dist.entropy(), "b:", label="policy entropy")
-    ax.plot(horizon, mcts_dist.entropy(), "g:", label="MCTS entropy")
-
-    value_dist = distrax.Categorical(logits=trajectory.pred.value_logits)
-    ax.plot(horizon, value_dist.entropy(), "y:", label="value entropy")
-
-    # loss
-    ax.plot(
-        horizon,
-        mcts_dist.kl_divergence(policy_dist),
-        "c--",
-        label="policy / mcts kl",
-    )
-    bootstrapped_dist = distrax.Categorical(
-        probs=value_cfg.value_to_probs(bootstrapped_return)
-    )
-    value_loss = bootstrapped_dist.kl_divergence(value_dist[:-1])  # type: ignore
-    ax.plot(horizon[:-1], value_loss, "r--", label="value / bootstrap kl")
-
-    ax.set_xticks(horizon, horizon)
-    spread = value_cfg.max_value - value_cfg.min_value
-    ax.set_ylim(value_cfg.min_value - spread / 10, value_cfg.max_value + spread / 10)
-
-
-def plot_compare_dists(
-    ax: Axes,
-    p0: Float[Array, " horizon n"],
-    p1: Float[Array, " horizon n"],
-    labels: list[str],
-):
-    chex.assert_equal_shape([p0, p1])
-    horizon, num_bins = p0.shape
-    x = jnp.arange(horizon)
-
-    # Plot p0 as blue, p1 as red, with alpha blending
-    ax.imshow(
-        p0.T,
-        aspect="auto",
-        origin="lower",
-        cmap="Blues",
-        alpha=0.6,
-        extent=(0, horizon, 0, num_bins),
-        vmin=0,
-        vmax=1,
-    )
-    ax.imshow(
-        p1.T,
-        aspect="auto",
-        origin="lower",
-        cmap="Reds",
-        alpha=0.4,
-        extent=(0, horizon, 0, num_bins),
-        vmin=0,
-        vmax=1,
-    )
-
-    ax.set_xticks(x)
-    ax.set_xticklabels(x)
-    ax.set_yticks(jnp.arange(num_bins))
-    if labels is not None and len(labels) == num_bins:
-        ax.set_yticklabels(labels)
-    else:
-        ax.set_yticklabels(jnp.arange(num_bins))
-
-    ax.set_xlabel("Horizon")
-    ax.set_ylabel("Bin")
-    ax.set_title("Distribution (Blue: Policy, Red: MCTS)")
-
-    sm = ScalarMappable(cmap="Blues", norm=mpl.colors.Normalize(vmin=0, vmax=1))  # type: ignore
-    plt.colorbar(sm, ax=ax, fraction=0.046, pad=0.04, label="Probability")
-
-    legend_handles = [
-        Patch(facecolor="blue", edgecolor="blue", alpha=0.6, label="Policy"),
-        Patch(facecolor="red", edgecolor="red", alpha=0.4, label="MCTS"),
-    ]
-    ax.legend(handles=legend_handles, loc="center left", bbox_to_anchor=(1, 0.5))
 
 
 def convert_tree_to_graph(
@@ -396,3 +284,48 @@ def convert_tree_to_graph(
                 graph.add_edge(node_i, children_i, label=edge_to_str(node_i, a_i))
 
     return graph
+
+
+def get_action_name(env_name: str, action: int):
+    if env_name in ["Catch-bsuite", "MultiCatch"]:
+        if action == 0:
+            return "L"
+        elif action == 1:
+            return "N"
+        elif action == 2:
+            return "R"
+        else:
+            raise ValueError(f"Invalid action {action}")
+    elif env_name == "HouseMaze":
+        return ["➡️", "⬇️", "⬅️", "⬆️", "done", "NONE", "reset"][action]
+    elif env_name == "dummy":
+        return f"{action}"
+    else:
+        raise ValueError(f"Env {env_name} not recognized")
+
+
+def get_env_state_frame_label(env_name: str, env_state):
+    """Label the frame in the generated video."""
+    if env_name in ["Catch-bsuite", "MultiCatch"]:
+        return f" task={env_state.goal}"
+    if env_name == "HouseMaze":
+        return f" task={env_state.state.task_w.argmax()}"
+    return ""
+
+
+def visualize_env_state_frame(
+    env_name: str, env_state: PyTree[Array], **kwargs
+) -> Float[Array, " channel height width"]:
+    """Visualize a single frame of the environment."""
+    if env_name in ["Catch-bsuite", "MultiCatch"]:
+        return jax.jit(visualize_catch)(env_state, **kwargs)
+    if env_name == "HouseMaze":
+        return jax.jit(visualize_housemaze)(env_state)
+    raise ValueError(f"Env {env_name} not recognized")
+
+
+SUPPORTED_VIDEO_ENVS = [
+    "Catch-bsuite",
+    "MultiCatch",
+    "HouseMaze",
+]

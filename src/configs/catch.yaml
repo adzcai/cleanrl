@@ -53,6 +53,6 @@ loss:
 
 eval:
   warnings: False
-  num_evals: 8
+  num_evals: 12
   num_eval_envs: 2
   num_time_steps: 25

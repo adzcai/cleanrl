@@ -1,5 +1,6 @@
 from collections.abc import Callable
 from typing import Annotated as Batched
+from typing import TypeVar
 
 import jax
 import jax.numpy as jnp
@@ -13,15 +14,17 @@ from utils.structures import (
     Transition,
 )
 
+TAux = TypeVar("TAux")
+
 
 def bootstrap(
     predict_s: Callable[
         [TObs, Integer[Array, " horizon"]],
-        Float[Array, " horizon"],
+        tuple[Float[Array, " horizon"], TAux],
     ],
     txn_s: Batched[Transition[TObs, TEnvState], " horizon"],
     config: BootstrapConfig,
-) -> Float[Array, " horizon-1 horizon-1"]:
+) -> tuple[Float[Array, " horizon-1 horizon-1"], TAux]:
     """Abstracted out for plotting.
 
     Note that we use `Timestep.discount` rather than `Timestep.step_type`.
@@ -42,7 +45,7 @@ def bootstrap(
     # o0 | a0 a1 ...
     # o1 | a1 a2 ...
     # we remove the final row since there is only one transition (can't bootstrap)
-    value = jax.vmap(predict_s)(txn_s.time_step.obs, action_sh)
+    value, aux = jax.vmap(predict_s)(txn_s.time_step.obs, action_sh)
     bootstrapped_return: Float[Array, " horizon-1 horizon-1"] = jnp.asarray(
         jax.vmap(rlax.lambda_returns, in_axes=(0, 0, 0, None))(
             reward_sh[:-1, 1:],
@@ -53,7 +56,7 @@ def bootstrap(
     )
 
     # ensure terminal states get zero value
-    return jnp.where(last_sh[:-1, :-1], 0.0, bootstrapped_return)
+    return jnp.where(last_sh[:-1, :-1], 0.0, bootstrapped_return), aux
 
 
 def roll_into_matrix(ary: Float[Array, " n *size"]) -> Float[Array, " n n *size"]:

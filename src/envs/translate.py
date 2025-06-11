@@ -1,6 +1,6 @@
 from typing import Any
 
-from envs.housemaze import housemaze_wrapper, new_housemaze, visualize_housemaze
+from envs.housemaze import housemaze_wrapper, new_housemaze
 from utils.structures import (
     GYMNAX_INSTALLED,
     NAVIX_INSTALLED,
@@ -19,10 +19,10 @@ if NAVIX_INSTALLED:
 import jax
 import jax.numpy as jnp
 import jax.random as jr
-from jaxtyping import Array, Float, Key, PyTree
+from jaxtyping import Array, Key
 
 from envs.dummy_env import make_dummy_env
-from envs.multi_catch import make_multi_catch, visualize_catch
+from envs.multi_catch import make_multi_catch
 from experiments.config import EnvConfig
 from wrappers.auto_reset import auto_reset_wrapper
 from wrappers.flatten_observation import flatten_observation_wrapper
@@ -145,26 +145,3 @@ def make_env(env_config: EnvConfig, goal=True) -> tuple[Environment, Any]:
         )
 
     return env, params
-
-
-SUPPORTED_VIDEO_ENVS = [
-    "Catch-bsuite",
-    "MultiCatch",
-    "HouseMaze",
-]
-
-
-def visualize_env_state_frame(
-    env_name: str, env_state: PyTree[Array], **kwargs
-) -> Float[Array, " channel height width"]:
-    """Visualize the environment.
-
-    Returns:
-        tuple[Float (horizon, channel, height, width), list[str]]: The recorded video;
-            The sequence of labels to append to the titles.
-    """
-    if env_name in ["Catch-bsuite", "MultiCatch"]:
-        return jax.jit(visualize_catch)(env_state, **kwargs)
-    if env_name == "HouseMaze":
-        return jax.jit(visualize_housemaze)(env_state)
-    raise ValueError(f"Env {env_name} not recognized")
