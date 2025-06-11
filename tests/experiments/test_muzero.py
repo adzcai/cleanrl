@@ -12,8 +12,7 @@ from experiments.config import (
 )
 
 
-@pytest.mark.parametrize("max_horizon", [3, 5])
-def test_muzero_learns_value_on_dummy_env(max_horizon):
+def test_muzero_learns_value_on_dummy_env():
     # Setup
     config = get_args(["src/configs/dummy.yaml"])
     config = dict_to_dataclass(TrainConfig, config)
@@ -29,12 +28,13 @@ def test_muzero_learns_value_on_dummy_env(max_horizon):
     del params, net_static
 
     ts = env.reset(env_params, key=key_reset)
-    _, (reward_s, pred_s) = net.step(ts.obs, jnp.zeros((1,), dtype=int))
+    _, (reward_s, pred_s) = net.world_model_rollout(ts.obs, jnp.zeros((1,), dtype=int))
+    npt.assert_allclose(config.value.logits_to_value(pred_s.value_logits), 1.0)
 
-    npt.assert_allclose(
-        pred_s.value_logits,
-        jnp.array([1.0, 0.0]),
-    )
+    ts = env.step(ts.state, jnp.int_(0), env_params)
+    assert ts.is_last
+    _, (reward_s, pred_s) = net.world_model_rollout(ts.obs, jnp.zeros((1,), dtype=int))
+    npt.assert_allclose(config.value.logits_to_value(pred_s.value_logits), 0.0)
 
 
 @pytest.mark.skip(reason="Disabled for now")

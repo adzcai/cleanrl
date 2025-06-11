@@ -86,7 +86,7 @@ class Config:
     seed: int
     num_seeds: int
     sweep_method: str  # omegaconf doesn't support Literal["grid", "random", "bayes"]
-    command: Literal["run", "sweep", "agent", "jaxpr"] = dc.field(
+    mode: Literal["run", "sweep", "agent", "jaxpr"] = dc.field(
         metadata={
             "help": "Set to `sweep` to output a wandb sweep configuration yaml instead of executing the run."
             "Set to `agent` to load config from wandb instead of cli."
@@ -114,7 +114,7 @@ DEFAULT_CONFIG = Config(
     seed=0,
     num_seeds=1,
     sweep_method="random",
-    command="run",
+    mode="run",
 )
 
 
@@ -363,30 +363,32 @@ def main(
     cfg_dict = get_args(cfg_paths, cli_args)
     outputs = None
 
-    if cfg_dict["command"] == "agent":
+    mode = cfg_dict["mode"]
+
+    if mode == "agent":
         with wandb.init(config=None) as run:  # set config to None to load from wandb
             outputs = run_train(run, ConfigClass, make_train)
 
-    elif cfg_dict["command"] == "jaxpr":
+    elif mode == "jaxpr":
         cfg = dict_to_dataclass(ConfigClass, cfg_dict)
         train = make_train(cfg)
         jaxpr = jax.make_jaxpr(train)(jr.key(cfg.seed))
         print(jaxpr)
 
-    elif cfg_dict["command"] == "sweep":
+    elif mode == "sweep":
         cfg = dict_to_dataclass(ConfigClass, cfg_dict)
         sweep_params, parameters = to_wandb_sweep_parameters(cfg)
         sweep_cfg = {
             "program": file,
             "method": cfg.sweep_method,
             "name": f"{file} sweep {' '.join(sweep_params)}",
-            "metric": {"goal": "maximize", "name": "eval/mean_return"},
+            "metric": {"goal": "minimize", "name": "train/td_error"},
             "parameters": parameters,
             "command": [
                 r"${env}",
                 r"${interpreter}",
                 r"${program}",
-                r"command=agent",
+                r"mode=agent",
             ],
         }
         sweep_id = wandb.sweep(sweep_cfg)
@@ -397,20 +399,17 @@ def main(
             "Run `man sbatch` for details."
         )
 
-    elif cfg_dict["command"] == "run":
+    elif mode == "run":
         matplotlib.use("agg")  # enable plotting inside jax callback
         with wandb.init(config=cfg_dict) as run:
             outputs = run_train(run, ConfigClass, make_train)
 
     else:
         raise ValueError(
-            f"Unknown command {cfg_dict['command']}. Use `run`, `sweep`, `agent`, or `jaxpr`."
+            f"Unknown command {mode}. Use `run`, `sweep`, `agent`, or `jaxpr`."
         )
 
-    if outputs is not None:
-        _, mean_eval_reward = outputs
-        mean_eval_reward = mean_eval_reward[mean_eval_reward != -jnp.inf]
-        print(f"Done training. {mean_eval_reward=}")
+    print("Done training!")
 
 
 def run_train(

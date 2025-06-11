@@ -27,7 +27,7 @@ export LDFLAGS="-L$(brew --prefix graphviz)/lib"
 ## Running
 
 ```bash
-uv run muzero
+uv run muzero -- src/config/catch.yaml
 ```
 
 ## Batch jobs
@@ -35,7 +35,7 @@ uv run muzero
 You can run batch jobs by setting
 
 ```bash
-python muzero.py conf/catch.yaml conf/catch_sweep.yaml command=sweep
+python src/experiments/muzero.py src/config/catch.yaml src/config/catch_sweep.yaml mode=sweep
 ```
 
 This will output further instructions for executing the batch job.

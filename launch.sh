@@ -2,8 +2,8 @@
 #SBATCH --partition         gpu_requeue
 #SBATCH --array             0-3
 #SBATCH --gpus              1
-#SBATCH --time              0-00:30
-#SBATCH --mem               20GB
+#SBATCH --time              0-00:10
+#SBATCH --mem               2GB
 #SBATCH --output            out/%x.%j.%2a.out
 #SBATCH --error             out/%x.%j.%2a.err
 
