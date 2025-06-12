@@ -54,17 +54,15 @@ def make_dummy_env(max_horizon: int) -> tuple[DummyEnv, Params]:
         name="dummy",
         reset=dummy_reset,
         step=dummy_step,
-        action_space=lambda params: specs.BoundedArray.discrete(
-            num_values=1, name="action"
-        ),
+        action_space=lambda params: specs.BoundedArray.discrete(1, name="action"),
         observation_space=lambda params: specs.BoundedArray(
-            (1,),
+            shape=(1,),
             dtype=jnp.float_,
             minimum=0,
             maximum=params.max_horizon,
             name="observation",
         ),
-        goal_space=lambda params: None,
+        goal_space=lambda params: specs.BoundedArray.discrete(1, name="goal"),
     ), Params(max_horizon=max_horizon)
 
 

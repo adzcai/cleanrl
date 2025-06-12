@@ -1,10 +1,11 @@
 arch:
-  rnn_size: 1
+  projection_kind: mlp
+  dyn_size: 1
   mlp_size: 1
   mlp_depth: 0
   goal_dim: 1
   activation: relu
-  projection_kind: mlp
+  world_model_gradient_scale: 0.5
 
 env:
   name: dummy
@@ -12,46 +13,47 @@ env:
   kwargs:
     max_horizon: 1
 
-collection:
-  total_transitions: 50
-  num_time_steps: 2
-  num_buffer_fills: 4
-  num_envs: 4
-  mcts_depth: 1
-  num_mcts_simulations: 1
+mcts:
+  num_simulations: 1
+  max_depth: null
 
 value:
   num_value_bins: 2
-  min_value: 0
-  max_value: 1
+  min_value: 0.0
+  max_value: 1.0
 
 bootstrap:
-  discount: 0.99
+  discount: 0.988
   lambda_gae: 0.95
 
-optim:
-  num_minibatches: 2
-  batch_size: 1
-  num_time_steps: 2
-  max_grad_norm: 2.0
-  target_update_freq: 2
-  target_update_size: 1
-  world_model_gradient_scale: 0.5
-  priority_exponent: 0.8
-  importance_exponent: 0.0
+buffer:
+  batch_size: 4
+  max_length: 100
+  sample_length: 2
 
-loss:
-  value_coef: 1
-  reward_coef: 0
+replay:
+  priority_exponent: 0.9
+  importance_exponent: 0.6
 
 lr:
-  lr_init: 0.1
-  warmup_frac: 0.1
-  decay_rate: 0.8
-  num_stairs: 2
+  init_value: 0.0
+  peak_value: 0.1
+  warmup_steps: 10
+  transition_steps: 10
+  decay_rate: 0.5
+  staircase: True
+
+optim:
+  total_updates: 100
+  num_updates_per_minibatch: 1
+  batch_size: 4
+  target_update_freq: 100
+
+loss:
+  policy_coef: 0.0
+  value_coef: 1.0
+  reward_coef: 0.0
 
 eval:
   warnings: False
-  num_evals: 4
-  num_eval_envs: 1
-  num_time_steps: 2
+  eval_freq: 1000

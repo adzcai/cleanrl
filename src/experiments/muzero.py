@@ -1035,12 +1035,14 @@ def make_train(config: TrainConfig):
 
             jax.debug.print(
                 "iter {step}/{num_iters}. "
+                "trained {trained}. "
                 "seen {transitions}/{total_transitions} txns. "
                 "update {num_updates}/{total_updates}. "
                 "{num_episodes} episodes: "
                 "return {mean_return:.02f}. "
                 "length {mean_length:.02f}. ",
                 step=iter_state.step,
+                trained=buffer_available,
                 num_iters=config.optim.num_iters,
                 transitions=param_state.buffer_state.pos * config.buffer.batch_size,
                 total_transitions=config.optim.num_iters

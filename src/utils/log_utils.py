@@ -26,14 +26,13 @@ def get_norm_data(tree: PyTree[Float[Array, " ..."]], prefix: str):
 def log_values(data: dict[str, Float[Array, ""]]):
     """Log a dict of values to wandb (or terminal if wandb is disabled)."""
 
-    def log(data: dict[str, Float[Array, ""]]):
+    @exec_callback
+    def log(data=data):
         data = jax.tree.map(lambda x: x.item(), data)
-        if wandb.run is not None:
-            wandb.log(data)
-        else:
+        if wandb.run is None or wandb.run.disabled:
             yaml.safe_dump(data, sys.stdout)
-
-    jax.debug.callback(log, data)
+        else:
+            wandb.log(data)
 
 
 def exec_callback(f: Callable):
