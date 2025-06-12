@@ -39,4 +39,3 @@ python src/experiments/muzero.py src/config/catch.yaml src/config/catch_sweep.ya
 ```
 
 This will output further instructions for executing the batch job.
-

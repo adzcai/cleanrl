@@ -21,6 +21,14 @@ dependencies = [
     "wandb[media]>=0.19.4",
 ]
 
+[dependency-groups]
+dev = [
+    "ipdb>=0.13.13",
+    "mypy>=1.16.0",
+    "pre-commit>=4.2.0",
+    "pytest>=8.4.0",
+]
+
 [project.scripts]
 muzero = "experiments.muzero:main"
 
@@ -39,9 +47,5 @@ housemaze = { git = "https://github.com/adzcai/JaxHouseMaze.git" }
 select = [ "E", "F", "I" ]
 ignore = ["F722"]
 
-[dependency-groups]
-dev = [
-    "ipdb>=0.13.13",
-    "pre-commit>=4.2.0",
-    "pytest>=8.4.0",
-]
+[tool.mypy]
+ignore_missing_imports = true
