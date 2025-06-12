@@ -4,7 +4,6 @@ Source: github.com/deepmind/bsuite/blob/master/bsuite/environments/catch.py.
 """
 
 import dataclasses as dc
-from typing import Annotated as Batched
 
 import dm_env.specs as specs
 import jax.numpy as jnp
@@ -90,9 +89,9 @@ def make_multi_catch(
 
         terminal = next_state.ball_y == params.rows - 1
         missed = paddle_x != next_state.ball_x
-        # if goal is zero, miss is success
-        # if goal is nonzero, catch is success
-        success = jnp.logical_xor(missed, env_state.goal)
+        # if goal is zero, catch is success
+        # if goal is nonzero, miss is success
+        success = jnp.logical_xor(missed, env_state.goal == 0)
         reward = terminal * jnp.where(success, 1.0, -1.0)
 
         return TimeStep(

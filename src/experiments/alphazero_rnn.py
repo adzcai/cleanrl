@@ -218,7 +218,7 @@ def make_train(config: TrainConfig):
     buffer = PrioritizedBuffer.new(
         batch_size=config.collection.num_envs,
         max_time=num_iters * config.env.horizon,
-        horizon=config.env.horizon,
+        sample_len=config.env.horizon,
     )
 
     def logits_to_value(
