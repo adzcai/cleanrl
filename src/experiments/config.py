@@ -373,6 +373,9 @@ def main(
         )
 
     print("Done training!")
+    # for some reason on the test runs the logs don't always sync
+    if wandb.run is not None:
+        wandb.run.finish()
 
 
 def run_train(

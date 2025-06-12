@@ -106,3 +106,11 @@ def get_weight_mask(net):
     weight_mask = eqx.tree_at(get_weights, weight_mask, [True] * len(get_weights(net)))
 
     return weight_mask
+
+
+def get_network_size(net):
+    size, nbytes = zip(
+        *[(x.size, x.nbytes) for x in jax.tree.leaves(net) if eqx.is_inexact_array(x)]
+    )
+
+    return sum(size), sum(nbytes)

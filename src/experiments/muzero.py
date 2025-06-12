@@ -33,6 +33,7 @@ from utils import specs
 from utils.jax_utils import (
     BootstrapConfig,
     bootstrap,
+    get_network_size,
     get_weight_mask,
     roll_into_matrix,
     scale_gradient,
@@ -88,8 +89,6 @@ class WorldModelRNN(eqx.Module):
     """Embed actions to `dyn_size`."""
     mlp: eqx.nn.MLP
     """MLP embedding."""
-    gradient_scale: float
-    """Scale the gradients at each step."""
 
     def __init__(
         self,
@@ -122,7 +121,6 @@ class WorldModelRNN(eqx.Module):
             use_final_bias=False,
             key=key_mlp,
         )
-        self.gradient_scale = config.world_model_gradient_scale
 
     @typecheck
     def step(
@@ -142,9 +140,8 @@ class WorldModelRNN(eqx.Module):
         out = jax.nn.relu(hidden_dyn) + self.embed_action(action)
         out = self.mlp(out)
         # TODO also use resnet-like structure for policy
-        next_hidden_dyn = scale_gradient(out, self.gradient_scale)
-        reward_logits = self.reward_head(next_hidden_dyn, goal_embedding)
-        return next_hidden_dyn, reward_logits
+        reward_logits = self.reward_head(out, goal_embedding)
+        return out, reward_logits
 
 
 class WorldModelResNet(eqx.Module):
@@ -399,12 +396,14 @@ class MuZeroNetwork(eqx.Module, Generic[TObs]):
         [TObs, Float[Array, " goal_dim"]], Float[Array, " dyn_size"]
     ]
     """Embed the observation into world model recurrent state."""
-    world_model: WorldModelRNN
-    """The recurrent world model."""
-    actor_critic: ActorCritic
-    """The actor and critic networks."""
     embed_goal: eqx.nn.Embedding
     """Embed the goal into a goal embedding (goal_dim)."""
+    actor_critic: ActorCritic
+    """The actor and critic networks."""
+    world_model: WorldModelRNN
+    """The recurrent world model."""
+    gradient_scale: float
+    """Scale the gradients at each step of the world model."""
 
     def __init__(
         self,
@@ -454,11 +453,8 @@ class MuZeroNetwork(eqx.Module, Generic[TObs]):
                 config=config, obs_spec=obs_spec, key=key_projection
             )  # type: ignore
 
-        self.world_model = WorldModelRNN(
-            config=config,
-            num_actions=num_actions,
-            num_value_bins=num_value_bins,
-            key=key_world_model,
+        self.embed_goal = eqx.nn.Embedding(
+            num_goals, config.goal_dim, key=key_embed_goal
         )
         self.actor_critic = ActorCritic(
             config=config,
@@ -466,9 +462,13 @@ class MuZeroNetwork(eqx.Module, Generic[TObs]):
             num_value_bins=num_value_bins,
             key=key_actor_critic,
         )
-        self.embed_goal = eqx.nn.Embedding(
-            num_goals, config.goal_dim, key=key_embed_goal
+        self.world_model = WorldModelRNN(
+            config=config,
+            num_actions=num_actions,
+            num_value_bins=num_value_bins,
+            key=key_world_model,
         )
+        self.gradient_scale = config.world_model_gradient_scale
 
     # @typecheck
     def world_model_rollout(
@@ -526,9 +526,7 @@ class MuZeroNetwork(eqx.Module, Generic[TObs]):
             hidden_dyn, action, goal_embedding
         )
         # Scale gradients to prevent vanishing/exploding
-        next_hidden_dyn = scale_gradient(
-            next_hidden_dyn, self.world_model.gradient_scale
-        )
+        next_hidden_dyn = scale_gradient(next_hidden_dyn, self.gradient_scale)
 
         return next_hidden_dyn, (reward, pred)
 
@@ -750,12 +748,13 @@ def make_env_and_network(config: TrainConfig):
         key=jr.key(0),
     )
     params, net_static = eqx.partition(net, eqx.is_inexact_array)
-
-    size, nbytes = zip(
-        *[(x.size, x.nbytes) for x in jax.tree.leaves(params) if x is not None]
-    )
-    print(f"network size (params): {sum(size)}")
-    print(f"network size (bytes): {sum(nbytes)}")
+    nparams, nbytes = get_network_size(params)
+    print(f"{get_network_size(params)=}")
+    print(f"{get_network_size(params.embed_observation)=}")
+    print(f"{get_network_size(params.embed_goal)=}")
+    print(f"{get_network_size(params.world_model)=}")
+    print(f"{get_network_size(params.actor_critic.policy_head)=}")
+    print(f"{get_network_size(params.actor_critic.value_head)=}")
 
     return env, env_params, num_actions, net_static
 

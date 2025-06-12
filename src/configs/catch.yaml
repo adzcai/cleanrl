@@ -58,4 +58,4 @@ loss:
 
 eval:
   warnings: False
-  eval_freq: 1000
+  eval_freq: 100

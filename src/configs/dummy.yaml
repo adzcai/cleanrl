@@ -46,8 +46,8 @@ lr:
 optim:
   total_updates: 100
   num_updates_per_minibatch: 1
-  batch_size: 4
-  target_update_freq: 100
+  batch_size: 2
+  target_update_freq: 10
 
 loss:
   policy_coef: 0.0
@@ -56,4 +56,4 @@ loss:
 
 eval:
   warnings: False
-  eval_freq: 1000
+  eval_freq: 50
