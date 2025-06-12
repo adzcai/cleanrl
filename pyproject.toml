@@ -9,7 +9,6 @@ dependencies = [
     "distrax>=0.1.5",
     "equinox>=0.11.11",
     "housemaze",
-    "ipdb>=0.13.13",
     "ipykernel>=6.29.5",
     "jax>=0.5.0 ; sys_platform != 'linux'",
     "jax[cuda12]>=0.5.0 ; sys_platform == 'linux'",
@@ -18,7 +17,6 @@ dependencies = [
     "omegaconf>=2.3.0",
     "optax>=0.2.4",
     "pygraphviz>=1.14 ; sys_platform != 'linux'",
-    "pytest>=8.3.4",
     "rlax>=0.1.6",
     "wandb[media]>=0.19.4",
 ]
@@ -40,3 +38,10 @@ housemaze = { git = "https://github.com/adzcai/JaxHouseMaze.git" }
 [tool.ruff.lint]
 select = [ "E", "F", "I" ]
 ignore = ["F722"]
+
+[dependency-groups]
+dev = [
+    "ipdb>=0.13.13",
+    "pre-commit>=4.2.0",
+    "pytest>=8.4.0",
+]

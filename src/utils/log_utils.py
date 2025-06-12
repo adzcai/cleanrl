@@ -11,7 +11,7 @@ import jax.random as jr
 import yaml
 from beartype import beartype as typechecker
 from chex import dataclass
-from jaxtyping import Array, Bool, Float, Key, PyTree, jaxtyped
+from jaxtyping import Array, Bool, Float, Integer, Key, PyTree, jaxtyped
 
 import wandb
 
@@ -51,7 +51,9 @@ def log_values(data: dict[str, Float[Array, ""]]):
     jax.debug.callback(log, data)
 
 
-def tree_slice(tree: PyTree[Array], at: int | tuple[int, ...] | slice) -> PyTree[Array]:
+def tree_slice(
+    tree: PyTree[Array], at: int | tuple[int | Integer[Array, ""], ...] | slice
+) -> PyTree[Array]:
     """Slice each leaf of a pytree at the given index or slice."""
     return jax.tree.map(lambda x: x[at], tree)
 
@@ -64,7 +66,7 @@ def exec_callback(f: Callable):
     return f
 
 
-def scale_gradient(x: Float[Array, "n"], factor: float):
+def scale_gradient(x: Float[Array, " n"], factor: float):
     return x * factor + jax.lax.stop_gradient((1 - factor) * x)
 
 
