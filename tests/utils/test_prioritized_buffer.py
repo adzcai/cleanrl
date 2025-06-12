@@ -17,8 +17,8 @@ def dummy_experience() -> dict[str, Float[Array, ""]]:
 def buffer(dummy_experience):
     buf = PrioritizedBuffer.new(
         batch_size=2,
-        max_time=5,
-        sample_len=3,
+        max_length=5,
+        sample_length=3,
     )
     state = buf.init(dummy_experience)
     return buf, state

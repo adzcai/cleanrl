@@ -9,8 +9,7 @@ from jaxtyping import Array, Integer
 
 from envs.dummy_env import simple_rollout
 from envs.multi_catch import BaseObs, make_multi_catch
-from experiments.config import BootstrapConfig
-from utils.jax_utils import bootstrap, roll_into_matrix, tree_slice
+from utils.jax_utils import BootstrapConfig, bootstrap, roll_into_matrix, tree_slice
 from utils.log_utils import exec_loop
 from utils.prioritized_buffer import PrioritizedBuffer
 from utils.structures import GoalObs, Prediction, Transition
@@ -116,8 +115,8 @@ def test_prioritized_buffer_sentinel_td_error():
     # Setup environment and buffer
     buffer = PrioritizedBuffer.new(
         batch_size=32,
-        max_time=32,
-        sample_len=10,
+        max_length=32,
+        sample_length=10,
     )
 
     env, params = make_multi_catch()
@@ -137,4 +136,4 @@ def test_prioritized_buffer_sentinel_td_error():
         buf_state = buf_state.add(ts, next_ts)
         return (next_ts, buf_state), None
 
-    (final_ts, buf_state), _ = exec_loop(buffer.max_time)(step_fn)
+    (final_ts, buf_state), _ = exec_loop(buffer.max_length)(step_fn)

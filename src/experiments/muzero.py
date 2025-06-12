@@ -7,7 +7,7 @@ import math
 import sys
 from collections.abc import Callable
 from typing import Annotated as Batched
-from typing import NamedTuple
+from typing import Generic, NamedTuple
 
 import chex
 import distrax
@@ -24,14 +24,20 @@ from envs.housemaze_env import HouseMazeObs
 from envs.translate import make_env
 from experiments.config import (
     ArchConfig,
-    BootstrapConfig,
     LossConfig,
     TrainConfig,
     ValueConfig,
     main,
 )
 from utils import specs
-from utils.jax_utils import bootstrap, roll_into_matrix, scale_gradient, tree_slice
+from utils.jax_utils import (
+    BootstrapConfig,
+    bootstrap,
+    get_weight_mask,
+    roll_into_matrix,
+    scale_gradient,
+    tree_slice,
+)
 from utils.log_utils import (
     exec_loop,
     get_norm_data,
@@ -42,6 +48,7 @@ from utils.log_utils import (
 from utils.prioritized_buffer import BufferState, PrioritizedBuffer
 from utils.structures import (
     Prediction,
+    TEnvState,
     TimeStep,
     TObs,
     Transition,
@@ -78,7 +85,7 @@ class WorldModelRNN(eqx.Module):
     reward_head: MLPConcatArgs
     """The reward model."""
     embed_action: eqx.nn.Embedding
-    """Embed actions to `rnn_size`."""
+    """Embed actions to `dyn_size`."""
     mlp: eqx.nn.MLP
     """MLP embedding."""
     gradient_scale: float
@@ -89,16 +96,15 @@ class WorldModelRNN(eqx.Module):
         config: ArchConfig,
         num_actions: int,
         num_value_bins: int,
-        gradient_scale: float,
         *,
         key: Key[Array, ""],
     ):
         key_reward, key_embed_action, key_mlp = jr.split(key, 3)
         self.embed_action = eqx.nn.Embedding(
-            num_actions, config.rnn_size, key=key_embed_action
+            num_actions, config.dyn_size, key=key_embed_action
         )
         self.reward_head = MLPConcatArgs(
-            in_size=config.rnn_size + config.goal_dim,
+            in_size=config.dyn_size + config.goal_dim,
             out_size=num_value_bins,
             width_size=config.mlp_size,
             depth=config.mlp_depth,
@@ -107,8 +113,8 @@ class WorldModelRNN(eqx.Module):
         )
         # TODO use haiku initialization
         self.mlp = eqx.nn.MLP(
-            in_size=config.rnn_size,
-            out_size=config.rnn_size,
+            in_size=config.dyn_size,
+            out_size=config.dyn_size,
             width_size=config.mlp_size,
             depth=config.mlp_depth,
             activation=getattr(jax.nn, config.activation),
@@ -116,15 +122,15 @@ class WorldModelRNN(eqx.Module):
             use_final_bias=False,
             key=key_mlp,
         )
-        self.gradient_scale = gradient_scale
+        self.gradient_scale = config.world_model_gradient_scale
 
     @typecheck
     def step(
         self,
-        hidden_dyn: Float[Array, " rnn_size"],
+        hidden_dyn: Float[Array, " dyn_size"],
         action: Integer[Array, ""],
         goal_embedding: Float[Array, " goal_dim"],
-    ) -> tuple[Float[Array, " rnn_size"], Float[Array, " num_value_bins"]]:
+    ) -> tuple[Float[Array, " dyn_size"], Float[Array, " num_value_bins"]]:
         """An imagined state transition (`env.step`).
 
         Transitions to the next hidden state and emits predicted reward from the transition.
@@ -157,7 +163,7 @@ class WorldModelResNet(eqx.Module):
     norm2: eqx.nn.LayerNorm
     """Layer normalization for the MLP."""
     embed_action: eqx.nn.Embedding
-    """Embed actions to `rnn_size`."""
+    """Embed actions to `dyn_size`."""
     mlp: eqx.nn.MLP
     """MLP embedding."""
     gradient_scale: float
@@ -174,15 +180,15 @@ class WorldModelResNet(eqx.Module):
     ):
         key_cell, key_reward, key_embed_action, key_mlp = jr.split(key, 4)
         self.embed_action = eqx.nn.Embedding(
-            num_actions, config.rnn_size, key=key_embed_action
+            num_actions, config.dyn_size, key=key_embed_action
         )
-        self.norm1 = eqx.nn.LayerNorm(config.rnn_size)
-        self.norm2 = eqx.nn.LayerNorm(config.rnn_size)
+        self.norm1 = eqx.nn.LayerNorm(config.dyn_size)
+        self.norm2 = eqx.nn.LayerNorm(config.dyn_size)
         self.linear = eqx.nn.Linear(
-            config.rnn_size, config.rnn_size, use_bias=False, key=key_cell
+            config.dyn_size, config.dyn_size, use_bias=False, key=key_cell
         )
         self.reward_head = MLPConcatArgs(
-            in_size=config.rnn_size + config.goal_dim,
+            in_size=config.dyn_size + config.goal_dim,
             out_size=num_value_bins,
             width_size=config.mlp_size,
             depth=config.mlp_depth,
@@ -191,8 +197,8 @@ class WorldModelResNet(eqx.Module):
         )
         # TODO use haiku initialization
         self.mlp = eqx.nn.MLP(
-            in_size=config.rnn_size,
-            out_size=config.rnn_size,
+            in_size=config.dyn_size,
+            out_size=config.dyn_size,
             width_size=config.mlp_size,
             depth=config.mlp_depth,
             activation=getattr(jax.nn, config.activation),
@@ -203,10 +209,10 @@ class WorldModelResNet(eqx.Module):
     @typecheck
     def step(
         self,
-        hidden_dyn: Float[Array, " rnn_size"],
+        hidden_dyn: Float[Array, " dyn_size"],
         action: Integer[Array, ""],
         goal_embedding: Float[Array, " goal_dim"],
-    ) -> tuple[Float[Array, " rnn_size"], Float[Array, " num_value_bins"]]:
+    ) -> tuple[Float[Array, " dyn_size"], Float[Array, " num_value_bins"]]:
         """An imagined state transition (`env.step`).
 
         Transitions to the next hidden state and emits predicted reward from the transition.
@@ -242,7 +248,7 @@ class ActorCritic(eqx.Module):
     ):
         key_policy, key_value = jr.split(key)
         self.policy_head = MLPConcatArgs(
-            config.rnn_size + config.goal_dim,
+            config.dyn_size + config.goal_dim,
             num_actions,
             config.mlp_size,
             config.mlp_depth,
@@ -250,7 +256,7 @@ class ActorCritic(eqx.Module):
             key=key_policy,
         )
         self.value_head = MLPConcatArgs(
-            config.rnn_size + config.goal_dim,
+            config.dyn_size + config.goal_dim,
             num_value_bins,
             config.mlp_size,
             config.mlp_depth,
@@ -260,9 +266,9 @@ class ActorCritic(eqx.Module):
 
     def __call__(
         self,
-        hidden: Float[Array, " rnn_size"],
+        hidden: Float[Array, " dyn_size"],
         goal_embedding: Float[Array, " goal_dim"],
-    ):
+    ) -> Prediction:
         """Predict action and value logits from the hidden state."""
         return Prediction(
             policy_logits=self.policy_head(hidden, goal_embedding),
@@ -307,7 +313,7 @@ class HouseMazeEmbedding(eqx.Module):
         self.norm = eqx.nn.LayerNorm(config.obs_dim)  # we map over the components
         self.mlp = MLPConcatArgs(
             in_size=obs_flattened_size * config.obs_dim + config.goal_dim,
-            out_size=config.rnn_size,
+            out_size=config.dyn_size,
             width_size=config.mlp_size,
             depth=config.mlp_depth,
             activation=getattr(jax.nn, config.activation),
@@ -338,7 +344,7 @@ class CNNEmbedding(eqx.Module):
     """Embed an observation using a CNN projection."""
     projection: eqx.nn.Linear
 
-    def __init__(self, obs_size, mlp_size, rnn_size, *, key: Key[Array, ""]):
+    def __init__(self, obs_size, mlp_size, dyn_size, *, key: Key[Array, ""]):
         key_cnn, key_linear = jr.split(key)
         # TODO implement cnn projection
         # (C, H, W)
@@ -350,7 +356,7 @@ class CNNEmbedding(eqx.Module):
         )
         flat_size = self.cnn(jnp.empty(obs_size)).size
         self.projection = eqx.nn.Linear(
-            in_features=flat_size, out_features=rnn_size, key=key_linear
+            in_features=flat_size, out_features=dyn_size, key=key_linear
         )
 
     def __call__(self, obs, goal_embedding: Float[Array, " goal_dim"]):
@@ -370,7 +376,13 @@ class OAREmbedding(eqx.Module):
         self.mlp = MLPConcatArgs(*args, **kwargs)
         self.num_actions = num_actions
 
-    def __call__(self, x: OAR, goal_embedding: Float[Array, " goal_dim"], *, key=None):
+    def __call__(
+        self,
+        x: OAR[Float[Array, " *obs_size"]],
+        goal_embedding: Float[Array, " goal_dim"],
+        *,
+        key=None,
+    ) -> Float[Array, " dyn_size"]:
         """Embed the OAR observation and goal into a recurrent state."""
         # OAR is a tuple of (obs, action, reward)
         obs = jnp.ravel(x.obs)
@@ -380,16 +392,19 @@ class OAREmbedding(eqx.Module):
         return obs_embedding
 
 
-class MuZeroNetwork(eqx.Module):
+class MuZeroNetwork(eqx.Module, Generic[TObs]):
     """The entire MuZero network parameters."""
 
-    projection: Callable[[PyTree[Array], PyTree[Array]], Array]
+    embed_observation: Callable[
+        [TObs, Float[Array, " goal_dim"]], Float[Array, " dyn_size"]
+    ]
     """Embed the observation into world model recurrent state."""
     world_model: WorldModelRNN
     """The recurrent world model."""
     actor_critic: ActorCritic
     """The actor and critic networks."""
     embed_goal: eqx.nn.Embedding
+    """Embed the goal into a goal embedding (goal_dim)."""
 
     def __init__(
         self,
@@ -398,7 +413,6 @@ class MuZeroNetwork(eqx.Module):
         num_actions: int,
         num_value_bins: int,
         num_goals: int,
-        world_model_gradient_scale: float,
         *,
         key: Key[Array, ""],
     ):
@@ -407,15 +421,15 @@ class MuZeroNetwork(eqx.Module):
         )
 
         if isinstance(obs_spec, OAR):
-            self.projection = OAREmbedding(
+            self.embed_observation = OAREmbedding(
                 in_size=obs_spec.obs.size + 1 + num_actions + config.goal_dim,
-                out_size=config.rnn_size,
+                out_size=config.dyn_size,
                 width_size=config.mlp_size,
                 depth=config.mlp_depth,
                 activation=getattr(jax.nn, config.activation),
                 num_actions=num_actions,
                 key=key_projection,
-            )
+            )  # type: ignore
 
         elif config.projection_kind == "mlp":
             # ensure flattened input
@@ -423,28 +437,27 @@ class MuZeroNetwork(eqx.Module):
                 obs_spec[0].shape if isinstance(obs_spec, list) else obs_spec.shape
             )
             assert len(obs_size) == 1, f"MLP expects flattened input. Got {obs_size}"
-            self.projection = MLPConcatArgs(
+            self.embed_observation = MLPConcatArgs(
                 in_size=obs_size[0] + config.goal_dim,
-                out_size=config.rnn_size,
+                out_size=config.dyn_size,
                 width_size=config.mlp_size,
                 depth=config.mlp_depth,
                 activation=getattr(jax.nn, config.activation),
                 key=key_projection,
             )
         elif config.projection_kind == "cnn":
-            self.projection = CNNEmbedding(
-                obs_spec.shape, config.mlp_size, config.rnn_size, key=key_projection
+            self.embed_observation = CNNEmbedding(
+                obs_spec.shape, config.mlp_size, config.dyn_size, key=key_projection
             )
         elif config.projection_kind == "housemaze":
-            self.projection = HouseMazeEmbedding(
+            self.embed_observation = HouseMazeEmbedding(
                 config=config, obs_spec=obs_spec, key=key_projection
-            )
+            )  # type: ignore
 
         self.world_model = WorldModelRNN(
             config=config,
             num_actions=num_actions,
             num_value_bins=num_value_bins,
-            gradient_scale=world_model_gradient_scale,
             key=key_world_model,
         )
         self.actor_critic = ActorCritic(
@@ -453,27 +466,17 @@ class MuZeroNetwork(eqx.Module):
             num_value_bins=num_value_bins,
             key=key_actor_critic,
         )
-        if False:
-            # initialize the goal embedder like a word embedding matrix
-            # standard normal truncated
-            linear = eqx.nn.Embedding(num_goals, config.goal_dim, key=jr.key(0))
-            weights = jr.truncated_normal(
-                key_embed_goal, -1.96, 1.96, linear.weight.shape
-            )
-            self.embed_goal = eqx.tree_at(lambda x: x.weight, linear, weights)
-        else:
-            # default initialization
-            self.embed_goal = eqx.nn.Embedding(
-                num_goals, config.goal_dim, key=key_embed_goal
-            )
+        self.embed_goal = eqx.nn.Embedding(
+            num_goals, config.goal_dim, key=key_embed_goal
+        )
 
     # @typecheck
     def world_model_rollout(
         self,
-        goal_obs: GoalObs[Float[Array, " *obs_size"]],
+        goal_obs: GoalObs[TObs],
         action_s: Integer[Array, " horizon"],
     ) -> tuple[
-        Float[Array, " rnn_size"],
+        Float[Array, " dyn_size"],
         tuple[Float[Array, " horizon"], Batched[Prediction, " horizon"]],
     ]:
         """Roll out an imagined trajectory by taking the actions from goal_obs.
@@ -483,12 +486,12 @@ class MuZeroNetwork(eqx.Module):
             action (Integer (horizon,)): The series of actions to take.
 
         Returns:
-            tuple[Float (rnn_size,), tuple[Float (horizon,), Prediction (horizon,)]]: The resulting hidden world state;
+            tuple[Float (dyn_size,), tuple[Float (horizon,), Prediction (horizon,)]]: The resulting hidden world state;
                 The predicted rewards for taking the given actions (including from `goal_obs`);
                 The predicted policy logits and values at the imagined states (including `goal_obs`).
         """
         goal_embedding = self.embed_goal(goal_obs.goal)
-        init_hidden_dyn = self.projection(goal_obs.obs, goal_embedding)
+        init_hidden_dyn = self.embed_observation(goal_obs.obs, goal_embedding)
         return jax.lax.scan(
             lambda hidden_dyn, action: self.step(hidden_dyn, action, goal_embedding),
             init_hidden_dyn,
@@ -498,21 +501,21 @@ class MuZeroNetwork(eqx.Module):
     @typecheck
     def step(
         self,
-        hidden_dyn: Float[Array, " rnn_size"],
+        hidden_dyn: Float[Array, " dyn_size"],
         action: Integer[Array, ""],
         goal_embedding: Float[Array, " goal_dim"],
     ) -> tuple[
-        Float[Array, " rnn_size"], tuple[Float[Array, " num_value_bins"], Prediction]
+        Float[Array, " dyn_size"], tuple[Float[Array, " num_value_bins"], Prediction]
     ]:
         """Evaluate the actor-critic on `hidden` and take one imagined step using the world model.
 
         Args:
-            hidden_dyn (Float (rnn_size,)): The hidden world state.
+            hidden_dyn (Float (dyn_size,)): The hidden world state.
             action (int): The action taken from the represented state.
             goal (int): The current goal.
 
         Returns:
-            tuple[Float[Array, " rnn_size"], tuple[Float[Array, ""], Prediction]]: The resulting hidden world state;
+            tuple[Float[Array, " dyn_size"], tuple[Float[Array, ""], Prediction]]: The resulting hidden world state;
                 The predicted reward for taking the given action;
                 The predicted policy logits and value of the original `hidden_dyn` state.
         """
@@ -626,7 +629,7 @@ def loss_trajectory(
     )
 
     loss = (
-        policy_loss
+        loss_cfg.policy_coef * policy_loss
         + loss_cfg.value_coef * value_loss
         + loss_cfg.reward_coef * reward_loss
     )
@@ -731,7 +734,10 @@ def compute_reward_loss(
 def make_env_and_network(config: TrainConfig):
     """Construct the environment and network from the configuration."""
     env, env_params = make_env(config.env)
-    action_space: specs.BoundedArray = env.action_space(env_params)
+    action_space = env.action_space(env_params)
+    assert isinstance(action_space, specs.BoundedArray), (
+        f"Expected BoundedArray action space, got {type(action_space)}"
+    )
     num_actions = action_space.num_values
     num_goals = env.goal_space(env_params).num_values
 
@@ -741,7 +747,6 @@ def make_env_and_network(config: TrainConfig):
         num_actions=num_actions,
         num_value_bins=config.value.num_value_bins,
         num_goals=num_goals,
-        world_model_gradient_scale=config.optim.world_model_gradient_scale,
         key=jr.key(0),
     )
     params, net_static = eqx.partition(net, eqx.is_inexact_array)
@@ -752,21 +757,14 @@ def make_env_and_network(config: TrainConfig):
     print(f"network size (params): {sum(size)}")
     print(f"network size (bytes): {sum(nbytes)}")
 
-    return env, env_params, net_static
+    return env, env_params, num_actions, net_static
 
 
 def make_train(config: TrainConfig):
     """Return a jittable training function for MuZero."""
-    eval_freq = config.optim.num_iters // config.eval.num_evals
-
     # construct environment
     # use the initial parameters to construct optimizer weight decay mask
-    env, env_params, net_static = make_env_and_network(config)
-    action_space = env.action_space(env_params)
-    assert isinstance(action_space, specs.BoundedArray), (
-        f"Expected BoundedArray action space, got {type(action_space)}"
-    )
-    num_actions = action_space.num_values
+    env, env_params, num_actions, net_static = make_env_and_network(config)
     num_goals = env.goal_space(env_params).num_values
 
     env_reset_b = jax.vmap(env.reset, in_axes=(None,))
@@ -777,37 +775,21 @@ def make_train(config: TrainConfig):
     lr_schedule = optax.warmup_exponential_decay_schedule(**config.lr)
 
     # only apply weight decay to weights
-    def has_weight(x):
-        return hasattr(x, "weight")
-
-    def get_weights(net):
-        return [
-            leaf.weight
-            for leaf in jax.tree.leaves(net, is_leaf=has_weight)
-            if has_weight(leaf)
-        ]
-
-    weights_mask = jax.tree.map(
-        lambda _: False, net_static, is_leaf=lambda x: x is None
-    )
-    weights_mask = eqx.tree_at(
-        get_weights, weights_mask, [True] * len(get_weights(net_static))
-    )
-    del net_static
     optim = optax.chain(
-        optax.clip_by_global_norm(config.optim.max_grad_norm),
+        optax.clip_by_global_norm(jnp.pi),
         # https://optax.readthedocs.io/en/latest/getting_started.html#accessing-learning-rate
         optax.inject_hyperparams(
-            ft.partial(optax.adamw, eps=1e-3, weight_decay=1e-4, mask=weights_mask)
+            ft.partial(
+                optax.adamw,
+                eps=1e-3,
+                weight_decay=1e-4,
+                mask=get_weight_mask(net_static),
+            )
         )(learning_rate=lr_schedule),
     )
+    del net_static
 
-    buffer_args = dict(
-        batch_size=config.collection.num_envs,
-        max_time=config.buffer.num_transitions_per_env,
-        sample_len=config.optim.num_time_steps,
-    )
-    buffer = PrioritizedBuffer.new(**buffer_args)
+    buffer = PrioritizedBuffer.new(**dc.asdict(config.buffer))
 
     if False:
 
@@ -834,34 +816,33 @@ def make_train(config: TrainConfig):
 
     def train(key: Key[Array, ""]):
         key_reset, key_net, key_iter = jr.split(key, 3)
+        del key
 
         print(env.fullname)
         print("=" * 25)
         yaml.safe_dump(dc.asdict(config), sys.stdout)
         print("=" * 25)
-        yaml.safe_dump(buffer_args, sys.stdout)
-        print("=" * 25)
 
-        # initialize all state
+        # ========== Initialize all state ==========
+
         init_net = MuZeroNetwork(
             config=config.arch,
             obs_spec=env.observation_space(env_params),
             num_actions=num_actions,
             num_value_bins=config.value.num_value_bins,
             num_goals=num_goals,
-            world_model_gradient_scale=config.optim.world_model_gradient_scale,
             key=key_net,
         )
         init_params, net_static = eqx.partition(init_net, eqx.is_inexact_array)
 
         init_timestep_b = env_reset_b(
-            env_params, key=jr.split(key_reset, config.collection.num_envs)
+            env_params, key=jr.split(key_reset, config.buffer.batch_size)
         )
         init_transition = Transition(
             time_step=tree_slice(init_timestep_b, 0),
             action=jnp.empty((), int),
             pred=init_net.actor_critic(
-                jnp.empty(config.arch.rnn_size, float),
+                jnp.empty(config.arch.dyn_size, float),
                 init_net.embed_goal(init_timestep_b.obs.goal[0]),
             ),
             mcts_probs=jnp.empty(num_actions, float),
@@ -872,6 +853,8 @@ def make_train(config: TrainConfig):
         )
         print(f"buffer size (bytes): {buffer_state_bytes}")
         print_bytes(init_buffer_state)
+
+        # ========== Training loop ==========
 
         @exec_loop(config.optim.num_iters)
         def iterate(
@@ -892,7 +875,8 @@ def make_train(config: TrainConfig):
             1. Collect a batch of rollouts in parallel and add it to the buffer.
             2. Run a few epochs of local optimization using sampled data from the buffer.
             """
-            key_rollout, key_optim, key_evaluate = jr.split(key, 3)
+            key_rollout, key_optim = jr.split(key)
+            del key
 
             # collect data
             next_timestep_b, txn_bs = rollout(
@@ -936,19 +920,25 @@ def make_train(config: TrainConfig):
 
                 # "reanalyze" the policy targets via mcts with target parameters
                 # predict uniform distribution for the last step
-                mcts_probs_bs = jax.vmap(act_mcts, in_axes=(None, 1), out_axes=1)(
+                target_pred_bs, mcts_out_bs = jax.vmap(
+                    act_mcts, in_axes=(None, 1), out_axes=1
+                )(
                     eqx.combine(iter_state.target_params, net_static),
                     txn_bs.time_step.obs,
-                    key=jr.split(key_reanalyze, config.optim.num_time_steps),
-                )[1].action_weights
+                    key=jr.split(key_reanalyze, config.buffer.sample_length),
+                )
+                # mcts_values_bs: Float[Array, " batch_size horizon node"] = (
+                #     mcts_out_bs.search_tree.node_values
+                # )  # type: ignore
                 txn_bs = txn_bs._replace(
+                    pred=target_pred_bs,
                     mcts_probs=jnp.where(
                         # TODO this should be for terminal states not truncated
                         # jnp.isclose(txn_bs.time_step.discount, 0.0),
                         txn_bs.time_step.is_last[..., jnp.newaxis],
                         jnp.ones(num_actions) / num_actions,
-                        mcts_probs_bs,
-                    )
+                        mcts_out_bs.action_weights,
+                    ),
                 )
 
                 if False:
@@ -1036,12 +1026,8 @@ def make_train(config: TrainConfig):
 
             # occasionally update target
             target_params: MuZeroNetwork = jax.tree.map(
-                lambda online, target: jnp.where(
-                    iter_state.step % config.optim.target_update_freq == 0,
-                    optax.incremental_update(
-                        online, target, config.optim.target_update_size
-                    ),  # type: ignore
-                    target,
+                ft.partial(
+                    jnp.where, iter_state.step % config.optim.target_update_freq == 0
                 ),
                 param_state.params,
                 iter_state.target_params,
@@ -1049,19 +1035,22 @@ def make_train(config: TrainConfig):
 
             jax.debug.print(
                 "iter {step}/{num_iters}. "
-                "seen {transitions}/{total_transitions} transitions. "
-                "available {available}. "
-                "mean return {mean_return:.02f}. "
-                "mean length {mean_length:.02f}. "
-                "{num_episodes} episodes collected.",
+                "seen {transitions}/{total_transitions} txns. "
+                "update {num_updates}/{total_updates}. "
+                "{num_episodes} episodes: "
+                "return {mean_return:.02f}. "
+                "length {mean_length:.02f}. ",
                 step=iter_state.step,
                 num_iters=config.optim.num_iters,
-                transitions=param_state.buffer_state.pos * config.collection.num_envs,
-                total_transitions=config.total_transitions,
-                available=buffer_available,
+                transitions=param_state.buffer_state.pos * config.buffer.batch_size,
+                total_transitions=config.optim.num_iters
+                * config.buffer.sample_length
+                * config.buffer.batch_size,
+                num_updates=config.optim.num_updates_per_minibatch * iter_state.step,
+                total_updates=config.optim.total_updates,
+                num_episodes=jnp.sum(txn_bs.time_step.is_last),
                 mean_return=mean_return,
                 mean_length=mean_length,
-                num_episodes=jnp.sum(txn_bs.time_step.is_last),
             )
 
             if config.eval.warnings:
@@ -1076,7 +1065,7 @@ def make_train(config: TrainConfig):
 
             # visualization
             jax.lax.cond(
-                (iter_state.step % eval_freq == 0) & buffer_available,
+                (iter_state.step % config.eval.eval_freq == 0) & buffer_available,
                 # env name is invalid jax type (str) so pass statically
                 ft.partial(jax.debug.callback, visualize_trajectory, config.env.name),
                 lambda *args: None,
@@ -1131,15 +1120,16 @@ def make_train(config: TrainConfig):
 
     def rollout(
         net: MuZeroNetwork,
-        init_time_step_b: Batched[TimeStep, " num_envs"],
+        init_time_step_b: Batched[TimeStep[GoalObs[TObs], TEnvState], " num_envs"],
         *,
         key: Key[Array, ""],
     ) -> tuple[
-        Batched[TimeStep, " num_envs"], Batched[Transition, " num_envs horizon"]
+        Batched[TimeStep[GoalObs[TObs], TEnvState], " num_envs"],
+        Batched[Transition[GoalObs[TObs], TEnvState], " num_envs horizon"],
     ]:
         """Collect a batch of trajectories."""
 
-        @exec_loop(config.collection.num_transitions_per_env)
+        @exec_loop(config.buffer.sample_length)
         def rollout_step(time_step_b=init_time_step_b, key=key):
             """Take a single step in the true environment using the MCTS policy."""
             key_action, key_step = jr.split(key)
@@ -1150,7 +1140,7 @@ def make_train(config: TrainConfig):
                 time_step_b.state,
                 action_b,
                 env_params,
-                key=jr.split(key_step, config.collection.num_envs),
+                key=jr.split(key_step, config.buffer.batch_size),
             )
             return next_time_step_b, Transition(
                 # contains the reward and network predictions computed from the rollout state
@@ -1181,7 +1171,7 @@ def make_train(config: TrainConfig):
                 and the MCTS output of planning from the timestep.
         """
         goal_embedding_b = jax.vmap(net.embed_goal)(obs_b.goal)
-        init_hidden_dyn_b = jax.vmap(net.projection)(obs_b.obs, goal_embedding_b)
+        init_hidden_dyn_b = jax.vmap(net.embed_observation)(obs_b.obs, goal_embedding_b)
         del obs_b  # not needed anymore
         pred_b = jax.vmap(net.actor_critic)(init_hidden_dyn_b, goal_embedding_b)
 
@@ -1201,28 +1191,28 @@ def make_train(config: TrainConfig):
             _: None,  # closure net
             key: Key[Array, ""],
             action_b: Integer[Array, " num_envs"],
-            hidden_dyn_b: Float[Array, " num_envs rnn_size"],
-        ) -> tuple[mctx.RecurrentFnOutput, Float[Array, " num_envs rnn_size"]]:
+            dyn_b: Float[Array, " num_envs dyn_size"],
+        ) -> tuple[mctx.RecurrentFnOutput, Float[Array, " num_envs dyn_size"]]:
             """World model transition function.
 
             Returns:
-                tuple[mctx.RecurrentFnOutput, Float (num_envs, rnn_size)]: The logits and value
+                tuple[mctx.RecurrentFnOutput, Float (num_envs, dyn_size)]: The logits and value
                     computed by the actor-critic network for the newly created node;
                     The hidden state representing the state following `hiddens`.
             """
-            hidden_dyn_b, reward_b = jax.vmap(net.world_model.step)(
-                hidden_dyn_b, action_b, goal_embedding_b
+            dyn_b, reward_logits_b = jax.vmap(net.world_model.step)(
+                dyn_b, action_b, goal_embedding_b
             )
-            pred_b = jax.vmap(net.actor_critic)(hidden_dyn_b, goal_embedding_b)
+            pred_b = jax.vmap(net.actor_critic)(dyn_b, goal_embedding_b)
             return (
                 mctx.RecurrentFnOutput(
-                    reward=config.value.logits_to_value(reward_b),  # type: ignore
+                    reward=config.value.logits_to_value(reward_logits_b),  # type: ignore
                     # TODO termination
                     discount=jnp.full(action_b.shape[0], config.bootstrap.discount),  # type: ignore
                     prior_logits=pred_b.policy_logits,  # type: ignore
                     value=config.value.logits_to_value(pred_b.value_logits),  # type: ignore
                 ),
-                hidden_dyn_b,
+                dyn_b,
             )
 
         out = mctx.gumbel_muzero_policy(
@@ -1230,9 +1220,8 @@ def make_train(config: TrainConfig):
             rng_key=key,
             root=root,
             recurrent_fn=mcts_recurrent_fn,  # type: ignore
-            num_simulations=config.collection.num_mcts_simulations,
             invalid_actions=invalid_actions,
-            max_depth=config.collection.mcts_depth,
+            **config.mcts,
         )
 
         return pred_b, out

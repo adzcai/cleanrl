@@ -64,12 +64,12 @@ class ActorCriticRNN(eqx.Module):
         activation = jax.nn.relu if arch.activation == "relu" else jax.nn.tanh
 
         self.cell = (
-            eqx.nn.GRUCell(obs_size, arch.rnn_size, key=key_cell)
-            if arch.rnn_size > 0
+            eqx.nn.GRUCell(obs_size, arch.dyn_size, key=key_cell)
+            if arch.dyn_size > 0
             else None
         )
 
-        in_size = arch.rnn_size if self.is_rnn else obs_size
+        in_size = arch.dyn_size if self.is_rnn else obs_size
 
         self.policy_head = eqx.nn.MLP(
             in_size,
@@ -192,15 +192,15 @@ class LossStatistics(NamedTuple):
 
 @jaxtyped(typechecker=typechecker)
 def make_train(config: TrainConfig):
-    num_iters = config.collection.total_transitions // (
-        config.collection.num_envs * config.env.horizon
+    num_iters = config.mcts.total_transitions // (
+        config.mcts.num_envs * config.env.horizon
     )
     num_updates = num_iters * config.optim.num_updates_per_minibatch
-    eval_freq = num_iters // config.eval.num_evals
+    eval_freq = num_iters // config.eval.eval_freq
 
     env, env_params = make_env(config.env, goal=False)
     env_params = env_params.replace(
-        max_steps_in_episode=config.collection.total_transitions
+        max_steps_in_episode=config.mcts.total_transitions
     )  # don't truncate
     num_actions = env.action_space(env_params).n
     # env: gymnax.environments.environment.Environment = FlattenObservationWrapper(env)
@@ -217,9 +217,9 @@ def make_train(config: TrainConfig):
     )
 
     buffer = PrioritizedBuffer.new(
-        batch_size=config.collection.num_envs,
-        max_time=num_iters * config.env.horizon,
-        sample_len=config.env.horizon,
+        batch_size=config.mcts.num_envs,
+        max_length=num_iters * config.env.horizon,
+        sample_length=config.env.horizon,
     )
 
     def logits_to_value(
@@ -279,7 +279,7 @@ def make_train(config: TrainConfig):
 
         init_obs, init_env_states = env_reset_batch(
             env_params,
-            key=jr.split(key_reset, config.collection.num_envs),
+            key=jr.split(key_reset, config.mcts.num_envs),
         )
 
         # initialize all state
@@ -292,14 +292,14 @@ def make_train(config: TrainConfig):
         )
         init_params, net_static = eqx.partition(init_net, eqx.is_inexact_array)
         init_hiddens = jnp.broadcast_to(
-            init_net.init_hidden(), (config.collection.num_envs, config.arch.rnn_size)
+            init_net.init_hidden(), (config.mcts.num_envs, config.arch.dyn_size)
         )
         init_rollout_states = RolloutState(
             obs=init_obs,
             unobs=Unobs(
                 env_state=init_env_states,
                 hidden=init_hiddens,
-                initial=jnp.ones(config.collection.num_envs, jnp.bool),
+                initial=jnp.ones(config.mcts.num_envs, jnp.bool),
             ),
         )
         init_buffer_state = buffer.init(
@@ -442,8 +442,8 @@ def make_train(config: TrainConfig):
                 "step {}/{}. seen {}/{} transitions. mean return {}",
                 iter_state.step,
                 num_iters,
-                iter_state.step * config.collection.num_envs * config.env.horizon,
-                config.collection.total_transitions,
+                iter_state.step * config.mcts.num_envs * config.env.horizon,
+                config.mcts.total_transitions,
                 mean_return,
             )
 
@@ -545,7 +545,7 @@ def make_train(config: TrainConfig):
             rng_key=key,
             root=root,
             recurrent_fn=mcts_recurrent_fn,
-            num_simulations=config.collection.num_mcts_simulations,
+            num_simulations=config.mcts.num_mcts_simulations,
             invalid_actions=invalid_actions,
             max_depth=config.env.horizon,
         )
@@ -658,7 +658,7 @@ def make_train(config: TrainConfig):
             unobs=Unobs(
                 env_state=env_state,
                 hidden=jnp.broadcast_to(
-                    net.init_hidden(), (num_envs, config.arch.rnn_size)
+                    net.init_hidden(), (num_envs, config.arch.dyn_size)
                 ),
                 initial=jnp.zeros(num_envs, dtype=bool),
             ),

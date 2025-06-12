@@ -67,7 +67,9 @@ from jaxtyping import Array, Float, Key
 from omegaconf import DictConfig, ListConfig, OmegaConf
 
 import wandb
+from utils.jax_utils import BootstrapConfig
 from utils.log_utils import typecheck
+from utils.prioritized_buffer import BufferConfig
 from utils.structures import TDataclass, dataclass
 from wandb.sdk.wandb_run import Run
 
@@ -122,12 +124,13 @@ DEFAULT_CONFIG = Config(
 class ArchConfig:
     """Network architecture"""
 
-    rnn_size: int
+    dyn_size: int
     mlp_size: int
     mlp_depth: int
     goal_dim: int
     activation: str
     projection_kind: Literal["mlp", "cnn", "housemaze"]
+    world_model_gradient_scale: float  # scale the world model gradients per step
     obs_dim: int | None = None
     """Dimension of observation embedding.
     The number of "orthogonal directions" among observation components."""
@@ -140,26 +143,6 @@ class EnvConfig:
     name: str
     source: Literal["gymnax", "brax", "navix", "custom"] = "gymnax"
     kwargs: dict[str, Any] = dc.field(default_factory=dict)
-
-
-@dataclass
-class CollectionConfig:
-    """For episode rollouts."""
-
-    num_envs: int  # more parallel data collection
-    num_transitions_per_env: int
-    mcts_depth: int | None
-    num_mcts_simulations: int  # stronger policy improvement
-
-
-@dataclass
-class BufferConfig:
-    """For storing transitions."""
-
-    num_transitions_per_env: int  # number of transitions per environment
-    priority_exponent: float  # prioritized replay
-    importance_exponent: float
-    """Probability to recompute policy targets."""
 
 
 @dataclass
@@ -204,38 +187,33 @@ class ValueConfig:
 
 
 @dataclass
-class BootstrapConfig:
-    """For bootstrapping with a target network."""
-
-    discount: float
-    lambda_gae: float
-
-
-@dataclass
 class OptimConfig:
     """Optimization parameters"""
 
-    num_updates: int  # total number of gradient descent updates
+    total_updates: int  # total number of gradient descent updates
     num_updates_per_minibatch: int  # number of gradient descent updates per iteration
     batch_size: int  # reduce gradient variance
-    num_time_steps: int
-    max_grad_norm: float
-
     target_update_freq: int  # in global iterations
-    target_update_size: float
-    """The target network is updated `target_update_size` of the way to the online network."""
-
-    world_model_gradient_scale: float  # scale the world model gradients per step
 
     @property
     def num_iters(self) -> int:
-        return self.num_updates // self.num_updates_per_minibatch
+        return self.total_updates // self.num_updates_per_minibatch
+
+
+@dataclass
+class ReplayConfig:
+    """Replay buffer configuration."""
+
+    priority_exponent: float  # prioritized replay
+    importance_exponent: float
+    """Probability to recompute policy targets."""
 
 
 @dataclass
 class LossConfig:
     """Loss coefficients for the different components of the loss function."""
 
+    policy_coef: float  # scale the policy loss
     value_coef: float  # scale the value loss
     reward_coef: float  # scale the reward loss
 
@@ -245,7 +223,7 @@ class EvalConfig:
     """Evaluation of the learned policy and value function."""
 
     warnings: bool
-    num_evals: int
+    eval_freq: int
 
 
 @dataclass
@@ -254,30 +232,22 @@ class TrainConfig(Config):
 
     arch: ArchConfig  # type: ignore
     env: EnvConfig  # type: ignore
-    collection: CollectionConfig  # type: ignore
     value: ValueConfig  # type: ignore
     bootstrap: BootstrapConfig  # type: ignore
     optim: OptimConfig  # type: ignore
     buffer: BufferConfig  # type: ignore
+    replay: ReplayConfig  # type: ignore
+    mcts: dict[str, Any]  # type: ignore
     lr: dict[str, Any]  # type: ignore
     loss: LossConfig  # type: ignore
     eval: EvalConfig  # type: ignore
 
     @property
     def name(self):
-        return f"{self.env.name} {self.optim.num_updates}"
-
-    @property
-    def total_transitions(self) -> int:
-        """Total number of transitions to collect during training."""
-        return (
-            self.optim.num_iters
-            * self.collection.num_envs
-            * self.collection.num_transitions_per_env
-        )
+        return f"{self.env.name} {self.optim.total_updates}"
 
     def validate(self):
-        if self.optim.num_time_steps <= 1:
+        if self.buffer.sample_length <= 1:
             raise ValueError(
                 "Updates must use at least two timesteps for bootstrapping."
             )

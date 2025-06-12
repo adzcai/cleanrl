@@ -2,20 +2,29 @@ from collections.abc import Callable
 from typing import Annotated as Batched
 from typing import TypeVar
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import rlax
 from jaxtyping import Array, Float, Integer
 
-from experiments.config import BootstrapConfig
 from utils.structures import (
     TArrayTree,
     TEnvState,
     TObs,
     Transition,
+    dataclass,
 )
 
 TAux = TypeVar("TAux")
+
+
+@dataclass
+class BootstrapConfig:
+    """For bootstrapping with a target network."""
+
+    discount: float
+    lambda_gae: float
 
 
 def bootstrap(
@@ -26,9 +35,9 @@ def bootstrap(
     txn_s: Batched[Transition[TObs, TEnvState], " horizon"],
     config: BootstrapConfig,
 ) -> tuple[Float[Array, " horizon-1 horizon-1"], TAux]:
-    """Abstracted out for plotting.
+    """Abstracted out for testing.
 
-    Note that we use `Timestep.discount` rather than `Timestep.step_type`.
+    Note that we use `TimeStep.discount` rather than `TimeStep.step_type`.
 
     Returns:
         tuple[Prediction (horizon, horizon), Float (horizon, horizon-1)]: The rolled matrix of network predictions;
@@ -75,3 +84,25 @@ def tree_slice(
 
 def scale_gradient(x: Float[Array, " n"], factor: float):
     return x * factor + jax.lax.stop_gradient((1 - factor) * x)
+
+
+def get_weight_mask(net):
+    """Replace network pytree with True at the weight matrices and False otherwise.
+
+    Useful so that weight decay is applied only to the weight matrices.
+    """
+
+    def has_weight(x):
+        return hasattr(x, "weight")
+
+    def get_weights(net):
+        return [
+            leaf.weight
+            for leaf in jax.tree.leaves(net, is_leaf=has_weight)
+            if has_weight(leaf)
+        ]
+
+    weight_mask = jax.tree.map(lambda _: False, net, is_leaf=lambda x: x is None)
+    weight_mask = eqx.tree_at(get_weights, weight_mask, [True] * len(get_weights(net)))
+
+    return weight_mask

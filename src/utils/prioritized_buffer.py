@@ -37,7 +37,16 @@ class Sample(Generic[TExperience]):
 
 
 @dataclass
-class PrioritizedBuffer(Generic[TExperience]):
+class BufferConfig:
+    """Configuration for the prioritized buffer."""
+
+    batch_size: int
+    max_length: int
+    sample_length: int
+
+
+@dataclass
+class PrioritizedBuffer(BufferConfig, Generic[TExperience]):
     """A buffer that contains experiences and priority weights.
 
     We use "idx" to refer to the flattened index (across batches)
@@ -45,25 +54,22 @@ class PrioritizedBuffer(Generic[TExperience]):
     i.e. idx = batch * max_time + pos.
     """
 
-    batch_size: int
-    max_time: int
-    sample_len: int
     priority_tree: "SumTree"
 
     @classmethod
-    def new(cls, batch_size: int, max_time: int, sample_len: int):
+    def new(cls, batch_size: int, max_length: int, sample_length: int):
         return cls(
             batch_size=batch_size,
-            max_time=max_time,
-            sample_len=sample_len,
-            priority_tree=SumTree.new(batch_size * max_time),
+            max_length=max_length,
+            sample_length=sample_length,
+            priority_tree=SumTree.new(batch_size * max_length),
         )
 
     def init(self, experience: TExperience) -> BufferState[TExperience]:
         """Initialize buffer from a dummy experience."""
         data = jax.tree.map(
             lambda x: jnp.empty_like(
-                x, shape=(self.batch_size, self.max_time, *x.shape)
+                x, shape=(self.batch_size, self.max_length, *x.shape)
             ),
             experience,
         )
@@ -89,7 +95,7 @@ class PrioritizedBuffer(Generic[TExperience]):
             BufferState[Experience]: The updated buffer.
         """
         added_len = jax.tree.leaves(experience)[0].shape[1]
-        pos_ary = (state.pos + jnp.arange(added_len)) % self.max_time
+        pos_ary = (state.pos + jnp.arange(added_len)) % self.max_length
         data = jax.tree.map(
             lambda whole, new: whole.at[:, pos_ary].set(new), state.data, experience
         )
@@ -98,7 +104,7 @@ class PrioritizedBuffer(Generic[TExperience]):
         # TODO currently incorrect for initial trajectory if too short
         state = self.set_priorities_by_pos(
             state,
-            state.pos - self.sample_len - jnp.arange(added_len),
+            state.pos - self.sample_length - jnp.arange(added_len),
             state.priority_state.max_priority,
         )
         # when we wrap back to the front of the buffer,
@@ -106,7 +112,7 @@ class PrioritizedBuffer(Generic[TExperience]):
         # (that would cross over into old data)
         state = self.set_priorities_by_pos(
             state,
-            state.pos - 1 - jnp.arange(self.sample_len - 1),
+            state.pos - 1 - jnp.arange(self.sample_length - 1),
             jnp.zeros(()),
         )
         return state
@@ -117,7 +123,7 @@ class PrioritizedBuffer(Generic[TExperience]):
         pos: Float[Array, " horizon"],
         priorities: Float[Array, ""],
     ):
-        pos = jnp.maximum(0, pos) % self.max_time
+        pos = jnp.maximum(0, pos) % self.max_length
         pos = jnp.broadcast_to(pos, (self.batch_size, pos.size))
         idx = jax.vmap(self.pos_to_flat, in_axes=(1,))(pos)
         state = self.set_priorities(state, idx.ravel(), priorities[jnp.newaxis])
@@ -128,7 +134,7 @@ class PrioritizedBuffer(Generic[TExperience]):
     ) -> UInt[Array, " batch_size"]:
         # e.g. suppose max_time is 4 and batch_size is 3
         # then pos_to_flat([2 1 3]) = [2 1 3] + [0 4 8] = [2 5 11]
-        return pos + self.max_time * jnp.arange(self.batch_size)
+        return pos + self.max_length * jnp.arange(self.batch_size)
 
     def set_priorities(
         self,
@@ -150,7 +156,7 @@ class PrioritizedBuffer(Generic[TExperience]):
         idx, priority = self.priority_tree.sample(
             state.priority_state, key_sample, debug=debug
         )
-        batch, pos = divmod(idx, self.max_time)
+        batch, pos = divmod(idx, self.max_length)
 
         # ensure valid indices
         # sample from uniform if invalid
@@ -159,7 +165,7 @@ class PrioritizedBuffer(Generic[TExperience]):
         pos = jnp.where(pos < pos_avail, pos, fallback_pos)
 
         # take trajectories
-        pos_ary = (pos + jnp.arange(self.sample_len)) % self.max_time
+        pos_ary = (pos + jnp.arange(self.sample_length)) % self.max_length
         return Sample(
             experience=tree_slice(state.data, (batch, pos_ary)),
             idx=idx,
@@ -173,9 +179,9 @@ class PrioritizedBuffer(Generic[TExperience]):
         is entirely populated.
         """
         return jnp.where(
-            state.pos < self.sample_len,
+            state.pos < self.sample_length,
             0,
-            jnp.minimum(state.pos, self.max_time) - self.sample_len + 1,
+            jnp.minimum(state.pos, self.max_length) - self.sample_length + 1,
         )
 
     def num_available(self, state: BufferState[TExperience]) -> Integer[Array, ""]:
