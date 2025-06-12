@@ -4,14 +4,14 @@ from typing import Generic
 import jax.numpy as jnp
 from jaxtyping import Array, Float, Integer
 
+from envs.base import Environment
 from utils.structures import (
-    Environment,
     TEnvParams,
     TEnvState,
     TObs,
-    Wrapper,
     dataclass,
 )
+from wrappers.base import Wrapper
 
 
 @dataclass

@@ -1,20 +1,20 @@
 """A minimal dummy environment for testing wrappers and environment interfaces."""
 
-import dm_env.specs as specs
 import jax
 import jax.numpy as jnp
 import jax.random as jr
 from jaxtyping import Array, Float, Integer, Key
 
-from utils.log_utils import dataclass
+from envs.base import Environment
+from utils import specs
 from utils.structures import (
-    Environment,
     StepType,
     TAction,
     TEnvParams,
     TEnvState,
     TimeStep,
     TObs,
+    dataclass,
 )
 
 
@@ -54,7 +54,9 @@ def make_dummy_env(max_horizon: int) -> tuple[DummyEnv, Params]:
         name="dummy",
         reset=dummy_reset,
         step=dummy_step,
-        action_space=lambda params: specs.DiscreteArray(num_values=1, name="action"),
+        action_space=lambda params: specs.BoundedArray.discrete(
+            num_values=1, name="action"
+        ),
         observation_space=lambda params: specs.BoundedArray(
             (1,),
             dtype=jnp.float_,

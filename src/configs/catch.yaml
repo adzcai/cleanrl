@@ -1,6 +1,6 @@
 arch:
   projection_kind: mlp
-  rnn_size: 128
+  rnn_size: 48
   mlp_size: 48
   mlp_depth: 1
   goal_dim: 4
@@ -10,15 +10,15 @@ env:
   name: MultiCatch
   source: custom
   kwargs:
-    num_goals: 2
+    num_goals: 1
 
 collection:
-  total_transitions: 50_000
-  num_envs: 64
-  num_buffer_fills: 2
+  total_transitions: 150_000
+  num_envs: 32
+  num_buffer_fills: 4
   num_time_steps: 10
   mcts_depth: 10
-  num_mcts_simulations: 4
+  num_mcts_simulations: 2
 
 value:
   num_value_bins: 9
@@ -32,11 +32,11 @@ bootstrap:
 lr:
   lr_init: 0.05
   warmup_frac: 0.1
-  decay_rate: 0.75
-  num_stairs: 8
+  decay_rate: 0.5
+  num_stairs: 6
 
 optim:
-  num_minibatches: 8
+  num_minibatches: 4
   batch_size: 64
   num_time_steps: 20
   max_grad_norm: 3.14

@@ -1,6 +1,5 @@
 from typing import Any, NamedTuple
 
-import dm_env.specs as specs
 import housemaze.env as maze
 import housemaze.levels as maze_levels
 import housemaze.renderer as renderer
@@ -9,7 +8,9 @@ import jax
 import jax.numpy as jnp
 from jaxtyping import Array, Float, Integer, Key, PyTree
 
-from utils.structures import Environment, GoalObs, StepType, TimeStep
+from envs.base import Environment
+from utils import specs
+from utils.structures import GoalObs, StepType, TimeStep
 
 
 class HouseMazeObs(NamedTuple):
@@ -65,7 +66,7 @@ def new_housemaze():
     objects = jnp.array([object_to_index[v] for v in char_to_key.values()])
     env_params = maze.EnvParams(
         map_init=jax.tree.map(jnp.asarray, map_init),
-        time_limit=jnp.asarray(50),
+        time_limit=50,
         objects=jnp.asarray(objects),
     )
     task_runner = maze.TaskRunner(task_objects=env_params.objects)
@@ -106,11 +107,13 @@ def housemaze_wrapper(
                 name="image",
             ),
             # "state_features": spaces.Box(low=-jnp.inf, high=jnp.inf, dtype=float),
-            direction=specs.DiscreteArray(len(maze.DIR_TO_VEC), name="direction"),
-            row=specs.DiscreteArray(height, name="row"),
-            column=specs.DiscreteArray(width, name="width"),
+            direction=specs.BoundedArray.discrete(
+                len(maze.DIR_TO_VEC), name="direction"
+            ),
+            row=specs.BoundedArray.discrete(height, name="row"),
+            column=specs.BoundedArray.discrete(width, name="width"),
             # housemaze reset_action sets to num_actions + 1
-            prev_action=specs.DiscreteArray(
+            prev_action=specs.BoundedArray.discrete(
                 env.num_actions(params) + 2, name="prev_action"
             ),
         )
@@ -128,8 +131,9 @@ def housemaze_wrapper(
         action: Integer[Array, ""],
         params: maze.EnvParams,
         *,
-        key: Key[Array, ""],
+        key: Key[Array, ""] | None = None,
     ):
+        assert key is not None, "Key required for stochastic transitions."
         env_timestep = env.step(key, env_state, action, params)
         obs = env_timestep.observation
         step_type = jnp.select(
@@ -151,26 +155,29 @@ def housemaze_wrapper(
         )
 
     return Environment(
-        _inner=None,
+        _inner=None,  # type: ignore
         name="HouseMaze",
         reset=reset,
         step=step,
-        action_space=lambda params: specs.DiscreteArray(
+        action_space=lambda params: specs.BoundedArray.discrete(
             env.num_actions(params), name="action"
         ),
         observation_space=observation_space,
-        goal_space=lambda params: specs.DiscreteArray(len(params.objects), name="goal"),
+        goal_space=lambda params: specs.BoundedArray.discrete(
+            len(params.objects), name="goal"
+        ),
     )
 
 
 def visualize_housemaze(
     timestep: maze.TimeStep,
 ) -> Float[Array, " channel height width"]:
+    r, c = timestep.state.agent_pos
     video: Float[Array, " height width channel"] = jax.vmap(
         renderer.create_image_from_grid, in_axes=(0, 0, 0, None)
     )(
         timestep.state.grid,
-        timestep.state.agent_pos,
+        (r, c),
         timestep.state.agent_dir,
         image_dict,
     )

@@ -5,13 +5,13 @@ Source: github.com/deepmind/bsuite/blob/master/bsuite/environments/catch.py.
 
 import dataclasses as dc
 
-import dm_env.specs as specs
 import jax.numpy as jnp
 import jax.random as jr
 from jaxtyping import Array, Float, Integer, Key
 
-from utils.log_utils import dataclass
-from utils.structures import Environment, GoalObs, StepType, TimeStep
+from envs.base import Environment
+from utils import specs
+from utils.structures import GoalObs, StepType, TimeStep, dataclass
 
 BaseObs = Float[Array, " rows columns"]
 
@@ -104,11 +104,11 @@ def make_multi_catch(
         )
 
     def action_space(params: EnvParams):
-        return specs.DiscreteArray(3, name="action")
+        return specs.BoundedArray.discrete(3, name="action")
 
     def observation_space(params: EnvParams):
         return specs.BoundedArray(
-            (params.rows, params.columns),
+            shape=(params.rows, params.columns),
             dtype=float,
             minimum=0,
             maximum=1,
@@ -116,7 +116,7 @@ def make_multi_catch(
         )
 
     def goal_space(params: EnvParams):
-        return specs.DiscreteArray(params.num_goals, name="goal")
+        return specs.BoundedArray.discrete(params.num_goals, name="goal")
 
     return Environment(
         _inner=None,  # type: ignore

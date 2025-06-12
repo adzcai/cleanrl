@@ -1,9 +1,9 @@
-import dm_env.specs as specs
 import jax.numpy as jnp
 from jaxtyping import Array, Float, Integer
 
-from utils.log_utils import dataclass
-from utils.structures import Environment, StepType, TimeStep
+from envs.base import Environment
+from utils import specs
+from utils.structures import StepType, TimeStep, dataclass
 
 
 @dataclass
@@ -19,10 +19,10 @@ def reset(params, *, key):
         b=jnp.zeros((2, 2)),
         scalar=jnp.float_(0.0),
     )
-    return TimeStep.initial(obs=obs, state=0, info={})
+    return TimeStep.initial(obs=obs, state=jnp.int_(0), info={})
 
 
-def step(env_state: int, action, params, *, key):
+def step(env_state: Integer[Array, ""], action, params, *, key=None):
     state = env_state + 1
     obs = Observation(
         a=jnp.arange(3) + state,
@@ -57,14 +57,14 @@ def observation_space(params):
     )
 
 
-def make_pytree_env() -> Environment[Observation, int, None, None]:
+def make_pytree_env() -> Environment[Observation, Integer[Array, ""], None, None]:
     """Create a dummy environment with a pytree observation."""
     return Environment(
         _inner=None,  # type: ignore
         name="pytree_env",
         reset=reset,
         step=step,
-        action_space=lambda params: None,
+        action_space=lambda params: specs.BoundedArray.discrete(1, name="action"),
         observation_space=observation_space,
         goal_space=lambda params: None,
     )

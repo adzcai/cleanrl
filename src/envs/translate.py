@@ -1,20 +1,13 @@
 from typing import Any
 
-from envs.housemaze import housemaze_wrapper, new_housemaze
+from envs.base import Environment
+from envs.housemaze_env import housemaze_wrapper, new_housemaze
+from utils.log_utils import GYMNAX_INSTALLED, NAVIX_INSTALLED
 from utils.structures import (
-    GYMNAX_INSTALLED,
-    NAVIX_INSTALLED,
-    Environment,
     StepType,
     TimeStep,
 )
 
-if GYMNAX_INSTALLED:
-    import gymnax.environments.environment as ge
-    import gymnax.environments.spaces as spaces
-
-if NAVIX_INSTALLED:
-    import navix as nx
 
 import jax
 import jax.numpy as jnp
@@ -30,6 +23,8 @@ from wrappers.goal_wrapper import goal_wrapper
 from wrappers.metrics import metrics_wrapper
 
 if GYMNAX_INSTALLED:
+    import gymnax.environments.environment as ge
+    import gymnax.environments.spaces as spaces
 
     def gymnax_wrapper(
         env: ge.Environment[ge.TEnvState, ge.TEnvParams], params: ge.TEnvParams
@@ -108,12 +103,14 @@ def make_env(env_config: EnvConfig, goal=True) -> tuple[Environment, Any]:
 
     if env_config.source == "gymnax":
         env, params = gymnax.make(env_config.name, **env_config.kwargs)
-        env = gymnax_wrapper(env)
+        env = gymnax_wrapper(env, params)
         env = metrics_wrapper(env)
         env = flatten_observation_wrapper(env)
         if goal:
             env = goal_wrapper(env)
     elif env_config.source == "navix":
+        import navix as nx
+
         env = nx.make(env_config.name, **env_config.kwargs)
         env = navix_wrapper(env)
         env = metrics_wrapper(env)

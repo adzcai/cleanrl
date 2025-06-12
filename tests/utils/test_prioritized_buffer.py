@@ -15,10 +15,11 @@ def dummy_experience() -> dict[str, Float[Array, ""]]:
 
 @pytest.fixture
 def buffer(dummy_experience):
-    batch_size = 2
-    max_time = 5
-    horizon = 3
-    buf = PrioritizedBuffer.new(batch_size, max_time, horizon)
+    buf = PrioritizedBuffer.new(
+        batch_size=2,
+        max_time=5,
+        sample_len=3,
+    )
     state = buf.init(dummy_experience)
     return buf, state
 
@@ -38,18 +39,18 @@ def test_add_and_sample(buffer, dummy_experience):
     buf, state = buffer
     # Add a batch of experiences
     batch = {
-        "obs": jnp.arange(buf.batch_size * buf.horizon * 4).reshape(
-            buf.batch_size, buf.horizon, 4
+        "obs": jnp.arange(buf.batch_size * buf.sample_len * 4).reshape(
+            buf.batch_size, buf.sample_len, 4
         )
     }
     state = buf.add(state, batch)
     # After adding, pos should be advanced
-    assert state.pos == buf.horizon
+    assert state.pos == buf.sample_len
     # Sample from buffer
     key = jax.random.PRNGKey(0)
     sample = buf.sample(state, key=key)
     # Check sample shape
-    assert sample.experience["obs"].shape == (buf.horizon, 4)
+    assert sample.experience["obs"].shape == (buf.sample_len, 4)
     assert sample.idx.shape == ()
     assert sample.priority.shape == ()
 
@@ -67,8 +68,8 @@ def test_priority_sum_matches_root(buffer, dummy_experience):
     buf, state = buffer
     # Add a batch of experiences
     batch = {
-        "obs": jnp.arange(buf.batch_size * buf.horizon * 4).reshape(
-            buf.batch_size, buf.horizon, 4
+        "obs": jnp.arange(buf.batch_size * buf.sample_len * 4).reshape(
+            buf.batch_size, buf.sample_len, 4
         )
     }
     state = buf.add(state, batch)
@@ -87,8 +88,8 @@ def test_multiple_priority_updates(buffer, dummy_experience):
     buf, state = buffer
     # Add a batch of experiences
     batch = {
-        "obs": jnp.arange(buf.batch_size * buf.horizon * 4).reshape(
-            buf.batch_size, buf.horizon, 4
+        "obs": jnp.arange(buf.batch_size * buf.sample_len * 4).reshape(
+            buf.batch_size, buf.sample_len, 4
         )
     }
     state = buf.add(state, batch)
@@ -113,7 +114,7 @@ def test_num_available(buffer, dummy_experience):
     # Initially, not enough data for a trajectory
     assert buf.num_available(state) == 0
     # Add enough data
-    batch = {"obs": jnp.ones((buf.batch_size, buf.horizon, 4))}
+    batch = {"obs": jnp.ones((buf.batch_size, buf.sample_len, 4))}
     state = buf.add(state, batch)
     # Now should have available trajectories
     assert buf.num_available(state) > 0
@@ -123,26 +124,28 @@ def test_new_experience_priority_is_max(buffer, dummy_experience):
     buf, state = buffer
     max_priority = state.priority_state.max_priority
     # Add a new experience
-    batch = {"obs": jnp.ones((buf.batch_size, buf.horizon, 4))}
+    batch = {"obs": jnp.ones((buf.batch_size, buf.sample_len, 4))}
 
     state = buf.add(state, batch)
-    assert state.pos == buf.horizon
-    idx = buf.pos_to_flat(jnp.zeros((buf.batch_size,), dtype=int))
+    assert state.pos == buf.sample_len
+    idx_pos_zero = buf.pos_to_flat(jnp.zeros((buf.batch_size,), dtype=int))
     priorities = state.priority_state.nodes[buf.priority_tree.leaf_idx :]
-    desired = jnp.zeros_like(priorities).at[idx].set(max_priority)
+    desired = jnp.zeros_like(priorities).at[idx_pos_zero].set(max_priority)
     npt.assert_array_equal(priorities, desired)
 
     new_priorities = max_priority + jnp.arange(buf.batch_size, dtype=float)
-    state = buf.set_priorities(state, idx, new_priorities)
+    state = buf.set_priorities(state, idx_pos_zero, new_priorities)
+
+    batch = {"obs": jnp.ones((buf.batch_size, 2, 4))}
     state = buf.add(state, batch)
     next_idx = jax.vmap(buf.pos_to_flat)(
         jnp.ones((buf.batch_size,), dtype=int)[jnp.newaxis, :]
-        + jnp.arange(buf.horizon)[:, jnp.newaxis]
+        + jnp.arange(2)[:, jnp.newaxis]
     ).ravel()
     priorities = state.priority_state.nodes[buf.priority_tree.leaf_idx :]
     desired = (
         jnp.zeros_like(priorities)
-        .at[idx]
+        .at[idx_pos_zero]
         .set(new_priorities)
         .at[next_idx]
         .set(jnp.max(new_priorities))

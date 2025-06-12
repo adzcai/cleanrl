@@ -11,7 +11,6 @@ from typing import NamedTuple
 
 import chex
 import distrax
-import dm_env.specs as specs
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -21,7 +20,7 @@ import optax
 import yaml
 from jaxtyping import Array, Bool, Float, Integer, Key, PyTree
 
-from envs.housemaze import HouseMazeObs
+from envs.housemaze_env import HouseMazeObs
 from envs.translate import make_env
 from experiments.config import (
     ArchConfig,
@@ -31,17 +30,16 @@ from experiments.config import (
     ValueConfig,
     main,
 )
+from utils import specs
+from utils.jax_utils import bootstrap, roll_into_matrix, scale_gradient, tree_slice
 from utils.log_utils import (
     exec_loop,
     get_norm_data,
     log_values,
     print_bytes,
-    scale_gradient,
-    tree_slice,
     typecheck,
 )
 from utils.prioritized_buffer import BufferState, PrioritizedBuffer
-from utils.rl_utils import bootstrap, roll_into_matrix
 from utils.structures import (
     Prediction,
     TimeStep,
@@ -654,7 +652,7 @@ def compute_reward_loss(
 def get_static(config: TrainConfig):
     # construct environment
     env, env_params = make_env(config.env)
-    action_space: specs.DiscreteArray = env.action_space(env_params)
+    action_space: specs.BoundedArray = env.action_space(env_params)
     num_actions = action_space.num_values
     num_goals = env.goal_space(env_params).num_values
 
@@ -678,7 +676,7 @@ def make_train(config: TrainConfig):
 
     # construct environment
     env, env_params = make_env(config.env)
-    action_space: specs.DiscreteArray = env.action_space(env_params)
+    action_space: specs.BoundedArray = env.action_space(env_params)
     num_actions = action_space.num_values
     num_goals = env.goal_space(env_params).num_values
 
@@ -706,7 +704,7 @@ def make_train(config: TrainConfig):
     buffer_args = dict(
         batch_size=config.collection.num_envs,
         max_time=config.collection.buffer_time_axis,
-        horizon=config.optim.num_time_steps,
+        sample_len=config.optim.num_time_steps,
     )
     buffer = PrioritizedBuffer.new(**buffer_args)
 
@@ -900,7 +898,7 @@ def make_train(config: TrainConfig):
                 aux: dict[str, Float[Array, " batch_size"]]
                 grads: MuZeroNetwork
                 updates, opt_state = optim.update(
-                    grads,
+                    grads,  # type: ignore
                     param_state.opt_state,
                     param_state.params,  # type: ignore
                 )

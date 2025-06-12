@@ -8,20 +8,20 @@ import jax.numpy as jnp
 import jax.random as jr
 from jaxtyping import Array, Bool, Key
 
-from utils.log_utils import dataclass
+from envs.base import Environment
 from utils.structures import (
-    Environment,
     TAction,
+    TDataclass,
     TEnvParams,
-    TEnvState,
     TimeStep,
     TObs,
-    Wrapper,
+    dataclass,
 )
+from wrappers.base import Wrapper
 
 
 @dataclass
-class PrevDone(Wrapper[TEnvState]):
+class PrevDone(Wrapper[TDataclass]):
     """We follow the dm_env convention of returning terminal states.
 
     Note that the TimeStep object has an is_last property
@@ -32,9 +32,12 @@ class PrevDone(Wrapper[TEnvState]):
 
 
 def auto_reset_wrapper(
-    env: Environment[TObs, TEnvState, TAction, TEnvParams],
-) -> Environment[TObs, PrevDone[TEnvState], TAction, TEnvParams]:
-    """Automatically reset the environment after an episode."""
+    env: Environment[TObs, TDataclass, TAction, TEnvParams],
+) -> Environment[TObs, PrevDone[TDataclass], TAction, TEnvParams]:
+    """Automatically reset the environment after an episode.
+
+    The env_state for the wrapped class must be a dataclass.
+    """
 
     def reset(params: TEnvParams, *, key: Key[Array, ""]):
         timestep = env.reset(params, key=key)
@@ -44,7 +47,7 @@ def auto_reset_wrapper(
         )
 
     def step(
-        env_state: PrevDone[TEnvState],
+        env_state: PrevDone[TDataclass],
         action: TAction,
         params: TEnvParams,
         *,
@@ -53,7 +56,7 @@ def auto_reset_wrapper(
         key_reset, key_step = jr.split(key)
         timestep_reset = env.reset(params, key=key_reset)
         timestep_step = env.step(env_state._inner, action, params, key=key_step)
-        timestep: TimeStep[TObs, TEnvState] = jax.tree.map(
+        timestep: TimeStep[TObs, TDataclass] = jax.tree.map(
             ft.partial(jnp.where, env_state.is_last),
             timestep_reset,
             timestep_step,

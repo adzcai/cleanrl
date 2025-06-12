@@ -2,16 +2,17 @@
 
 import dataclasses as dc
 from typing import Annotated as Batched
-from typing import Generic, TypeVar
+from typing import Generic
 
 import jax
 import jax.numpy as jnp
 import jax.random as jr
-from jaxtyping import Array, Float, Integer, Key, PyTree, UInt
+from jaxtyping import Array, Float, Integer, Key, UInt
 
-from utils.log_utils import dataclass, exec_callback, tree_slice
-
-TExperience = TypeVar("TExperience", bound=PyTree[Array])
+from utils.jax_utils import tree_slice
+from utils.log_utils import exec_callback
+from utils.structures import TArrayTree as TExperience
+from utils.structures import dataclass
 
 
 @dataclass
@@ -87,25 +88,39 @@ class PrioritizedBuffer(Generic[TExperience]):
         Returns:
             BufferState[Experience]: The updated buffer.
         """
-        horizon = jax.tree.leaves(experience)[0].shape[1]
-        pos_ary = (state.pos + jnp.arange(horizon)) % self.max_time
+        added_len = jax.tree.leaves(experience)[0].shape[1]
+        pos_ary = (state.pos + jnp.arange(added_len)) % self.max_time
         data = jax.tree.map(
             lambda whole, new: whole.at[:, pos_ary].set(new), state.data, experience
         )
-        state = dc.replace(state, data=data, pos=state.pos + horizon)
+        state = dc.replace(state, data=data, pos=state.pos + added_len)
         # enable the trajectories starting up to this point
         # TODO currently incorrect for initial trajectory if too short
-        pos_enabled = (
-            jnp.maximum(0, state.pos - self.sample_len - jnp.arange(horizon))
-            % self.max_time
-        )
-        pos_enabled = jnp.broadcast_to(pos_enabled, (self.batch_size, horizon))
-        idx_enabled = jax.vmap(self.pos_to_flat, in_axes=(1,))(pos_enabled)
-        state = self.set_priorities(
+        state = self.set_priorities_by_pos(
             state,
-            idx_enabled.ravel(),
-            state.priority_state.max_priority[jnp.newaxis],
+            state.pos - self.sample_len - jnp.arange(added_len),
+            state.priority_state.max_priority,
         )
+        # when we wrap back to the front of the buffer,
+        # disable the positions that now no longer can be sampled
+        # (that would cross over into old data)
+        state = self.set_priorities_by_pos(
+            state,
+            state.pos - 1 - jnp.arange(self.sample_len - 1),
+            jnp.zeros(()),
+        )
+        return state
+
+    def set_priorities_by_pos(
+        self,
+        state: BufferState[TExperience],
+        pos: Float[Array, " horizon"],
+        priorities: Float[Array, ""],
+    ):
+        pos = jnp.maximum(0, pos) % self.max_time
+        pos = jnp.broadcast_to(pos, (self.batch_size, pos.size))
+        idx = jax.vmap(self.pos_to_flat, in_axes=(1,))(pos)
+        state = self.set_priorities(state, idx.ravel(), priorities[jnp.newaxis])
         return state
 
     def pos_to_flat(
@@ -281,7 +296,7 @@ class SumTree:
 
     def sample(
         self, state: SumTreeState, key: Key[Array, ""], debug=False
-    ) -> UInt[Array, ""]:
+    ) -> tuple[UInt[Array, ""], Float[Array, ""]]:
         """Sample a single index from the priorities.
 
         Raises:
@@ -301,7 +316,7 @@ class SumTree:
         if debug:
 
             @exec_callback
-            def debug(
+            def debug_callback(
                 error=jnp.any(idx - self.leaf_idx >= self.size),
                 top=state.nodes[0],
                 total=state.nodes[self.leaf_idx :].sum(),

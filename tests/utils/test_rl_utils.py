@@ -1,3 +1,6 @@
+import functools as ft
+
+import jax
 import jax.numpy as jnp
 import jax.random as jr
 import numpy as np
@@ -7,7 +10,9 @@ from jaxtyping import Array, Integer
 from envs.dummy_env import simple_rollout
 from envs.multi_catch import BaseObs, make_multi_catch
 from experiments.config import BootstrapConfig
-from utils.rl_utils import bootstrap, roll_into_matrix
+from utils.jax_utils import bootstrap, roll_into_matrix, tree_slice
+from utils.log_utils import exec_loop
+from utils.prioritized_buffer import PrioritizedBuffer
 from utils.structures import GoalObs, Prediction, Transition
 from wrappers.auto_reset import auto_reset_wrapper
 
@@ -104,3 +109,32 @@ def test_bootstrap_catch():
     last_sh = roll_into_matrix(ts_s.is_last)
     npt.assert_equal(np.asarray(boot_value_sh[last_sh[:-1, :-1]]), 0.0)
     # assert jnp.all(boot_value_sh[0, :] == (1 - gamma**n) / (1 - gamma))
+
+
+def test_prioritized_buffer_sentinel_td_error():
+    """Prioritized buffer shouldn't produce large negative TD errors due to sentinel values."""
+    # Setup environment and buffer
+    buffer = PrioritizedBuffer.new(
+        batch_size=32,
+        max_time=32,
+        sample_len=10,
+    )
+
+    env, params = make_multi_catch()
+    env = auto_reset_wrapper(env)
+
+    key_reset, key_rollout = jr.split(jr.key(0), 2)
+    init_ts = jax.vmap(ft.partial(env.reset, params))(key=key_reset)
+    x = tree_slice(init_ts, 0)
+    buf_state = buffer.init(x)
+
+    def step_fn(carry=(init_ts, buf_state), key=key_rollout):
+        ts, buf_state = carry
+        actions = jr.randint(key, (buffer.batch_size,), 0, 3)
+        next_ts = jax.vmap(
+            lambda key, action: env.step(ts.state, action, params, key=key)
+        )(jr.split(key, buffer.batch_size), actions)
+        buf_state = buf_state.add(ts, next_ts)
+        return (next_ts, buf_state), None
+
+    (final_ts, buf_state), _ = exec_loop(buffer.max_time)(step_fn)

@@ -15,8 +15,8 @@ env:
 collection:
   total_transitions: 50
   num_time_steps: 2
-  num_buffer_fills: 2
-  num_envs: 1
+  num_buffer_fills: 4
+  num_envs: 4
   mcts_depth: 1
   num_mcts_simulations: 1
 

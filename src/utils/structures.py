@@ -6,8 +6,8 @@ This API is inspired by dm_env:
 https://github.com/google-deepmind/dm_env/blob/master/docs/index.md
 """
 
-import dataclasses as dc
-from collections.abc import Callable
+import functools as ft
+from collections.abc import Collection
 from enum import IntEnum, auto
 from typing import (
     TYPE_CHECKING,
@@ -22,40 +22,34 @@ from typing import (
 )
 
 import jax.numpy as jnp
-from dm_env.specs import Array as ArraySpec
-from jaxtyping import Array, Float, Integer, Key, PyTree
+from jaxtyping import Array, Float, Integer, Key
 
-from utils.log_utils import dataclass
+from utils.log_utils import typecheck
 
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
+    from chex import dataclass
 
-    TDataclass = TypeVar("TDataclass", bound="DataclassInstance")
-    TEnvState = TypeVar("TEnvState", bound="DataclassInstance")
-    TEnvParams = TypeVar("TEnvParams", bound="DataclassInstance", contravariant=True)
 else:
-    TDataclass = TypeVar("TDataclass")
-    TEnvState = TypeVar("TEnvState")
-    TEnvParams = TypeVar("TEnvParams", contravariant=True)
+    from typing import Any as DataclassInstance
 
+    from chex import dataclass as _dataclass
 
-try:
-    import gymnax
+    def dataclass(cls=None, /, **kwargs):
+        """Typecheck all dataclass fields."""
+        if cls is None:
+            return ft.partial(dataclass, **kwargs)
+        return typecheck(_dataclass(cls, **kwargs))
 
-    GYMNAX_INSTALLED = True
-except ImportError:
-    GYMNAX_INSTALLED = False
-
-try:
-    import navix
-
-    NAVIX_INSTALLED = True
-except ImportError:
-    NAVIX_INSTALLED = False
 
 P = ParamSpec("P")
+ArrayTree = Float[Array, " ..."] | Collection["ArrayTree"] | DataclassInstance
+TDataclass = TypeVar("TDataclass", bound=DataclassInstance)
+TArrayTree = TypeVar("TArrayTree", bound=ArrayTree)
+TEnvState = TypeVar("TEnvState", bound=ArrayTree)
 TObs = TypeVar("TObs")
 TAction = TypeVar("TAction", contravariant=True)
+TEnvParams = TypeVar("TEnvParams", bound=ArrayTree | None, contravariant=True)
 
 
 class StepType(IntEnum):
@@ -116,25 +110,6 @@ class TimeStep(Generic[TObs, TEnvState]):
         return self.step_type == StepType.LAST
 
 
-@dataclass
-class Wrapper(Generic[TDataclass]):
-    """Base dataclass for assigning additional properties to an object.
-
-    Delegates property lookups to the inner object."""
-
-    _inner: TDataclass
-
-    @classmethod
-    def overwrite(cls, obj, **kwargs):
-        """Replace the properties of the inner object"""
-        return dc.replace(obj, **kwargs, _inner=obj)
-
-    if not TYPE_CHECKING:  # better static type hints
-
-        def __getattr__(self, name):
-            return getattr(self._inner, name)
-
-
 @runtime_checkable
 class ResetFn(Protocol[TObs, TEnvState, TEnvParams]):
     def __call__(
@@ -162,33 +137,6 @@ class StepFn(Protocol[TObs, TEnvState, TAction, TEnvParams]):
             "StepFn must be implemented by the environment. "
             "It should return a Timestep with the new state, observation, and info."
         )
-
-
-@dataclass
-class Environment(
-    Wrapper["Environment"], Generic[TObs, TEnvState, TAction, TEnvParams]
-):
-    """An interface for an interactive environment.
-
-    We allow the action, observation, and goal spaces to vary.
-    """
-
-    name: str
-    reset: ResetFn[TObs, TEnvState, TEnvParams]
-    step: StepFn[TObs, TEnvState, TAction, TEnvParams]
-    action_space: Callable[[TEnvParams], PyTree[ArraySpec]]
-    observation_space: Callable[[TEnvParams], PyTree[ArraySpec]]
-    goal_space: Callable[[TEnvParams], PyTree[ArraySpec]]
-
-    @property
-    def fullname(self):
-        """Add all the wrapper names."""
-        env = self
-        name = self.name
-        while getattr(env, "_inner", None) is not None:
-            env = env._inner
-            name = env.name + " > " + name
-        return name
 
 
 class GoalObs(NamedTuple, Generic[TObs]):

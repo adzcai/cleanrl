@@ -9,6 +9,7 @@ from jaxtyping import Array, Float, Integer
 
 from experiments.config import BootstrapConfig
 from utils.structures import (
+    TArrayTree,
     TEnvState,
     TObs,
     Transition,
@@ -63,3 +64,14 @@ def roll_into_matrix(ary: Float[Array, " n *size"]) -> Float[Array, " n n *size"
     return jax.vmap(jnp.roll, in_axes=(None, 0, None))(
         ary, -jnp.arange(ary.shape[0]), 0
     )
+
+
+def tree_slice(
+    tree: TArrayTree, at: int | tuple[int | Integer[Array, ""], ...] | slice
+) -> TArrayTree:
+    """Slice each leaf of a pytree at the given index or slice."""
+    return jax.tree.map(lambda x: x[at], tree)
+
+
+def scale_gradient(x: Float[Array, " n"], factor: float):
+    return x * factor + jax.lax.stop_gradient((1 - factor) * x)

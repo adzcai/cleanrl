@@ -4,16 +4,16 @@ import jax
 import jax.numpy as jnp
 from jaxtyping import Array, Float, Integer, Key
 
-from utils.log_utils import dataclass
+from envs.base import Environment
 from utils.structures import (
-    Environment,
     TAction,
     TEnvParams,
     TEnvState,
     TimeStep,
     TObs,
-    Wrapper,
+    dataclass,
 )
+from wrappers.base import Wrapper
 
 
 @dataclass

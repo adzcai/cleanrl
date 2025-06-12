@@ -1,32 +1,17 @@
-import functools as ft
 import inspect
 import sys
-from typing import TYPE_CHECKING, Callable, TypeVar
 from typing import Annotated as Batched
+from typing import Callable, TypeVar
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import jax.random as jr
 import yaml
-from beartype import beartype as typechecker
-from chex import dataclass
-from jaxtyping import Array, Bool, Float, Integer, Key, PyTree, jaxtyped
+from beartype import beartype
+from jaxtyping import Array, Bool, Float, Key, PyTree, jaxtyped
 
 import wandb
-
-if False and not TYPE_CHECKING:  # runtime check dataclasses
-    _dataclass = dataclass
-
-    def dataclass(cls=None, /, **kwargs):
-        """Typecheck all dataclass fields."""
-        if cls is None:
-            return ft.partial(dataclass, **kwargs)
-        return typecheck(_dataclass(cls, **kwargs))
-
-
-def typecheck(f):
-    return jaxtyped(f, typechecker=typechecker)
 
 
 def get_norm_data(tree: PyTree[Float[Array, " ..."]], prefix: str):
@@ -51,23 +36,12 @@ def log_values(data: dict[str, Float[Array, ""]]):
     jax.debug.callback(log, data)
 
 
-def tree_slice(
-    tree: PyTree[Array], at: int | tuple[int | Integer[Array, ""], ...] | slice
-) -> PyTree[Array]:
-    """Slice each leaf of a pytree at the given index or slice."""
-    return jax.tree.map(lambda x: x[at], tree)
-
-
 def exec_callback(f: Callable):
     """A decorator for executing callbacks that applies the default arguments."""
     bound = inspect.signature(f).bind()
     bound.apply_defaults()
     jax.debug.callback(f, *bound.args, **bound.kwargs)
     return f
-
-
-def scale_gradient(x: Float[Array, " n"], factor: float):
-    return x * factor + jax.lax.stop_gradient((1 - factor) * x)
 
 
 Carry = TypeVar("Carry")
@@ -104,3 +78,11 @@ def exec_loop(length: int, *, cond: Bool[Array, ""] | None = None):
 
 def print_bytes(x) -> None:
     eqx.tree_pprint(jax.tree.map(lambda x: x.nbytes if eqx.is_array(x) else None, x))
+
+
+def typecheck(f):
+    return jaxtyped(f, typechecker=beartype)
+
+
+GYMNAX_INSTALLED = importlib.util.find_spec("gymnax") is not None
+NAVIX_INSTALLED = importlib.util.find_spec("navix") is not None

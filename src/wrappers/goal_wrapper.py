@@ -3,20 +3,20 @@
 import dataclasses as dc
 
 import jax.numpy as jnp
-from dm_env.specs import DiscreteArray as DiscreteArraySpec
 from jaxtyping import Array, Integer, Key
 
-from utils.log_utils import dataclass
+from envs.base import Environment
+from utils import specs
 from utils.structures import (
-    Environment,
     GoalObs,
     TAction,
     TEnvParams,
     TEnvState,
     TimeStep,
     TObs,
-    Wrapper,
+    dataclass,
 )
+from wrappers.base import Wrapper
 
 
 @dataclass
@@ -61,13 +61,13 @@ def goal_wrapper(
 
     def observation_space(params: TEnvParams):
         space = env.observation_space(params)
-        return [space, DiscreteArraySpec(1, name="goal")]
+        return [space, specs.BoundedArray.discrete(1, name="goal")]
 
     return Wrapper.overwrite(
         env,
         name="goal_wrapper",
         step=step,
         reset=reset,
-        goal_space=lambda params: DiscreteArraySpec(1, name="goal"),
+        goal_space=lambda params: specs.BoundedArray.discrete(1, name="goal"),
         observation_space=observation_space,
     )

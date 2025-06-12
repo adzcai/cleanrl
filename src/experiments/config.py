@@ -67,8 +67,8 @@ from jaxtyping import Array, Float, Key
 from omegaconf import DictConfig, ListConfig, OmegaConf
 
 import wandb
-from utils.log_utils import dataclass, typecheck
-from utils.structures import TDataclass
+from utils.log_utils import typecheck
+from utils.structures import TDataclass, dataclass
 from wandb.sdk.wandb_run import Run
 
 TConfig = TypeVar("TConfig", bound="Config", contravariant=True)

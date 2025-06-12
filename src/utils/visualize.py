@@ -11,7 +11,7 @@ from jaxtyping import Array, Bool, Float, PyTree
 from matplotlib.figure import Figure
 
 import wandb
-from envs.housemaze import visualize_housemaze
+from envs.housemaze_env import visualize_housemaze
 from envs.multi_catch import visualize_catch
 from experiments.config import ValueConfig
 from utils.structures import StepType, Transition
