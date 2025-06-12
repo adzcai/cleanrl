@@ -79,7 +79,7 @@ class MLPConcatArgs(eqx.nn.MLP):
 class WorldModelRNN(eqx.Module):
     """Parameterizes the recurrent dynamics model and reward function.
 
-    We use `hidden_dyn` to mean the dynamics model recurrent state
+    We use `dyn` to mean the dynamics model recurrent state
     and `hidden_obs` for the recurrent policy's state (see `ActorCritic`).
     """
 
@@ -125,7 +125,7 @@ class WorldModelRNN(eqx.Module):
     @typecheck
     def step(
         self,
-        hidden_dyn: Float[Array, " dyn_size"],
+        dyn: Float[Array, " dyn_size"],
         action: Integer[Array, ""],
         goal_embedding: Float[Array, " goal_dim"],
     ) -> tuple[Float[Array, " dyn_size"], Float[Array, " num_value_bins"]]:
@@ -137,17 +137,59 @@ class WorldModelRNN(eqx.Module):
         (inside `make_muzero_networks/make_core_module`).
         """
         # TODO handle continue predictor
-        out = jax.nn.relu(hidden_dyn) + self.embed_action(action)
+        out = jax.nn.relu(dyn) + self.embed_action(action)
         out = self.mlp(out)
         # TODO also use resnet-like structure for policy
         reward_logits = self.reward_head(out, goal_embedding)
         return out, reward_logits
 
 
+class WorldModelGRU(eqx.Module):
+    """Parameterizes the recurrent world model.
+
+    Takes (hidden, action, goal_embedding) -> (hidden, reward).
+    """
+
+    cell: eqx.nn.GRUCell
+    """The recurrent cell for the world model"""
+    reward_head: eqx.nn.MLP
+    """The reward model. Takes in hidden state and goal embedding."""
+
+    def __init__(
+        self,
+        config: ArchConfig,
+        num_actions: int,
+        num_value_bins: int,
+        *,
+        key: Key[Array, ""],
+    ):
+        key_cell, key_reward = jr.split(key)
+        self.cell = eqx.nn.GRUCell(num_actions, config.dyn_size, key=key_cell)
+        self.reward_head = eqx.nn.MLP(
+            config.dyn_size + config.goal_dim,
+            num_value_bins,
+            config.mlp_size,
+            config.mlp_depth,
+            getattr(jax.nn, config.activation),
+            key=key_reward,
+        )
+
+    def step(
+        self,
+        hidden: Float[Array, " rnn_size"],
+        action: Integer[Array, ""],
+        goal_embedding: Float[Array, " mlp_size"],
+    ) -> tuple[Float[Array, " rnn_size"], Float[Array, " num_value_bins"]]:
+        """Transitions to the next embedding and emits predicted reward."""
+        action = jax.nn.one_hot(action, self.cell.input_size)
+        hidden = self.cell(action, hidden)
+        return hidden, self.reward_head(jnp.concat([hidden, goal_embedding]))
+
+
 class WorldModelResNet(eqx.Module):
     """Parameterizes the recurrent dynamics model and reward function.
 
-    We use `hidden_dyn` to mean the dynamics model recurrent state
+    We use `dyn` to mean the dynamics model recurrent state
     and `hidden_obs` for the recurrent policy's state (see `ActorCritic`).
     """
 
@@ -202,7 +244,7 @@ class WorldModelResNet(eqx.Module):
     @typecheck
     def step(
         self,
-        hidden_dyn: Float[Array, " dyn_size"],
+        dyn: Float[Array, " dyn_size"],
         action: Integer[Array, ""],
         goal_embedding: Float[Array, " goal_dim"],
     ) -> tuple[Float[Array, " dyn_size"], Float[Array, " num_value_bins"]]:
@@ -214,8 +256,8 @@ class WorldModelResNet(eqx.Module):
         (inside `make_muzero_networks/make_core_module`).
         """
         # TODO handle continue predictor
-        out = jax.nn.relu(hidden_dyn) + self.embed_action(action)
-        out = hidden_dyn + self.linear(self.norm1(out))  # "fake env.step"
+        out = jax.nn.relu(dyn) + self.embed_action(action)
+        out = dyn + self.linear(self.norm1(out))  # "fake env.step"
         out = out + self.mlp(self.norm2(out))
         # TODO also use resnet-like structure for policy
         reward_logits = self.reward_head(out, goal_embedding)
@@ -226,9 +268,9 @@ class ActorCritic(eqx.Module):
     """Parameterizes the actor-critic networks."""
 
     policy_head: MLPConcatArgs
-    """Policy network. `(hidden_dyn, goal) -> action distribution`"""
+    """Policy network. `(dyn, goal) -> action distribution`"""
     value_head: MLPConcatArgs
-    """Value network. `(hidden_dyn, goal) -> value distribution`"""
+    """Value network. `(dyn, goal) -> value distribution`"""
 
     def __init__(
         self,
@@ -395,7 +437,7 @@ class MuZeroNetwork(eqx.Module, Generic[TObs]):
     """Embed the goal into a goal embedding (goal_dim)."""
     actor_critic: ActorCritic
     """The actor and critic networks."""
-    world_model: WorldModelRNN
+    world_model: WorldModelGRU
     """The recurrent world model."""
     gradient_scale: float
     """Scale the gradients at each step of the world model."""
@@ -457,7 +499,7 @@ class MuZeroNetwork(eqx.Module, Generic[TObs]):
             num_value_bins=num_value_bins,
             key=key_actor_critic,
         )
-        self.world_model = WorldModelRNN(
+        self.world_model = WorldModelGRU(
             config=config,
             num_actions=num_actions,
             num_value_bins=num_value_bins,
@@ -486,7 +528,7 @@ class MuZeroNetwork(eqx.Module, Generic[TObs]):
                 The predicted policy logits and values at the imagined states (including `goal_obs`).
         """
         goal_embedding = self.embed_goal(goal_obs.goal)
-        init_hidden_dyn = self.embed_observation(goal_obs.obs, goal_embedding)
+        init_dyn = self.embed_observation(goal_obs.obs, goal_embedding)
 
         def step(dyn, action):
             pred = self.actor_critic(dyn, goal_embedding)
@@ -495,7 +537,7 @@ class MuZeroNetwork(eqx.Module, Generic[TObs]):
             next_dyn = scale_gradient(next_dyn, self.gradient_scale)
             return next_dyn, (reward, pred)
 
-        return jax.lax.scan(step, init_hidden_dyn, action_s)
+        return jax.lax.scan(step, init_dyn, action_s)
 
     def predict_value_s(
         self,
@@ -569,7 +611,7 @@ def loss_trajectory(
         mask: Float[Array, " horizon horizon"],
     ) -> Float[Array, ""]:
         """Compute the mean of the upper triangle of a matrix."""
-        return jnp.mean(x * mask, where=mask > 0)
+        return jnp.sum(x * mask, where=mask > 0)
 
     policy_loss, policy_stats = compute_policy_loss(
         txn_s.mcts_probs,
@@ -740,20 +782,18 @@ def make_train(config: TrainConfig):
 
     # https://optax.readthedocs.io/en/latest/api/optimizer_schedules.html#optax.schedules.exponential_decay
     # decay by a factor of `decay_rate` every `transition_steps`
-    lr_schedule = optax.warmup_exponential_decay_schedule(**config.lr)
 
     # only apply weight decay to weights
+    lr_config = dict(**config.lr)
+    lr_name = lr_config.pop("name")
+    lr_schedule = getattr(optax, lr_name)(**lr_config)
+    del lr_name, lr_config
+
+    optim = ft.partial(optax.adamw, eps=1e-3, mask=get_weight_mask(net_static))
     optim = optax.chain(
         optax.clip_by_global_norm(jnp.pi),
         # https://optax.readthedocs.io/en/latest/getting_started.html#accessing-learning-rate
-        optax.inject_hyperparams(
-            ft.partial(
-                optax.adamw,
-                eps=1e-3,
-                weight_decay=1e-4,
-                mask=get_weight_mask(net_static),
-            )
-        )(learning_rate=lr_schedule),
+        optax.inject_hyperparams(optim)(learning_rate=lr_schedule),
     )
     del net_static
 
@@ -816,6 +856,7 @@ def make_train(config: TrainConfig):
             mcts_probs=jnp.empty(num_actions, float),
         )
         init_buffer_state = buffer.init(init_transition)
+        del init_transition
         buffer_state_bytes = sum(
             x.nbytes for x in jax.tree.leaves(init_buffer_state) if eqx.is_array(x)
         )
@@ -852,6 +893,7 @@ def make_train(config: TrainConfig):
                 iter_state.timestep_b,
                 key=key_rollout,
             )
+            del key_rollout
             buffer_state = buffer.add(iter_state.param_state.buffer_state, txn_bs)
 
             metrics = txn_bs.time_step.state.metrics
@@ -872,6 +914,11 @@ def make_train(config: TrainConfig):
                 buffer.num_available(buffer_state) >= config.optim.batch_size
             )
 
+            # ========== OPTIMIZATION STEP ==========
+
+            target_net = eqx.combine(iter_state.target_params, net_static)
+            act_mcts_bs = jax.vmap(act_mcts_b, in_axes=(None, 1), out_axes=1)
+
             @exec_loop(config.optim.num_updates_per_iter, cond=buffer_available)
             def optimize_step(
                 param_state=iter_state.param_state._replace(buffer_state=buffer_state),
@@ -879,35 +926,31 @@ def make_train(config: TrainConfig):
             ):
                 """Sample batch of trajectories and do a single 'SGD step'"""
                 key_sample, key_reanalyze = jr.split(key, 2)
+                del key
                 batch = jax.vmap(buffer.sample, in_axes=(None, None))(
                     param_state.buffer_state,
                     config.eval.warnings,
                     key=jr.split(key_sample, config.optim.batch_size),
                 )
+                del key_sample
                 txn_bs: Batched[Transition, " batch_size horizon"] = batch.experience
 
                 # "reanalyze" the policy targets via mcts with target parameters
-                # predict uniform distribution for the last step
-                target_pred_bs, mcts_out_bs = jax.vmap(
-                    act_mcts, in_axes=(None, 1), out_axes=1
-                )(
-                    eqx.combine(iter_state.target_params, net_static),
+                _, mcts_out_bs = act_mcts_bs(
+                    target_net,
                     txn_bs.time_step.obs,
                     key=jr.split(key_reanalyze, config.buffer.sample_length),
                 )
-                # mcts_values_bs: Float[Array, " batch_size horizon node"] = (
-                #     mcts_out_bs.search_tree.node_values
-                # )  # type: ignore
-                txn_bs = txn_bs._replace(
-                    pred=target_pred_bs,
-                    mcts_probs=jnp.where(
-                        # TODO this should be for terminal states not truncated
-                        # jnp.isclose(txn_bs.time_step.discount, 0.0),
-                        txn_bs.time_step.is_last[..., jnp.newaxis],
-                        jnp.ones(num_actions) / num_actions,
-                        mcts_out_bs.action_weights,
-                    ),
+                del key_reanalyze
+                # predict uniform distribution for the last step
+                mcts_probs_bs = jnp.where(
+                    # TODO this should be for terminal states not truncated
+                    # jnp.isclose(txn_bs.time_step.discount, 0.0),
+                    txn_bs.time_step.is_last[..., jnp.newaxis],
+                    jnp.ones((num_actions,)) / num_actions,
+                    mcts_out_bs.action_weights,
                 )
+                txn_bs = txn_bs._replace(mcts_probs=mcts_probs_bs)
 
                 if False:
 
@@ -964,12 +1007,13 @@ def make_train(config: TrainConfig):
                 params: MuZeroNetwork = optax.apply_updates(param_state.params, updates)  # type: ignore
 
                 # prioritize trajectories with high TD error
-                # priorities = jnp.mean(jnp.abs(aux.td_error), axis=-1)
-                # buffer_state = buffer.set_priorities(
-                #     param_state.buffer_state,
-                #     batch.idx,
-                #     priorities**config.optim.priority_exponent,
-                # )
+                if False:
+                    priorities = jnp.mean(jnp.abs(aux["td_error"]), axis=-1)
+                    buffer_state = buffer.set_priorities(
+                        param_state.buffer_state,
+                        batch.idx,
+                        priorities**config.optim.priority_exponent,
+                    )
 
                 # Get the current learning rate from the optimizer
                 log_values(
@@ -989,7 +1033,7 @@ def make_train(config: TrainConfig):
                     None,
                 )
 
-            del buffer_state  # replaced by param_state.buffer_state
+            del buffer_state, key_optim  # replaced by param_state.buffer_state
             param_state, _ = optimize_step
 
             # occasionally update target
@@ -1089,7 +1133,7 @@ def make_train(config: TrainConfig):
             """Take a single step in the true environment using the MCTS policy."""
             key_action, key_step = jr.split(key)
 
-            pred_b, mcts_out_b = act_mcts(net, time_step_b.obs, key=key_action)
+            pred_b, mcts_out_b = act_mcts_b(net, time_step_b.obs, key=key_action)
             action_b = jnp.asarray(mcts_out_b.action, dtype=int)
             next_time_step_b = env_step_b(
                 time_step_b.state,
@@ -1112,7 +1156,7 @@ def make_train(config: TrainConfig):
 
         return final_timestep_b, txn_bs
 
-    def act_mcts(
+    def act_mcts_b(
         net: MuZeroNetwork,
         obs_b: Batched[GoalObs[TObs], " num_envs"],
         *,
@@ -1126,15 +1170,15 @@ def make_train(config: TrainConfig):
                 and the MCTS output of planning from the timestep.
         """
         goal_embedding_b = jax.vmap(net.embed_goal)(obs_b.goal)
-        init_hidden_dyn_b = jax.vmap(net.embed_observation)(obs_b.obs, goal_embedding_b)
+        init_dyn_b = jax.vmap(net.embed_observation)(obs_b.obs, goal_embedding_b)
         del obs_b  # not needed anymore
-        pred_b = jax.vmap(net.actor_critic)(init_hidden_dyn_b, goal_embedding_b)
+        pred_b = jax.vmap(net.actor_critic)(init_dyn_b, goal_embedding_b)
 
         root = mctx.RootFnOutput(
             prior_logits=pred_b.policy_logits,  # type: ignore
             value=config.value.logits_to_value(pred_b.value_logits),  # type: ignore
             # embedding contains current env_state and the hidden to pass to next net call
-            embedding=init_hidden_dyn_b,  # type: ignore
+            embedding=init_dyn_b,  # type: ignore
         )
 
         invalid_actions = (
@@ -1155,10 +1199,10 @@ def make_train(config: TrainConfig):
                     computed by the actor-critic network for the newly created node;
                     The hidden state representing the state following `hiddens`.
             """
-            dyn_b, reward_logits_b = jax.vmap(net.world_model.step)(
+            next_dyn_b, reward_logits_b = jax.vmap(net.world_model.step)(
                 dyn_b, action_b, goal_embedding_b
             )
-            pred_b = jax.vmap(net.actor_critic)(dyn_b, goal_embedding_b)
+            pred_b = jax.vmap(net.actor_critic)(next_dyn_b, goal_embedding_b)
             return (
                 mctx.RecurrentFnOutput(
                     reward=config.value.logits_to_value(reward_logits_b),  # type: ignore
@@ -1167,7 +1211,7 @@ def make_train(config: TrainConfig):
                     prior_logits=pred_b.policy_logits,  # type: ignore
                     value=config.value.logits_to_value(pred_b.value_logits),  # type: ignore
                 ),
-                dyn_b,
+                next_dyn_b,
             )
 
         out = mctx.gumbel_muzero_policy(
