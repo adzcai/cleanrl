@@ -17,7 +17,7 @@ def test_muzero_learns_value_on_dummy_env():
     config = get_args(["src/configs/dummy.yaml"])
     config = dict_to_dataclass(TrainConfig, config)
     train_fn = muzero.make_train(config)
-    env, env_params, net_static = muzero.get_static(config)
+    env, env_params, net_static = muzero.make_env_and_network(config)
     key_train, key_reset = jr.split(jr.key(config.seed), 2)
 
     final_iter_state, _ = train_fn(key_train)

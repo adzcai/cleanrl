@@ -1,28 +1,26 @@
+import importlib.util
 from typing import Any
-
-from envs.base import Environment
-from envs.housemaze_env import housemaze_wrapper, new_housemaze
-from utils.log_utils import GYMNAX_INSTALLED, NAVIX_INSTALLED
-from utils.structures import (
-    StepType,
-    TimeStep,
-)
-
 
 import jax
 import jax.numpy as jnp
 import jax.random as jr
 from jaxtyping import Array, Key
 
+from envs.base import Environment
 from envs.dummy_env import make_dummy_env
+from envs.housemaze_env import housemaze_wrapper, new_housemaze
 from envs.multi_catch import make_multi_catch
 from experiments.config import EnvConfig
+from utils.structures import (
+    StepType,
+    TimeStep,
+)
 from wrappers.auto_reset import auto_reset_wrapper
 from wrappers.flatten_observation import flatten_observation_wrapper
 from wrappers.goal_wrapper import goal_wrapper
 from wrappers.metrics import metrics_wrapper
 
-if GYMNAX_INSTALLED:
+if importlib.util.find_spec("gymnax") is not None:
     import gymnax.environments.environment as ge
     import gymnax.environments.spaces as spaces
 
@@ -65,7 +63,8 @@ if GYMNAX_INSTALLED:
         )
 
 
-if NAVIX_INSTALLED:
+if importlib.util.find_spec("navix") is not None:
+    import navix as nx
 
     def navix_wrapper(env: nx.Environment):
         def reset(params: None, *, key: Key[Array, ""]):
@@ -102,6 +101,8 @@ def make_env(env_config: EnvConfig, goal=True) -> tuple[Environment, Any]:
     params: Any | None = None
 
     if env_config.source == "gymnax":
+        import gymnax
+
         env, params = gymnax.make(env_config.name, **env_config.kwargs)
         env = gymnax_wrapper(env, params)
         env = metrics_wrapper(env)

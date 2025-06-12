@@ -129,7 +129,8 @@ class ArchConfig:
     activation: str
     projection_kind: Literal["mlp", "cnn", "housemaze"]
     obs_dim: int | None = None
-    """Dimension of observation embedding. The number of "orthogonal directions" among observation components."""
+    """Dimension of observation embedding.
+    The number of "orthogonal directions" among observation components."""
 
 
 @dataclass
@@ -145,23 +146,20 @@ class EnvConfig:
 class CollectionConfig:
     """For episode rollouts."""
 
-    total_transitions: int
-    num_time_steps: int
-    num_buffer_fills: int | float
-    """The time axis of the buffer is int(total_transitions / (num_envs * buffer_size_denominator)).
-    i.e. throughout training, the buffer will be filled `buffer_size_denominator` times.
-    """
     num_envs: int  # more parallel data collection
-    mcts_depth: int
+    num_transitions_per_env: int
+    mcts_depth: int | None
     num_mcts_simulations: int  # stronger policy improvement
 
-    @property
-    def num_iters(self) -> int:
-        return self.total_transitions // (self.num_envs * self.num_time_steps)
 
-    @property
-    def buffer_time_axis(self) -> int:
-        return int(self.total_transitions / (self.num_envs * self.num_buffer_fills))
+@dataclass
+class BufferConfig:
+    """For storing transitions."""
+
+    num_transitions_per_env: int  # number of transitions per environment
+    priority_exponent: float  # prioritized replay
+    importance_exponent: float
+    """Probability to recompute policy targets."""
 
 
 @dataclass
@@ -217,7 +215,8 @@ class BootstrapConfig:
 class OptimConfig:
     """Optimization parameters"""
 
-    num_minibatches: int  # number of gradient descent updates per iteration
+    num_updates: int  # total number of gradient descent updates
+    num_updates_per_minibatch: int  # number of gradient descent updates per iteration
     batch_size: int  # reduce gradient variance
     num_time_steps: int
     max_grad_norm: float
@@ -227,9 +226,10 @@ class OptimConfig:
     """The target network is updated `target_update_size` of the way to the online network."""
 
     world_model_gradient_scale: float  # scale the world model gradients per step
-    priority_exponent: float  # prioritized replay
-    importance_exponent: float
-    """Probability to recompute policy targets."""
+
+    @property
+    def num_iters(self) -> int:
+        return self.num_updates // self.num_updates_per_minibatch
 
 
 @dataclass
@@ -238,16 +238,6 @@ class LossConfig:
 
     value_coef: float  # scale the value loss
     reward_coef: float  # scale the reward loss
-
-
-@dataclass
-class LRConfig:
-    """Learning rate schedule parameters."""
-
-    lr_init: float
-    warmup_frac: float
-    decay_rate: float
-    num_stairs: int
 
 
 @dataclass
@@ -268,22 +258,28 @@ class TrainConfig(Config):
     value: ValueConfig  # type: ignore
     bootstrap: BootstrapConfig  # type: ignore
     optim: OptimConfig  # type: ignore
-    lr: LRConfig  # type: ignore
+    buffer: BufferConfig  # type: ignore
+    lr: dict[str, Any]  # type: ignore
     loss: LossConfig  # type: ignore
     eval: EvalConfig  # type: ignore
 
     @property
     def name(self):
-        return f"{self.env.name} {self.collection.total_transitions}"
+        return f"{self.env.name} {self.optim.num_updates}"
+
+    @property
+    def total_transitions(self) -> int:
+        """Total number of transitions to collect during training."""
+        return (
+            self.optim.num_iters
+            * self.collection.num_envs
+            * self.collection.num_transitions_per_env
+        )
 
     def validate(self):
         if self.optim.num_time_steps <= 1:
             raise ValueError(
                 "Updates must use at least two timesteps for bootstrapping."
-            )
-        if self.lr.num_stairs > self.collection.num_iters * self.optim.num_minibatches:
-            raise ValueError(
-                "Number of learning rate stairs must be less than the number of gradient updates."
             )
 
 
@@ -359,13 +355,12 @@ def main(
             ary = cli_args if "=" in arg else cfg_paths
             ary.append(arg)
     cfg_dict = get_args(cfg_paths, cli_args)
-    outputs = None
 
     mode = cfg_dict["mode"]
 
     if mode == "agent":
         with wandb.init(config=None) as run:  # set config to None to load from wandb
-            outputs = run_train(run, ConfigClass, make_train)
+            run_train(run, ConfigClass, make_train)
 
     elif mode == "jaxpr":
         cfg = dict_to_dataclass(ConfigClass, cfg_dict)
@@ -400,7 +395,7 @@ def main(
     elif mode == "run":
         matplotlib.use("agg")  # enable plotting inside jax callback
         with wandb.init(config=cfg_dict) as run:
-            outputs = run_train(run, ConfigClass, make_train)
+            run_train(run, ConfigClass, make_train)
 
     else:
         raise ValueError(

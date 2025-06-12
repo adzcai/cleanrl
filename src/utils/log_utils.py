@@ -82,7 +82,3 @@ def print_bytes(x) -> None:
 
 def typecheck(f):
     return jaxtyped(f, typechecker=beartype)
-
-
-GYMNAX_INSTALLED = importlib.util.find_spec("gymnax") is not None
-NAVIX_INSTALLED = importlib.util.find_spec("navix") is not None

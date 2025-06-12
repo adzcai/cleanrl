@@ -75,9 +75,82 @@ class WorldModelRNN(eqx.Module):
     and `hidden_obs` for the recurrent policy's state (see `ActorCritic`).
     """
 
+    reward_head: MLPConcatArgs
+    """The reward model."""
+    embed_action: eqx.nn.Embedding
+    """Embed actions to `rnn_size`."""
+    mlp: eqx.nn.MLP
+    """MLP embedding."""
+    gradient_scale: float
+    """Scale the gradients at each step."""
+
+    def __init__(
+        self,
+        config: ArchConfig,
+        num_actions: int,
+        num_value_bins: int,
+        gradient_scale: float,
+        *,
+        key: Key[Array, ""],
+    ):
+        key_reward, key_embed_action, key_mlp = jr.split(key, 3)
+        self.embed_action = eqx.nn.Embedding(
+            num_actions, config.rnn_size, key=key_embed_action
+        )
+        self.reward_head = MLPConcatArgs(
+            in_size=config.rnn_size + config.goal_dim,
+            out_size=num_value_bins,
+            width_size=config.mlp_size,
+            depth=config.mlp_depth,
+            activation=getattr(jax.nn, config.activation),
+            key=key_reward,
+        )
+        # TODO use haiku initialization
+        self.mlp = eqx.nn.MLP(
+            in_size=config.rnn_size,
+            out_size=config.rnn_size,
+            width_size=config.mlp_size,
+            depth=config.mlp_depth,
+            activation=getattr(jax.nn, config.activation),
+            use_bias=False,
+            use_final_bias=False,
+            key=key_mlp,
+        )
+        self.gradient_scale = gradient_scale
+
+    @typecheck
+    def step(
+        self,
+        hidden_dyn: Float[Array, " rnn_size"],
+        action: Integer[Array, ""],
+        goal_embedding: Float[Array, " goal_dim"],
+    ) -> tuple[Float[Array, " rnn_size"], Float[Array, " num_value_bins"]]:
+        """An imagined state transition (`env.step`).
+
+        Transitions to the next hidden state and emits predicted reward from the transition.
+        Refer to `SimpleTransition` in `neurorl/library/muzero_mlps.py`
+        and the `transition_fn` in `neurorl/configs/catch_trainer.py`
+        (inside `make_muzero_networks/make_core_module`).
+        """
+        # TODO handle continue predictor
+        out = jax.nn.relu(hidden_dyn) + self.embed_action(action)
+        out = self.mlp(out)
+        # TODO also use resnet-like structure for policy
+        next_hidden_dyn = scale_gradient(out, self.gradient_scale)
+        reward_logits = self.reward_head(next_hidden_dyn, goal_embedding)
+        return next_hidden_dyn, reward_logits
+
+
+class WorldModelResNet(eqx.Module):
+    """Parameterizes the recurrent dynamics model and reward function.
+
+    We use `hidden_dyn` to mean the dynamics model recurrent state
+    and `hidden_obs` for the recurrent policy's state (see `ActorCritic`).
+    """
+
     linear: eqx.nn.Linear
     """The recurrent cell for the dynamics model."""
-    reward_head: eqx.nn.Linear
+    reward_head: MLPConcatArgs
     """The reward model."""
     norm1: eqx.nn.LayerNorm
     """Layer normalization for the state-action representation."""
@@ -108,8 +181,13 @@ class WorldModelRNN(eqx.Module):
         self.linear = eqx.nn.Linear(
             config.rnn_size, config.rnn_size, use_bias=False, key=key_cell
         )
-        self.reward_head = eqx.nn.Linear(
-            config.rnn_size + config.goal_dim, num_value_bins, key=key_reward
+        self.reward_head = MLPConcatArgs(
+            in_size=config.rnn_size + config.goal_dim,
+            out_size=num_value_bins,
+            width_size=config.mlp_size,
+            depth=config.mlp_depth,
+            activation=getattr(jax.nn, config.activation),
+            key=key_reward,
         )
         # TODO use haiku initialization
         self.mlp = eqx.nn.MLP(
@@ -132,16 +210,17 @@ class WorldModelRNN(eqx.Module):
         """An imagined state transition (`env.step`).
 
         Transitions to the next hidden state and emits predicted reward from the transition.
-        Refer to the `Transition` module in `neurorl/library/muzero_mlps.py`.
+        Refer to `Transition` in `neurorl/library/muzero_mlps.py`
+        and the `transition_fn` in `neurorl/configs/catch_trainer.py`
+        (inside `make_muzero_networks/make_core_module`).
         """
         # TODO handle continue predictor
-        # TODO maybe relu(LayerNorm(hidden_dyn)) instead
         out = jax.nn.relu(hidden_dyn) + self.embed_action(action)
         out = hidden_dyn + self.linear(self.norm1(out))  # "fake env.step"
         out = out + self.mlp(self.norm2(out))
         # TODO also use resnet-like structure for policy
         out = scale_gradient(out, self.gradient_scale)
-        reward_logits = self.reward_head(jnp.concat([out, goal_embedding]))
+        reward_logits = self.reward_head(out, goal_embedding)
         return out, reward_logits
 
 
@@ -649,8 +728,8 @@ def compute_reward_loss(
     return weighted_mean(reward_loss_sh), jax.tree.map(weighted_mean, reward_stats)
 
 
-def get_static(config: TrainConfig):
-    # construct environment
+def make_env_and_network(config: TrainConfig):
+    """Construct the environment and network from the configuration."""
     env, env_params = make_env(config.env)
     action_space: specs.BoundedArray = env.action_space(env_params)
     num_actions = action_space.num_values
@@ -665,45 +744,67 @@ def get_static(config: TrainConfig):
         world_model_gradient_scale=config.optim.world_model_gradient_scale,
         key=jr.key(0),
     )
-    _, net_static = eqx.partition(net, eqx.is_inexact_array)
+    params, net_static = eqx.partition(net, eqx.is_inexact_array)
+
+    size, nbytes = zip(
+        *[(x.size, x.nbytes) for x in jax.tree.leaves(params) if x is not None]
+    )
+    print(f"network size (params): {sum(size)}")
+    print(f"network size (bytes): {sum(nbytes)}")
 
     return env, env_params, net_static
 
 
 def make_train(config: TrainConfig):
-    num_grad_updates = config.collection.num_iters * config.optim.num_minibatches
-    eval_freq = config.collection.num_iters // config.eval.num_evals
+    """Return a jittable training function for MuZero."""
+    eval_freq = config.optim.num_iters // config.eval.num_evals
 
     # construct environment
-    env, env_params = make_env(config.env)
-    action_space: specs.BoundedArray = env.action_space(env_params)
+    # use the initial parameters to construct optimizer weight decay mask
+    env, env_params, net_static = make_env_and_network(config)
+    action_space = env.action_space(env_params)
+    assert isinstance(action_space, specs.BoundedArray), (
+        f"Expected BoundedArray action space, got {type(action_space)}"
+    )
     num_actions = action_space.num_values
     num_goals = env.goal_space(env_params).num_values
 
     env_reset_b = jax.vmap(env.reset, in_axes=(None,))
     env_step_b = jax.vmap(env.step, in_axes=(0, 0, None))  # map over state and action
 
-    lr_schedule = optax.warmup_exponential_decay_schedule(
-        init_value=1e-5,
-        peak_value=config.lr.lr_init,
-        warmup_steps=int(config.lr.warmup_frac * num_grad_updates),
-        transition_steps=int(
-            ((1 - config.lr.warmup_frac) * num_grad_updates) // config.lr.num_stairs
-        ),
-        decay_rate=config.lr.decay_rate,
-        staircase=True,
+    # https://optax.readthedocs.io/en/latest/api/optimizer_schedules.html#optax.schedules.exponential_decay
+    # decay by a factor of `decay_rate` every `transition_steps`
+    lr_schedule = optax.warmup_exponential_decay_schedule(**config.lr)
+
+    # only apply weight decay to weights
+    def has_weight(x):
+        return hasattr(x, "weight")
+
+    def get_weights(net):
+        return [
+            leaf.weight
+            for leaf in jax.tree.leaves(net, is_leaf=has_weight)
+            if has_weight(leaf)
+        ]
+
+    weights_mask = jax.tree.map(
+        lambda _: False, net_static, is_leaf=lambda x: x is None
     )
+    weights_mask = eqx.tree_at(
+        get_weights, weights_mask, [True] * len(get_weights(net_static))
+    )
+    del net_static
     optim = optax.chain(
         optax.clip_by_global_norm(config.optim.max_grad_norm),
         # https://optax.readthedocs.io/en/latest/getting_started.html#accessing-learning-rate
-        optax.inject_hyperparams(optax.contrib.ademamix)(
-            learning_rate=lr_schedule, weight_decay=1e-4
-        ),
+        optax.inject_hyperparams(
+            ft.partial(optax.adamw, eps=1e-3, weight_decay=1e-4, mask=weights_mask)
+        )(learning_rate=lr_schedule),
     )
 
     buffer_args = dict(
         batch_size=config.collection.num_envs,
-        max_time=config.collection.buffer_time_axis,
+        max_time=config.buffer.num_transitions_per_env,
         sample_len=config.optim.num_time_steps,
     )
     buffer = PrioritizedBuffer.new(**buffer_args)
@@ -772,7 +873,7 @@ def make_train(config: TrainConfig):
         print(f"buffer size (bytes): {buffer_state_bytes}")
         print_bytes(init_buffer_state)
 
-        @exec_loop(config.collection.num_iters)
+        @exec_loop(config.optim.num_iters)
         def iterate(
             iter_state=IterState(
                 step=jnp.int_(0),
@@ -819,7 +920,7 @@ def make_train(config: TrainConfig):
                 buffer.num_available(buffer_state) >= config.optim.batch_size
             )
 
-            @exec_loop(config.optim.num_minibatches, cond=buffer_available)
+            @exec_loop(config.optim.num_updates_per_minibatch, cond=buffer_available)
             def optimize_step(
                 param_state=iter_state.param_state._replace(buffer_state=buffer_state),
                 key=key_optim,
@@ -947,16 +1048,16 @@ def make_train(config: TrainConfig):
             )
 
             jax.debug.print(
-                "step {step}/{num_iters}. "
+                "iter {step}/{num_iters}. "
                 "seen {transitions}/{total_transitions} transitions. "
                 "available {available}. "
                 "mean return {mean_return:.02f}. "
                 "mean length {mean_length:.02f}. "
                 "{num_episodes} episodes collected.",
                 step=iter_state.step,
-                num_iters=config.collection.num_iters,
+                num_iters=config.optim.num_iters,
                 transitions=param_state.buffer_state.pos * config.collection.num_envs,
-                total_transitions=config.collection.total_transitions,
+                total_transitions=config.total_transitions,
                 available=buffer_available,
                 mean_return=mean_return,
                 mean_length=mean_length,
@@ -1038,7 +1139,7 @@ def make_train(config: TrainConfig):
     ]:
         """Collect a batch of trajectories."""
 
-        @exec_loop(config.collection.num_time_steps)
+        @exec_loop(config.collection.num_transitions_per_env)
         def rollout_step(time_step_b=init_time_step_b, key=key):
             """Take a single step in the true environment using the MCTS policy."""
             key_action, key_step = jr.split(key)
