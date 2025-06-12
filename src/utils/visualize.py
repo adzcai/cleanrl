@@ -100,6 +100,7 @@ def value_figure(
     ax.set_ylabel(ylabel)
     ax.set_title(title)
     ax.legend()
+    ax.grid(True)
     return fig
 
 
@@ -126,8 +127,7 @@ def policy_figure(
     ax.set_title(title)
     ax.set_yticks(range(num_actions))
     ax.set_yticklabels([get_action_name(env_name, i) for i in range(num_actions)])
-    # ax.set_ylim(-0.5, num_actions - 0.5)
-    # ax.set_xlim(-0.5, horizon - 0.5)
+    ax.grid(True)
     cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     cbar.set_label("Probability")
     fig.tight_layout()
@@ -143,6 +143,7 @@ def entropy_figure(entropy_dict: dict[str, Float[chex.Array, "horizon"]]) -> Fig
     ax.set_ylabel("Entropy")
     ax.set_title("Entropy Over Trajectory")
     ax.legend()
+    ax.grid(True)
     return fig
 
 
@@ -185,13 +186,8 @@ def video_figure(
 
         action_name = get_action_name(env_name, txn_s.action[h].item())
         ax_frame.imshow(np.permute_dims(video[h], (1, 2, 0)), aspect="auto")
-        # Remove grid and ticks for cleaner look
-        ax_frame.grid(False)
-        ax_frame.set_xticks([])
-        ax_frame.set_yticks([])
         # Concise title
         ax_frame.set_title(f"{h}: {action_name} ({step_type})", fontsize=8)
-        ax_frame.axis("off")
         # Set border color
         for spine in ax_frame.spines.values():
             spine.set_edgecolor(border_color)

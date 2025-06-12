@@ -163,15 +163,12 @@ class WorldModelResNet(eqx.Module):
     """Embed actions to `dyn_size`."""
     mlp: eqx.nn.MLP
     """MLP embedding."""
-    gradient_scale: float
-    """Scale the gradients at each step."""
 
     def __init__(
         self,
         config: ArchConfig,
         num_actions: int,
         num_value_bins: int,
-        gradient_scale: float,
         *,
         key: Key[Array, ""],
     ):
@@ -201,7 +198,6 @@ class WorldModelResNet(eqx.Module):
             activation=getattr(jax.nn, config.activation),
             key=key_mlp,
         )
-        self.gradient_scale = gradient_scale
 
     @typecheck
     def step(
@@ -222,7 +218,6 @@ class WorldModelResNet(eqx.Module):
         out = hidden_dyn + self.linear(self.norm1(out))  # "fake env.step"
         out = out + self.mlp(self.norm2(out))
         # TODO also use resnet-like structure for policy
-        out = scale_gradient(out, self.gradient_scale)
         reward_logits = self.reward_head(out, goal_embedding)
         return out, reward_logits
 
@@ -492,43 +487,15 @@ class MuZeroNetwork(eqx.Module, Generic[TObs]):
         """
         goal_embedding = self.embed_goal(goal_obs.goal)
         init_hidden_dyn = self.embed_observation(goal_obs.obs, goal_embedding)
-        return jax.lax.scan(
-            lambda hidden_dyn, action: self.step(hidden_dyn, action, goal_embedding),
-            init_hidden_dyn,
-            action_s,
-        )
 
-    @typecheck
-    def step(
-        self,
-        hidden_dyn: Float[Array, " dyn_size"],
-        action: Integer[Array, ""],
-        goal_embedding: Float[Array, " goal_dim"],
-    ) -> tuple[
-        Float[Array, " dyn_size"], tuple[Float[Array, " num_value_bins"], Prediction]
-    ]:
-        """Evaluate the actor-critic on `hidden` and take one imagined step using the world model.
+        def step(dyn, action):
+            pred = self.actor_critic(dyn, goal_embedding)
+            next_dyn, reward = self.world_model.step(dyn, action, goal_embedding)
+            # Scale gradients to prevent vanishing/exploding
+            next_dyn = scale_gradient(next_dyn, self.gradient_scale)
+            return next_dyn, (reward, pred)
 
-        Args:
-            hidden_dyn (Float (dyn_size,)): The hidden world state.
-            action (int): The action taken from the represented state.
-            goal (int): The current goal.
-
-        Returns:
-            tuple[Float[Array, " dyn_size"], tuple[Float[Array, ""], Prediction]]: The resulting hidden world state;
-                The predicted reward for taking the given action;
-                The predicted policy logits and value of the original `hidden_dyn` state.
-        """
-        # Predict value and policy based on the current hidden state
-        pred = self.actor_critic(hidden_dyn, goal_embedding)
-        # Then update the hidden state through the world model
-        next_hidden_dyn, reward = self.world_model.step(
-            hidden_dyn, action, goal_embedding
-        )
-        # Scale gradients to prevent vanishing/exploding
-        next_hidden_dyn = scale_gradient(next_hidden_dyn, self.gradient_scale)
-
-        return next_hidden_dyn, (reward, pred)
+        return jax.lax.scan(step, init_hidden_dyn, action_s)
 
     def predict_value_s(
         self,
@@ -679,7 +646,9 @@ def compute_value_loss(
         td_error=boot_value_sh - online_value_sh,
     )
 
-    return value_loss, jax.tree.map(weighted_mean, value_stats)
+    return value_loss, jax.tree.map(weighted_mean, value_stats) | {
+        "max_abs_td_error": jnp.max(jnp.abs(value_stats["td_error"][:, 0]))  # type: ignore
+    }
 
 
 def compute_policy_loss(
@@ -1065,14 +1034,30 @@ def make_train(config: TrainConfig):
                         raise ValueError("NaN parameters.")
 
             # visualization
+            target_net = eqx.combine(target_params, net_static)
+            txn_s = tree_slice(txn_bs, 0)
+            viz_boot_value_s, viz_reward_logits_s = bootstrap(
+                ft.partial(target_net.predict_value_s, config.value),
+                txn_s,
+                config.bootstrap,
+            )
+            video = (
+                jax.vmap(ft.partial(visualize_env_state_frame, config.env.name))(
+                    txn_s.time_step.state
+                )
+                if config.env.name in SUPPORTED_VIDEO_ENVS
+                else None
+            )
             jax.lax.cond(
                 (iter_state.step % config.eval.eval_freq == 0) & buffer_available,
                 # env name is invalid jax type (str) so pass statically
                 ft.partial(jax.debug.callback, visualize_trajectory, config.env.name),
                 lambda *args: None,
-                *compute_visualize_args(
-                    eqx.combine(target_params, net_static), tree_slice(txn_bs, 0)
-                ),
+                config.value,
+                txn_s,
+                viz_boot_value_s[:, 0],  # first prediction (no model rollout)
+                viz_reward_logits_s[:, 0],  # first prediction (no model rollout)
+                video,
             )
 
             return (
@@ -1087,37 +1072,6 @@ def make_train(config: TrainConfig):
 
         final_iter_state, _ = iterate
         return final_iter_state, None
-
-    def compute_visualize_args(
-        target_net: MuZeroNetwork, txn_s: Batched[Transition, " horizon"]
-    ):
-        """Compute the arguments for visualization.
-
-        All return values are passed to the jax callback
-        and must be valid jax types.
-        """
-        viz_boot_value_s, viz_reward_logits_s = bootstrap(
-            ft.partial(
-                target_net.predict_value_s,
-                config.value,
-            ),
-            txn_s,
-            config.bootstrap,
-        )
-        video = (
-            jax.vmap(ft.partial(visualize_env_state_frame, config.env.name))(
-                txn_s.time_step.state
-            )
-            if config.env.name in SUPPORTED_VIDEO_ENVS
-            else None
-        )
-        return (
-            config.value,
-            txn_s,
-            viz_boot_value_s[:, 0],  # first prediction (no rollout)
-            viz_reward_logits_s[:, 0],  # first prediction (no rollout)
-            video,
-        )
 
     def rollout(
         net: MuZeroNetwork,
