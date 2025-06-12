@@ -54,6 +54,7 @@ from utils.visualize import (
     visualize_trajectory,
 )
 from wrappers.goal_wrapper import GoalObs
+from wrappers.oar_wrapper import OAR
 
 
 class MLPConcatArgs(eqx.nn.MLP):
@@ -282,6 +283,26 @@ class CNNEmbedding(eqx.Module):
         return jnp.concat([obs_embedding, goal_embedding])
 
 
+class OAREmbedding(eqx.Module):
+    """Embed an OAR observation into a recurrent state."""
+
+    mlp: MLPConcatArgs
+    num_actions: int = eqx.field(static=True)
+
+    def __init__(self, *args, num_actions: int, **kwargs):
+        self.mlp = MLPConcatArgs(*args, **kwargs)
+        self.num_actions = num_actions
+
+    def __call__(self, x: OAR, goal_embedding: Float[Array, " goal_dim"], *, key=None):
+        """Embed the OAR observation and goal into a recurrent state."""
+        # OAR is a tuple of (obs, action, reward)
+        obs = jnp.ravel(x.obs)
+        reward = jnp.tanh(x.reward)
+        action = jax.nn.one_hot(x.action, self.num_actions)
+        obs_embedding = self.mlp(obs, reward, action, goal_embedding)
+        return obs_embedding
+
+
 class MuZeroNetwork(eqx.Module):
     """The entire MuZero network parameters."""
 
@@ -308,9 +329,22 @@ class MuZeroNetwork(eqx.Module):
             key, 4
         )
 
-        if config.projection_kind == "mlp":
+        if isinstance(obs_spec, OAR):
+            self.projection = OAREmbedding(
+                in_size=obs_spec.obs.size + 1 + num_actions + config.goal_dim,
+                out_size=config.rnn_size,
+                width_size=config.mlp_size,
+                depth=config.mlp_depth,
+                activation=getattr(jax.nn, config.activation),
+                num_actions=num_actions,
+                key=key_projection,
+            )
+
+        elif config.projection_kind == "mlp":
             # ensure flattened input
-            obs_size = obs_spec.shape
+            obs_size = (
+                obs_spec[0].shape if isinstance(obs_spec, list) else obs_spec.shape
+            )
             assert len(obs_size) == 1, f"MLP expects flattened input. Got {obs_size}"
             self.projection = MLPConcatArgs(
                 in_size=obs_size[0] + config.goal_dim,
