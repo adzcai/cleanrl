@@ -903,7 +903,7 @@ def make_train(config: TrainConfig):
                 buffer.num_available(buffer_state) >= config.optim.batch_size
             )
 
-            @exec_loop(config.optim.num_updates_per_minibatch, cond=buffer_available)
+            @exec_loop(config.optim.num_updates_per_iter, cond=buffer_available)
             def optimize_step(
                 param_state=iter_state.param_state._replace(buffer_state=buffer_state),
                 key=key_optim,
@@ -1047,7 +1047,7 @@ def make_train(config: TrainConfig):
                 total_transitions=config.optim.num_iters
                 * config.buffer.sample_length
                 * config.buffer.batch_size,
-                num_updates=config.optim.num_updates_per_minibatch * iter_state.step,
+                num_updates=config.optim.num_updates_per_iter * iter_state.step,
                 total_updates=config.optim.total_updates,
                 num_episodes=jnp.sum(txn_bs.time_step.is_last),
                 mean_return=mean_return,

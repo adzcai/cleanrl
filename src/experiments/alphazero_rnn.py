@@ -195,7 +195,7 @@ def make_train(config: TrainConfig):
     num_iters = config.mcts.total_transitions // (
         config.mcts.num_envs * config.env.horizon
     )
-    num_updates = num_iters * config.optim.num_updates_per_minibatch
+    num_updates = num_iters * config.optim.num_updates_per_iter
     eval_freq = num_iters // config.eval.eval_freq
 
     env, env_params = make_env(config.env, goal=False)
@@ -346,7 +346,7 @@ def make_train(config: TrainConfig):
             )
 
             @exec_loop(
-                config.optim.num_updates_per_minibatch,
+                config.optim.num_updates_per_iter,
                 cond=buffer_available,
             )
             def optimize_step(

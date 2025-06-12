@@ -1,9 +1,11 @@
 arch:
   projection_kind: mlp
-  dyn_size: 48
-  mlp_size: 32
+  dyn_size:
+    values: [32, 64, 128]
+  mlp_size:
+    values: [32, 64]
   mlp_depth: 1
-  goal_dim: 4
+  goal_dim: 1
   activation: relu
   world_model_gradient_scale: 0.5
 
@@ -18,7 +20,8 @@ mcts:
   max_depth: null
 
 value:
-  num_value_bins: 9
+  num_value_bins:
+    values: [9, 15, 51]
   min_value: -1.0
   max_value: 1.0
 
@@ -39,15 +42,18 @@ lr:
   init_value: 0.0
   peak_value: 0.01
   warmup_steps: 1_000
-  transition_steps: 10_000
+  transition_steps:
+    values: [20, 100, 200]
   decay_rate: 0.5
   staircase: True
 
 optim:
-  total_updates: 10_000
-  num_updates_per_minibatch: 4
+  total_updates: 2_000
+  num_updates_per_iter:
+    values: [2, 8]
   batch_size: 64
-  target_update_freq: 100
+  target_update_freq:
+    values: [20, 50, 100]
 
 loss:
   policy_coef: 1.0

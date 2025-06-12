@@ -53,8 +53,11 @@ For example, in your algorithm file,
 """
 
 import dataclasses as dc
+import os
 import sys
+import time
 from collections.abc import Callable, Iterable, Mapping
+from pathlib import Path
 from typing import Annotated as Batched
 from typing import Any, Literal, Protocol, TypeVar, get_origin
 
@@ -191,13 +194,13 @@ class OptimConfig:
     """Optimization parameters"""
 
     total_updates: int  # total number of gradient descent updates
-    num_updates_per_minibatch: int  # number of gradient descent updates per iteration
+    num_updates_per_iter: int  # number of gradient descent updates per iteration
     batch_size: int  # reduce gradient variance
     target_update_freq: int  # in global iterations
 
     @property
     def num_iters(self) -> int:
-        return self.total_updates // self.num_updates_per_minibatch
+        return self.total_updates // self.num_updates_per_iter
 
 
 @dataclass
@@ -341,10 +344,11 @@ def main(
     elif mode == "sweep":
         cfg = dict_to_dataclass(ConfigClass, cfg_dict)
         sweep_params, parameters = to_wandb_sweep_parameters(cfg)
+
         sweep_cfg = {
             "program": file,
             "method": cfg.sweep_method,
-            "name": f"{file} sweep {' '.join(sweep_params)}",
+            "name": f"{Path(file).name} sweep {' '.join(sweep_params)}",
             "metric": {"goal": "minimize", "name": "train/td_error"},
             "parameters": parameters,
             "command": [
@@ -354,10 +358,23 @@ def main(
                 r"mode=agent",
             ],
         }
-        sweep_id = wandb.sweep(sweep_cfg)
+        wandb_project = os.environ.get("WANDB_PROJECT")
+        sweep_id = wandb.sweep(sweep_cfg, project=wandb_project)
         print(
             "To launch a SLURM batch job:\n"
-            f'SWEEP_ID={sweep_id} sbatch --job-name "{sweep_cfg["name"]}" launch.sh\n'
+            "\n"
+            f"WANDB_PROJECT={wandb_project} SWEEP_ID={sweep_id} sbatch \\\n"
+            f'  --job-name "{sweep_cfg["name"]}" \\\n'
+            "  --gpus 2 \\\n"
+            "  --time 0-00:20 \\\n"
+            "  --mem 10GB \\\n"
+            "  launch.sh\n"
+            "\n"
+            "Or run\n"
+            "\n"
+            f"wandb agent {sweep_id} --count 2\n"
+            "\n"
+            "to run the sweep locally.\n"
             "Remember you can also pass sbatch arguments via the command line.\n"
             "Run `man sbatch` for details."
         )
@@ -366,6 +383,7 @@ def main(
         matplotlib.use("agg")  # enable plotting inside jax callback
         with wandb.init(config=cfg_dict) as run:
             run_train(run, ConfigClass, make_train)
+            time.sleep(2)  # wait for wandb to sync logs
 
     else:
         raise ValueError(
@@ -373,9 +391,6 @@ def main(
         )
 
     print("Done training!")
-    # for some reason on the test runs the logs don't always sync
-    if wandb.run is not None:
-        wandb.run.finish()
 
 
 def run_train(
@@ -410,10 +425,19 @@ def to_wandb_sweep_parameters(config: Config) -> tuple[set[str], dict]:
             swept, params = to_wandb_sweep_parameters(value)
             sweep_params |= swept
             value = dict(parameters=params)
-        elif isinstance(value, dict) and get_origin(field.type) is not dict:
-            # swept parameter
-            sweep_params.add(field.name)
+        elif isinstance(value, dict):
+            if get_origin(field.type) is dict:
+                sweep_params |= {k for k, v in value.items() if isinstance(v, dict)}
+                value = {
+                    k: v if isinstance(v, dict) else dict(value=v)
+                    for k, v in value.items()
+                }
+                value = dict(parameters=value)
+            else:
+                # swept parameter
+                sweep_params.add(field.name)
         else:
             value = dict(value=value)
         parameters[field.name] = value
+
     return sweep_params, parameters

@@ -45,9 +45,9 @@ lr:
 
 optim:
   total_updates: 100
-  num_updates_per_minibatch: 1
+  num_updates_per_iter: 1
   batch_size: 2
-  target_update_freq: 10
+  target_update_freq: 20
 
 loss:
   policy_coef: 0.0

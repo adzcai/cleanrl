@@ -33,13 +33,16 @@ if TYPE_CHECKING:
 else:
     from typing import Any as DataclassInstance
 
-    from chex import dataclass as _dataclass
+    if True:
+        from chex import dataclass as dataclass
+    else:
+        from chex import dataclass as _dataclass
 
-    def dataclass(cls=None, /, **kwargs):
-        """Typecheck all dataclass fields."""
-        if cls is None:
-            return ft.partial(dataclass, **kwargs)
-        return typecheck(_dataclass(cls, **kwargs))
+        def dataclass(cls=None, /, **kwargs):
+            """Typecheck all dataclass fields."""
+            if cls is None:
+                return ft.partial(dataclass, **kwargs)
+            return typecheck(_dataclass(cls, **kwargs))
 
 
 P = ParamSpec("P")
