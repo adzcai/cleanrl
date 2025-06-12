@@ -2,12 +2,13 @@ import jax
 import jax.numpy as jnp
 import numpy.testing as npt
 import pytest
+from jaxtyping import Array, Float
 
 from utils.prioritized_buffer import PrioritizedBuffer
 
 
 @pytest.fixture
-def dummy_experience():
+def dummy_experience() -> dict[str, Float[Array, ""]]:
     # Simple dummy experience: a dict with a single array
     return {"obs": jnp.zeros((4,))}
 
@@ -147,3 +148,50 @@ def test_new_experience_priority_is_max(buffer, dummy_experience):
         .set(jnp.max(new_priorities))
     )
     npt.assert_array_equal(priorities, desired)
+
+
+def test_buffer_overfill(buffer, dummy_experience):
+    buf, state = buffer  # (2, 5)
+    # Fill the buffer to its max capacity
+    batch = {"obs": jnp.ones((buf.batch_size, buf.sample_len, 4))}
+    state = buf.add(state, batch)
+    new_batch = {"obs": -jnp.ones((buf.batch_size, buf.sample_len, 4))}
+    state = buf.add(state, new_batch)
+
+    # Now the buffer should be full
+    assert state.pos > buf.max_time
+    assert state.pos == buf.sample_len * 2
+
+    desired = jnp.broadcast_to(
+        jnp.array([-1.0, 1.0, 1.0, -1.0, -1.0])[jnp.newaxis, :, jnp.newaxis],
+        (buf.batch_size, 5, 4),
+    )
+
+    # Check that the first entries are now zeros
+    npt.assert_array_equal(state.data["obs"], desired)
+
+
+def test_buffer_overfill_priorities(buffer, dummy_experience):
+    buf, state = buffer  # (2, 5)
+    # Fill the buffer to its max capacity
+    batch = {"obs": jnp.ones((buf.batch_size, buf.sample_len, 4))}
+    state = buf.add(state, batch)
+
+    # Check that the priorities are set correctly
+    desired_priorities = jnp.array([1.0, 0.0, 0.0, 0.0, 0.0])
+    priorities = state.priority_state.nodes[
+        buf.priority_tree.leaf_idx : buf.priority_tree.leaf_idx + buf.max_time
+    ]
+    npt.assert_array_equal(priorities, desired_priorities)
+
+    new_batch = {"obs": -jnp.ones((buf.batch_size, buf.sample_len, 4))}
+    state = buf.add(state, new_batch)
+
+    # Now the buffer should be full
+    priorities = state.priority_state.nodes[
+        buf.priority_tree.leaf_idx : buf.priority_tree.leaf_idx + buf.max_time
+    ]
+    desired_priorities = jnp.array([0.0, 1.0, 1.0, 1.0, 0.0])
+
+    # Check that the first entries are now zeros
+    npt.assert_array_equal(priorities, desired_priorities)

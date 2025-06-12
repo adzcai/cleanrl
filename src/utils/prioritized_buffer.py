@@ -7,7 +7,7 @@ from typing import Generic, TypeVar
 import jax
 import jax.numpy as jnp
 import jax.random as jr
-from jaxtyping import Array, Float, Key, PyTree, UInt
+from jaxtyping import Array, Float, Integer, Key, PyTree, UInt
 
 from utils.log_utils import dataclass, exec_callback, tree_slice
 
@@ -46,15 +46,15 @@ class PrioritizedBuffer(Generic[TExperience]):
 
     batch_size: int
     max_time: int
-    horizon: int
+    sample_len: int
     priority_tree: "SumTree"
 
     @classmethod
-    def new(cls, batch_size: int, max_time: int, horizon: int):
+    def new(cls, batch_size: int, max_time: int, sample_len: int):
         return cls(
             batch_size=batch_size,
             max_time=max_time,
-            horizon=horizon,
+            sample_len=sample_len,
             priority_tree=SumTree.new(batch_size * max_time),
         )
 
@@ -96,7 +96,7 @@ class PrioritizedBuffer(Generic[TExperience]):
         # enable the trajectories starting up to this point
         # TODO currently incorrect for initial trajectory if too short
         pos_enabled = (
-            jnp.maximum(0, state.pos - self.horizon - jnp.arange(horizon))
+            jnp.maximum(0, state.pos - self.sample_len - jnp.arange(horizon))
             % self.max_time
         )
         pos_enabled = jnp.broadcast_to(pos_enabled, (self.batch_size, horizon))
@@ -144,26 +144,26 @@ class PrioritizedBuffer(Generic[TExperience]):
         pos = jnp.where(pos < pos_avail, pos, fallback_pos)
 
         # take trajectories
-        pos_ary = (pos + jnp.arange(self.horizon)) % self.max_time
+        pos_ary = (pos + jnp.arange(self.sample_len)) % self.max_time
         return Sample(
             experience=tree_slice(state.data, (batch, pos_ary)),
             idx=idx,
             priority=priority,
         )
 
-    def available_pos(self, state: BufferState[TExperience]) -> int:
+    def available_pos(self, state: BufferState[TExperience]) -> Integer[Array, ""]:
         """The number of available initial positions (along the horizon axis).
 
         i.e. (randint(0, available_pos) + range(horizon)) % max_time
         is entirely populated.
         """
         return jnp.where(
-            state.pos < self.horizon,
+            state.pos < self.sample_len,
             0,
-            jnp.minimum(state.pos, self.max_time) - self.horizon + 1,
+            jnp.minimum(state.pos, self.max_time) - self.sample_len + 1,
         )
 
-    def num_available(self, state: BufferState[TExperience]) -> int:
+    def num_available(self, state: BufferState[TExperience]) -> Integer[Array, ""]:
         """The number of possible trajectories (overlapping and across batch)."""
         size = self.batch_size * self.available_pos(state)
         # could also count nonzero in self.priority_tree.nodes[(1 << self.priority_tree.depth) - 1 :]
@@ -240,6 +240,7 @@ class SumTree:
         unique, first = jnp.unique(
             indices, return_index=True, size=indices.size, fill_value=self.size
         )
+        unique: Float[Array, " n_unique"]
         mask = unique < self.size
         idx = jnp.where(mask, self.leaf_idx + unique, 0)
         nodes = state.nodes
