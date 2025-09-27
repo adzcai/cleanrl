@@ -1,46 +1,71 @@
 import distrax
-import jax
 import jax.numpy as jnp
-import pytest
+import jax.random as jr
 
-from ilx.maps import SIMPLE_MAP, CellType
-from ilx.mdp import GridEnv
+from ilx.core.maps import CellType
 
-jax.config.update("jax_disable_jit", True)
 
-@pytest.fixture
-def env():
-    return GridEnv(SIMPLE_MAP, 0.9)
+def test_env(simple_env):
+    assert simple_env.S == 3 * 5 - 2
+    assert simple_env.pos_to_state[2, 4] == simple_env.S - 1
 
-def test_reward(env):
-    s = env.get_state(0, 1)
-    a = 1
-    s_, r_ = env._step(s, a)
-    assert s_ == env.get_state(0, 2), f"{s_} is not goal state"
+    assert jnp.array_equal(
+        simple_env.P.probs.argmax(axis=-1),
+        jnp.asarray(
+            [
+                [0, 5, 0, 1],
+                [1, 6, 0, 2],
+                [2, 2, 2, 2],
+                [3, 3, 2, 4],
+                [4, 7, 3, 4],
+                [0, 8, 5, 6],
+                [1, 9, 5, 6],
+                [4, 12, 7, 7],
+                [5, 8, 8, 9],
+                [6, 9, 8, 10],
+                [10, 10, 9, 11],
+                [11, 11, 10, 12],
+                [7, 12, 11, 12],
+            ]
+        ),
+    )
+
+
+def test_reward(simple_env):
+    s = simple_env.pos_to_state[0, 1]
+    a = 3
+    s_, r_ = simple_env.step(s, a, key=jr.key(0))
+    assert s_ == simple_env.pos_to_state[0, 2], f"{s_} is not goal state"
     assert r_ == CellType.GOAL.reward, f"{r_} does not match goal reward"
-    assert env.R[s, a, s_] == r_, "reward tensor does not match"
-    
-    s_, r_ = env._step(env.get_state(2, 1), 0)
-    assert s_ == env.get_state(1, 1), f"{s_} is not pit state"
+    assert simple_env.R[s, a, s_] == r_, "reward tensor does not match"
+
+    s = simple_env.pos_to_state[2, 1]
+    s_, r_ = simple_env.step(s, 0, key=jr.key(0))
+    assert s_ == simple_env.pos_to_state[1, 1], f"{s_} is not pit state"
     assert r_ == CellType.PIT.reward, f"{r_} does not match pit reward"
 
-def test_wall(env):
-    s = env.get_state(2, 2)
-    s_, r_ = env._step(s, 0)
+
+def test_larger(larger_env):
+    print(jnp.argwhere(larger_env.R))
+    print(larger_env.R[jnp.nonzero(larger_env.R)])
+
+
+def test_wall(simple_env):
+    s = simple_env.pos_to_state[2, 2]
+    s_, r_ = simple_env.step(s, 0, key=jr.key(0))
     assert r_ == 0, f"{r_} should be zero for no-op"
     assert s_ == s, f"{s_} should not change because of wall"
 
-def test_draw(env):
-    π = distrax.Categorical(logits=jnp.zeros((env.S, env.A)))
-    d = distrax.Categorical(logits=jnp.zeros(env.S))
-    env.draw(jnp.zeros(env.S), π, "artifacts/test_draw.png", "simple map", d)
+
+def test_draw(simple_env):
+    π = distrax.Categorical(logits=jnp.zeros((simple_env.S, simple_env.A)))
+    simple_env.draw(π, "artifacts/test_draw.png", "simple map")
+
 
 def test_value_iteration(env):
-    Q = env.solve_value_iteration()
+    Q = env.value_iteration()
     π = Q.argmax(axis=1)
     index = jnp.arange(env.S), π
-    V = Q[index]
     π = jnp.zeros((env.S, env.A)).at[index].set(1)
     π = distrax.Categorical(probs=π)
-    d = env.stationary(π)
-    env.draw(V, π, "artifacts/test_value_iteration.png", "simple map", d)
+    env.draw(π, f"artifacts/test_value_iteration_{env.S}.png", "simple map")
