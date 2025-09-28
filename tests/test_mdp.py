@@ -69,3 +69,16 @@ def test_value_iteration(env):
     π = jnp.zeros((env.S, env.A)).at[index].set(1)
     π = distrax.Categorical(probs=π)
     env.draw(π, f"artifacts/test_value_iteration_{env.S}.png", "simple map")
+
+
+def test_return(env):
+    π = env.softmax_π(jnp.ones(env.D))
+
+    a = env.π_to_return(π)
+
+    d = env.π_to_stationary(π)
+    V = env.π_to_V(π)
+    V_ = jnp.einsum("sap, sa, p -> s", env.P.probs, π.probs, V)
+    b = d.probs @ (V - env.γ * V_) / (1 - env.γ)
+
+    assert jnp.allclose(a, b), f"{a} != {b}"

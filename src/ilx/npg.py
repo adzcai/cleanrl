@@ -16,14 +16,13 @@ def main(env: GridEnv, lr=0.5, n_iters=50):
         π = env.softmax_π(w)
         μ = env.π_to_μ(π)
 
-        π_hessian = -hessian(lambda w: env.softmax_π(w).logits.ravel())(w)
-        fisher = jnp.einsum("m, mcd -> cd", μ.probs, π_hessian) / (1 - env.γ)
-        
         @value_and_grad
         def loss(w):
             π = env.softmax_π(w)
             return -env.π_to_return(π) - env.π_to_stationary(π).probs @ π.entropy()
 
+        π_hessian = -hessian(lambda w: env.softmax_π(w).logits.ravel())(w)
+        fisher = jnp.einsum("m, mcd -> cd", μ.probs, π_hessian) / (1 - env.γ)
         r, grads = loss(w)
         grads = jnp.linalg.solve(fisher + 1e-4 * jnp.eye(env.D), grads)
         updates, opt_state = optim.update(grads, opt_state, w)
