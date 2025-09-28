@@ -10,13 +10,18 @@ from ilx.core.maps import SIMPLE_MAP
 from ilx.core.mdp import GridEnv, Q_to_greedy
 
 
-def main(env: GridEnv, lr=0.5, β=0.01, n_iters=50):
+def main(env: GridEnv, lr=0.5, β=0.01, n_iters=50, f="chisq"):
     π_expert = Q_to_greedy(env.value_iteration())
     μ_expert = env.π_to_μ(π_expert)
     optim = optax.adamw(optax.exponential_decay(lr, 50, 0.01))
 
     def f_dual(c):
-        return c * c / 4 + c
+        if f == "chisq":
+            return c * c / 4 + c
+        elif f == "kl_rev":
+            return jnp.exp(c-1)
+        else:
+            raise ValueError(f"f {f} not recognized")
 
     @value_and_grad
     def loss(w):
