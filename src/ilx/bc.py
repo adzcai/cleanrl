@@ -9,8 +9,7 @@ from ilx.core.mdp import GridEnv, Q_to_greedy
 
 
 def main(env: GridEnv, lr=0.5, n_iters=20):
-    Q_expert = env.value_iteration()
-    π_expert = Q_to_greedy(Q_expert)
+    π_expert = Q_to_greedy(env.value_iteration())
     d_expert = env.π_to_stationary(π_expert)
 
     @value_and_grad

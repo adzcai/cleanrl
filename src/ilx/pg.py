@@ -23,6 +23,7 @@ def main(env: GridEnv, lr = 0.5, n_iters=50):
 
     regret = env.π_to_return(Q_to_greedy(env.value_iteration())) - returns
     plt.plot(regret, label="regret")
+    plt.legend()
     plt.savefig("artifacts/pg-losses.png")
 
     env.draw(env.softmax_π(w_fit), "artifacts/pg-learner.png", "learner")

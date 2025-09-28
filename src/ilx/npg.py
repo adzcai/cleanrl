@@ -15,9 +15,16 @@ def main(env: GridEnv, lr=0.5, n_iters=50):
         w, opt_state = carry
         π = env.softmax_π(w)
         μ = env.π_to_μ(π)
+
         π_hessian = -hessian(lambda w: env.softmax_π(w).logits.ravel())(w)
         fisher = jnp.einsum("m, mcd -> cd", μ.probs, π_hessian) / (1 - env.γ)
-        r, grads = value_and_grad(lambda w: -env.π_to_return(env.softmax_π(w)))(w)
+        
+        @value_and_grad
+        def loss(w):
+            π = env.softmax_π(w)
+            return -env.π_to_return(π) - env.π_to_stationary(π).probs @ π.entropy()
+
+        r, grads = loss(w)
         grads = jnp.linalg.solve(fisher + 1e-4 * jnp.eye(env.D), grads)
         updates, opt_state = optim.update(grads, opt_state, w)
         w = optax.apply_updates(w, updates)
@@ -29,6 +36,7 @@ def main(env: GridEnv, lr=0.5, n_iters=50):
 
     regret = env.π_to_return(Q_to_greedy(env.value_iteration())) - returns
     plt.plot(regret, label="regret")
+    plt.legend()
     plt.savefig("artifacts/npg-losses.png")
 
     env.draw(env.softmax_π(w_fit), "artifacts/npg-learner.png", "learner")
