@@ -71,7 +71,7 @@ class TabularMDP:
     
     def π_to_μ(self, π: Policy):
         d = self.π_to_stationary(π)
-        return Categorical(probs=d.probs[:, jnp.newaxis] * π.probs)
+        return Categorical(probs=jnp.ravel(d.probs[:, jnp.newaxis] * π.probs))
 
     def π_to_return(self, π: Policy):
         d = self.π_to_stationary(π)
