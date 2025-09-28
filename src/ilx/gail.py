@@ -9,7 +9,7 @@ from ilx.core.maps import SIMPLE_MAP
 from ilx.core.mdp import GridEnv, Q_to_greedy
 
 
-def main(env: GridEnv, lr_d=0.01, lr_π=0.5, n_iters=50):
+def main(env: GridEnv, lr_d=0.005, lr_π=0.5, n_iters=50):
     π_expert = Q_to_greedy(env.value_iteration())
     μ_expert = env.π_to_μ(π_expert)
     optim_d = optax.adamw(optax.exponential_decay(lr_d, 100, 0.5))
