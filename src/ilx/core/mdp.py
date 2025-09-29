@@ -68,7 +68,7 @@ class TabularMDP:
             (1 - self.γ) * self.d0.probs,
         )
         return Categorical(probs=d)
-    
+
     def π_to_μ(self, π: Policy):
         d = self.π_to_stationary(π)
         return Categorical(probs=jnp.ravel(d.probs[:, jnp.newaxis] * π.probs))
@@ -135,7 +135,6 @@ class GridEnv(TabularMDP):
         self.P = Categorical(probs=jnp.zeros((S, A, S)).at[s, a, s_].set(1))
         self.R = jnp.zeros((S, A, S)).at[s, a, s_].set(r_)
         self.features = vmap(vmap(self.get_features))(s, a)
-
 
     @property
     def bounds(self):
@@ -206,17 +205,28 @@ class GridEnv(TabularMDP):
             for col in range(self.bounds[1]):
                 box = cells[row, col].properties()["bbox"]
                 s = self.pos_to_state[row, col]
-                if s == -1:
+                if s == -1 or self.grid[row, col] == CellType.GOAL.index:
                     continue
                 radius = 0.2 * jnp.sqrt(d.prob(s) * self.S).item() / scale
                 center: tuple[float, float] = (box.max + box.min) / 2
-                circle = Circle(center, fc=cmap(V[s]), radius=radius, linewidth=0)
+                circle = Circle(
+                    center,
+                    fc=cmap(V[s] / CellType.GOAL.reward),
+                    radius=radius,
+                    linewidth=0,
+                )
                 ax.add_patch(circle)
 
                 for a, dir in enumerate(self.action_map):
                     if (p := π[s].prob(a)) > 0:
                         dr, dc = dir * p / 40
                         ax.arrow(*center, dc, -dr, color="k", width=0.005 * p)
+
+        # Add colorbar for value function
+        sm = plt.cm.ScalarMappable(cmap=cmap)
+        sm.set_array([])
+        cbar = fig.colorbar(sm, ax=ax, shrink=0.8, aspect=20)
+        cbar.set_label("Value Function V(s)", rotation=270, labelpad=15)
 
         fig.tight_layout()
         fig.savefig(filename)
