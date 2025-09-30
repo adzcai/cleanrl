@@ -283,7 +283,6 @@ if __name__ == "__main__":
     next_done = torch.zeros(args.num_envs).to(device)
 
     for phase in range(1, args.num_phases + 1):
-
         # POLICY PHASE
         for update in range(1, args.n_iteration + 1):
             # Annealing the rate if instructed to do so.

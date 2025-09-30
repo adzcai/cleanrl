@@ -59,9 +59,9 @@ for run in runs:
 
 if not args.wandb_key:
     args.wandb_key = requests.utils.get_netrc_auth("https://api.wandb.ai")[-1]
-assert (
-    len(args.wandb_key) > 0
-), "set the environment variable `WANDB_KEY` to your WANDB API key, something like `export WANDB_KEY=fdsfdsfdsfads` "
+assert len(args.wandb_key) > 0, (
+    "set the environment variable `WANDB_KEY` to your WANDB API key, something like `export WANDB_KEY=fdsfdsfdsfads` "
+)
 
 # use docker directly
 if not args.submit_aws:
