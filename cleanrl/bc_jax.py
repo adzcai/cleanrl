@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 import jax
 import jax.numpy as jnp
+import minari
 import numpy as np
 import optax
 import tyro
@@ -36,8 +37,10 @@ class Args:
     """the user or org name of the model repository from the Hugging Face Hub"""
 
     # Algorithm specific arguments
-    env_id: str = "LARGER_MAP"
-    """the id of the environment"""
+    dataset_id: str = "D4RL/walker2d/expert-v0"
+    """the id of the expert dataset"""
+    num_expert_episodes: int = 8
+    """the number of expert episodes to sample"""
     total_timesteps: int = 50
     """total timesteps of the experiments"""
     learning_rate: float = 0.5
@@ -46,7 +49,7 @@ class Args:
     """the number of parallel game environments"""
     gamma: float = 0.99
     """the discount factor gamma"""
-    expert_timesteps: int = 8
+
 
 
 if __name__ == "__main__":
@@ -76,13 +79,13 @@ if __name__ == "__main__":
     np.random.seed(args.seed)
     key = jax.random.PRNGKey(args.seed)
 
-    # env setup
-    assert hasattr(grid_env, args.env_id), f"unknown environment {args.env_id}"
-    env = grid_env.GridEnv(getattr(grid_env, args.env_id), args.gamma)
-
     # collect expert data
-    π_expert = grid_env.Q_to_greedy(env.value_iteration())
-    expert_states, expert_actions = env.rollout(π_expert, args.expert_timesteps, key=key)
+    dataset = minari.load_dataset(args.dataset_id)
+    dataset.set_seed(seed=args.seed)
+    episodes = dataset.sample_episodes(args.num_expert_episodes)
+    expert_states, expert_actions = map(lambda ep: (ep.observations, ep.actions), episodes)
+
+    env = dataset.recover_environment()
 
     # network
     w = jnp.zeros(env.D)
@@ -106,8 +109,8 @@ if __name__ == "__main__":
     regrets = env.π_to_return(π_expert) - values
 
     for idx, (loss_val, regret) in enumerate(zip(losses, regrets)):
-        writer.add_scalar("losses/loss", loss_val.item(), idx)
-        writer.add_scalar("losses/regret", regret.item(), idx)
+        writer.add_scalar("losses/bc_loss", loss_val.item(), idx)
+        writer.add_scalar("losses/episodic_regret", regret.item(), idx)
 
     fig = env.draw(env.softmax_π(w_fit), "check behavior cloning")
     writer.add_figure("eval/final", fig)

@@ -32,16 +32,17 @@ atari = [
     "shimmy",
 ]
 envpool = ["envpool", "opencv-python",]
-procgen = ["procgen"]
-mujoco = [
+procgen = ["procgen; platform_machine != 'arm64'"]
+control = [
     "mujoco",
+    "mujoco-mjx",
+    "brax",
+    "playground",
     "imageio",
-]
-dm_control = [
     "shimmy",
-    "mujoco",
     "dm-control",
     "h5py",
+    "glfw>=2.10.0",
 ]
 pettingzoo = [
     "PettingZoo",
@@ -61,9 +62,11 @@ jax = [
     "equinox",
     "mctx",
     "rlax",
+    "jax-metal; sys_platform == 'darwin'",
 ]
 imitation = [
     "minari",
+    "h5py",
 ]
 optuna = [
     "optuna",
@@ -81,11 +84,11 @@ cloud = [
 ]
 plot = [
     "matplotlib",
+    "mediapy",
 ]
-pytest = ["pytest"]
 
 [dependency-groups]
-dev = ["pre-commit"]
+dev = ["pre-commit", "pytest"]
 
 [tool.hatch.build.targets.sdist]
 include = [
