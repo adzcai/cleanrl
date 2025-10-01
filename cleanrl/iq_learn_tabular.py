@@ -6,8 +6,7 @@ from jax.scipy.special import logsumexp
 from jaxtyping import Array, Float
 from matplotlib import pyplot as plt
 
-from ilx.core.maps import SIMPLE_MAP
-from ilx.core.mdp import GridEnv, Q_to_greedy
+from cleanrl_utils.envs.grid_env import SIMPLE_MAP, GridEnv, Q_to_greedy
 
 
 def main(env: GridEnv, lr=0.5, n_iters=50, f_name="chisq"):

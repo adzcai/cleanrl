@@ -4,16 +4,13 @@ from jax import lax, vmap
 from jax.scipy.optimize import minimize
 from jaxtyping import Array, Float, UInt
 
-from ilx.core.maps import LARGER_MAP
-from ilx.core.mdp import GridEnv, Q_to_greedy
+from cleanrl_utils.envs.grid_env import LARGER_MAP, GridEnv, Q_to_greedy
 
 
 def main(env: GridEnv, n_iters=4):
     π_expert = Q_to_greedy(env.value_iteration())
 
-    def iterate(
-        _: tuple[Float[Array, " D"], Float[Array, " S"]], count: UInt[Array, ""]
-    ):
+    def iterate(_: tuple[Float[Array, " D"], Float[Array, " S"]], count: UInt[Array, ""]):
         w, d = _
         d += env.π_to_stationary(env.softmax_π(w)).probs
 
@@ -23,9 +20,7 @@ def main(env: GridEnv, n_iters=4):
         results = minimize(loss, w, method="BFGS")
         return (results.x, d), (w, results.fun)
 
-    (w_fit, _), (ws, losses) = lax.scan(
-        iterate, (jnp.zeros(env.D), jnp.zeros(env.S)), 1 + jnp.arange(n_iters)
-    )
+    (w_fit, _), (ws, losses) = lax.scan(iterate, (jnp.zeros(env.D), jnp.zeros(env.S)), 1 + jnp.arange(n_iters))
 
     regrets = env.π_to_return(π_expert) - vmap(env.π_to_return)(vmap(env.softmax_π)(ws))
     plt.title("dagger stats")

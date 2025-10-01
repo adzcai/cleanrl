@@ -4,8 +4,7 @@ from jax import lax, value_and_grad, vmap
 from jaxtyping import Array, Float
 from matplotlib import pyplot as plt
 
-from ilx.core.maps import SIMPLE_MAP
-from ilx.core.mdp import GridEnv, Q_to_greedy
+from cleanrl_utils.envs.grid_env import SIMPLE_MAP, GridEnv, Q_to_greedy
 
 
 def main(env: GridEnv, lr_Q=0.5, lr_π=0.1, n_iters=200, α=0.1):
@@ -35,9 +34,7 @@ def main(env: GridEnv, lr_Q=0.5, lr_π=0.1, n_iters=200, α=0.1):
             R = Q - env.γ * jnp.einsum("sap, pb, pb -> sa", env.P.probs, π.probs, Q)
             value_π = (1 - env.γ) * jnp.einsum("s, sa, sa ->", env.d0.probs, π.probs, Q)
             value_buf = (buf / count) @ R.ravel()
-            return jnp.log(μ_mix @ jnp.exp(R).ravel()) - (
-                (1 - α) * value_π + α * value_buf
-            )
+            return jnp.log(μ_mix @ jnp.exp(R).ravel()) - ((1 - α) * value_π + α * value_buf)
 
         l_Q, grads_Q = value_and_grad(loss, 0)(w_Q, w_π)
         updates_Q, opt_state_Q = optim_Q.update(grads_Q, opt_state_Q, w_Q)
@@ -57,9 +54,7 @@ def main(env: GridEnv, lr_Q=0.5, lr_π=0.1, n_iters=200, α=0.1):
         jnp.arange(n_iters) + 1,
     )
 
-    regrets = env.π_to_return(π_expert) - vmap(env.π_to_return)(
-        vmap(env.softmax_π)(w_πs)
-    )
+    regrets = env.π_to_return(π_expert) - vmap(env.π_to_return)(vmap(env.softmax_π)(w_πs))
     plt.plot(regrets, label="regret")
     plt.plot(losses, label="loss")
     plt.legend()

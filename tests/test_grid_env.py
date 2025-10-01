@@ -1,8 +1,29 @@
 import distrax
+import jax
 import jax.numpy as jnp
 import jax.random as jr
+import pytest
 
-from ilx.core.maps import CellType
+from cleanrl_utils.envs.grid_env import LARGER_MAP, SIMPLE_MAP, CellType, GridEnv
+
+@pytest.fixture(autouse=True)
+def disable_jit():
+    jax.config.update("jax_disable_jit", True)
+
+
+@pytest.fixture
+def simple_env():
+    return GridEnv(SIMPLE_MAP, 0.99)
+
+
+@pytest.fixture
+def larger_env():
+    return GridEnv(LARGER_MAP, 0.99)
+
+
+@pytest.fixture(params=[SIMPLE_MAP, LARGER_MAP])
+def env(request):
+    return GridEnv(request.param, 0.99)
 
 
 def test_env(simple_env):

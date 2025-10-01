@@ -1,5 +1,7 @@
+from enum import Enum, auto
 from typing import ClassVar
 
+import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 from chex import dataclass
@@ -9,9 +11,35 @@ from jaxtyping import Array, Float, Integer, Key, Shaped, UInt8
 from matplotlib.patches import Circle
 from matplotlib.table import Table
 
-from ilx.core.maps import CellType, cell_to_reward, letter_to_cell
-
 Policy = Shaped[Categorical, "S A"]
+
+
+class CellType(Enum):
+    EMPTY = 0, ".", 0.0
+    START = 1, "S", 0.0
+    GOAL = 2, "G", 2.0
+    WALL = 3, "W", 0.0
+    PIT = 4, "P", -1.0
+
+    def __init__(self, idx, letter, reward) -> None:
+        self.index, self.letter, self.reward = idx, letter, reward
+
+
+cell_to_reward = jnp.asarray([cell.reward for cell in CellType])
+letter_to_cell = {cell.letter: i for i, cell in enumerate(CellType)}
+
+SIMPLE_MAP = """
+..G..
+.PWW.
+S....
+"""
+
+LARGER_MAP = """
+...G.
+..PW.
+..PW.
+S....
+"""
 
 
 @dataclass
@@ -34,11 +62,6 @@ class TabularMDP:
     def D(self):
         return self.features.shape[2]
 
-    def step(self, s: int, a: int, *, key: Key[Array, ""]):
-        s_ = self.P[s, a].sample(seed=key)
-        r_ = self.R[s, a, s_]
-        return s_, r_
-
     def π_to_P(self, π: Policy):
         P = jnp.einsum("sap, sa -> sp", self.P.probs, π.probs)
         return Categorical(probs=P)
@@ -60,7 +83,7 @@ class TabularMDP:
             V = jnp.max(Q, axis=-1)
             return self.V_to_Q(V), None
 
-        return lax.scan(step, jnp.zeros((self.S, self.A)), length=10, unroll=True)[0]
+        return lax.scan(step, jnp.zeros((self.S, self.A)), None, length=10, unroll=True)[0]
 
     def π_to_stationary(self, π: Policy):
         d = jnp.linalg.solve(
@@ -75,9 +98,7 @@ class TabularMDP:
 
     def π_to_return(self, π: Policy):
         d = self.π_to_stationary(π)
-        return jnp.einsum(
-            "s, sap, sap, sa ->", d.probs, self.P.probs, self.R, π.probs
-        ) / (1 - self.γ)
+        return jnp.einsum("s, sap, sap, sa ->", d.probs, self.P.probs, self.R, π.probs) / (1 - self.γ)
 
     def softmax_π(self, w: Float[Array, " D"]):
         return Categorical(logits=self.features @ w)
@@ -104,30 +125,23 @@ class GridEnv(TabularMDP):
     features: Float[Array, "S A D"]
 
     def __init__(self, map_text: str, γ: float) -> None:
-        self.grid = jnp.asarray(
-            [
-                [letter_to_cell[char] for char in line]
-                for line in map_text.strip().splitlines()
-            ]
-        )
+        self.grid = jnp.asarray([[letter_to_cell[char] for char in line] for line in map_text.strip().splitlines()])
         wall_mask = self.grid != CellType.WALL.index
         self.state_to_pos = jnp.argwhere(wall_mask)
-        self.pos_to_state = jnp.where(
-            wall_mask.ravel(), jnp.cumsum(wall_mask) - 1, -1
-        ).reshape(*self.bounds)
+        self.pos_to_state = jnp.where(wall_mask.ravel(), jnp.cumsum(wall_mask) - 1, -1).reshape(*self.bounds)
 
         S, A = len(self.state_to_pos), len(self.action_map)
-        init_pos = jnp.argwhere(self.grid == CellType.START.index, size=1)[0]
-        d0 = jnp.zeros(S).at[self.pos_to_state[*init_pos]].set(1)
+        init_row, init_col = jnp.argwhere(self.grid == CellType.START.index, size=1)[0]
+        d0 = jnp.zeros(S).at[self.pos_to_state[init_row, init_col]].set(1)
         self.d0 = Categorical(probs=d0)
         self.goal_pos = jnp.argwhere(self.grid == CellType.GOAL.index, size=1)[0]
         self.γ = γ
 
         def step(s: int, a: int):
-            pos_ = self.state_to_pos[s] + self.action_map[a]
+            row_, col_ = self.state_to_pos[s] + self.action_map[a]
             blocked_ = self.blocked(s, a)
-            s_ = jnp.where(blocked_, s, self.pos_to_state[*pos_])
-            r_ = jnp.where(blocked_, 0, cell_to_reward[self.grid[*pos_]])
+            s_ = jnp.where(blocked_, s, self.pos_to_state[row_, col_])
+            r_ = jnp.where(blocked_, 0, cell_to_reward[self.grid[row_, col_]])
             return s_, r_
 
         s, a = jnp.mgrid[:S, :A]
@@ -141,10 +155,11 @@ class GridEnv(TabularMDP):
         return jnp.asarray(self.grid.shape)
 
     def blocked(self, s: int, a: int):
+        row, col = self.state_to_pos[s]
         pos_ = self.state_to_pos[s] + self.action_map[a]
         return (
-            (self.grid[*self.state_to_pos[s]] == CellType.GOAL.index)
-            | (self.pos_to_state[*pos_] == -1)
+            (self.grid[row, col] == CellType.GOAL.index)
+            | (self.pos_to_state[pos_[0], pos_[1]] == -1)
             | jnp.any((pos_ < 0) | (pos_ >= self.bounds))
         )
 
@@ -163,7 +178,18 @@ class GridEnv(TabularMDP):
         diff /= self.bounds - 1
         return jnp.asarray([1, *pos, *d, *diff, blocked_])
 
-    def draw(self, π: Policy, filename: str, title: str):
+    def rollout(
+        self, π: Policy, total_timesteps: int, *, key: Key[Array, ""]
+    ) -> tuple[UInt8[Array, " H"], UInt8[Array, " H"]]:
+        def step(s: UInt8[Array, ""], key: Key[Array, ""]):
+            a = π[s].sample(seed=key)
+            s_ = self.P[s, a].sample(seed=key)
+            return s_, (s, a)
+
+        k0, k1 = jax.random.split(key)
+        return lax.scan(step, self.d0.sample(seed=k0), jax.random.split(k1, total_timesteps))[1]
+
+    def draw(self, π: Policy, title: str):
         scale = max(*self.bounds)
         figsize = 8 * self.bounds[::-1] / scale
         fig = plt.figure(frameon=False, figsize=figsize)
@@ -229,4 +255,5 @@ class GridEnv(TabularMDP):
         cbar.set_label("Value Function V(s)", rotation=270, labelpad=15)
 
         fig.tight_layout()
-        fig.savefig(filename)
+
+        return fig

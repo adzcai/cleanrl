@@ -5,8 +5,7 @@ from jax.nn import sigmoid
 from jaxtyping import Array, Float
 from matplotlib import pyplot as plt
 
-from ilx.core.maps import SIMPLE_MAP
-from ilx.core.mdp import GridEnv, Q_to_greedy
+from cleanrl_utils.envs.grid_env import SIMPLE_MAP, GridEnv, Q_to_greedy
 
 
 def main(env: GridEnv, lr_d=0.005, lr_π=0.5, n_iters=50):
@@ -16,9 +15,7 @@ def main(env: GridEnv, lr_d=0.005, lr_π=0.5, n_iters=50):
     optim_π = optax.adamw(optax.exponential_decay(lr_π, 100, 0.001))
 
     def step(
-        carry: tuple[
-            Float[Array, " D"], Float[Array, " D"], optax.OptState, optax.OptState
-        ],
+        carry: tuple[Float[Array, " D"], Float[Array, " D"], optax.OptState, optax.OptState],
         _,
     ):
         w_d, w_π, opt_state_d, opt_state_π = carry
@@ -29,9 +26,7 @@ def main(env: GridEnv, lr_d=0.005, lr_π=0.5, n_iters=50):
         @value_and_grad
         def loss_d(w_d):
             pred = sigmoid(env.features @ w_d).ravel()
-            return -jnp.sum(
-                μ.probs * jnp.log(pred) + μ_expert.probs * jnp.log(1 - pred)
-            )
+            return -jnp.sum(μ.probs * jnp.log(pred) + μ_expert.probs * jnp.log(1 - pred))
 
         l_d, grads_d = loss_d(w_d)
         updates_d, opt_state_d = optim_d.update(grads_d, opt_state_d, w_d)
@@ -56,9 +51,7 @@ def main(env: GridEnv, lr_d=0.005, lr_π=0.5, n_iters=50):
 
     w_d, w_π = jnp.zeros((2, env.D))
     opt_state_d, opt_state_π = optim_d.init(w_d), optim_π.init(w_π)
-    (w_d_fit, w_π_fit, _, _), (losses_d, returns) = lax.scan(
-        step, (w_d, w_π, opt_state_d, opt_state_π), length=n_iters
-    )
+    (w_d_fit, w_π_fit, _, _), (losses_d, returns) = lax.scan(step, (w_d, w_π, opt_state_d, opt_state_π), length=n_iters)
 
     regret = env.π_to_return(Q_to_greedy(env.value_iteration())) - returns
     plt.plot(regret, label="regret")

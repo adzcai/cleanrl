@@ -4,8 +4,7 @@ from jax import lax, value_and_grad, vmap
 from jaxtyping import Array, Float
 from matplotlib import pyplot as plt
 
-from ilx.core.maps import SIMPLE_MAP
-from ilx.core.mdp import GridEnv, Q_to_greedy
+from cleanrl_utils.envs.grid_env import SIMPLE_MAP, GridEnv, Q_to_greedy
 
 
 def main(env: GridEnv, lr_Q=0.5, lr_π=0.1, n_iters=200):
@@ -15,9 +14,7 @@ def main(env: GridEnv, lr_Q=0.5, lr_π=0.1, n_iters=200):
     optim_π = optax.adamw(optax.exponential_decay(lr_π, 100, 0.1))
 
     def step(
-        carry: tuple[
-            Float[Array, " D"], Float[Array, " D"], optax.OptState, optax.OptState
-        ],
+        carry: tuple[Float[Array, " D"], Float[Array, " D"], optax.OptState, optax.OptState],
         _,
     ):
         w_Q, w_π, opt_state_Q, opt_state_π = carry
@@ -27,9 +24,7 @@ def main(env: GridEnv, lr_Q=0.5, lr_π=0.1, n_iters=200):
             π = env.softmax_π(w_π)
             Q_next = jnp.einsum("sap, pb, pb -> sa", env.P.probs, π.probs, Q)
             value = jnp.einsum("s, sa, sa ->", env.d0.probs, π.probs, Q)
-            return jnp.log(
-                μ_expert.probs @ jnp.exp(Q - env.γ * Q_next).ravel()
-            ) - (1 - env.γ) * value
+            return jnp.log(μ_expert.probs @ jnp.exp(Q - env.γ * Q_next).ravel()) - (1 - env.γ) * value
 
         l_Q, grads_Q = value_and_grad(loss, 0)(w_Q, w_π)
         updates_Q, opt_state_Q = optim_Q.update(grads_Q, opt_state_Q, w_Q)
@@ -43,9 +38,7 @@ def main(env: GridEnv, lr_Q=0.5, lr_π=0.1, n_iters=200):
 
     w_Q, w_π = jnp.zeros((2, env.D))
     opt_state_Q, opt_state_π = optim_Q.init(w_Q), optim_π.init(w_π)
-    (_, w_π_fit, _, _), (losses_Q, w_πs) = lax.scan(
-        step, (w_Q, w_π, opt_state_Q, opt_state_π), length=n_iters
-    )
+    (_, w_π_fit, _, _), (losses_Q, w_πs) = lax.scan(step, (w_Q, w_π, opt_state_Q, opt_state_π), length=n_iters)
 
     regrets = env.π_to_return(π_expert) - vmap(env.π_to_return)(vmap(env.softmax_π)(w_πs))
     plt.plot(regrets, label="regret")

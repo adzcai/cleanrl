@@ -6,8 +6,7 @@ from jax.scipy.special import logsumexp
 from jaxtyping import Array, Float
 from matplotlib import pyplot as plt
 
-from ilx.core.maps import SIMPLE_MAP
-from ilx.core.mdp import GridEnv, Q_to_greedy
+from cleanrl_utils.envs.grid_env import SIMPLE_MAP, GridEnv, Q_to_greedy
 
 
 def main(env: GridEnv, lr_Q=0.5, lr_x=1, n_iters=50, f_name="chisq"):
@@ -31,9 +30,7 @@ def main(env: GridEnv, lr_Q=0.5, lr_x=1, n_iters=50, f_name="chisq"):
         return (1 - env.γ) * env.d0.probs @ V + μ_expert.probs @ loss_expert.ravel()
 
     def step(
-        carry: tuple[
-            Float[Array, " D"], Float[Array, " D"], optax.OptState, optax.OptState
-        ],
+        carry: tuple[Float[Array, " D"], Float[Array, " D"], optax.OptState, optax.OptState],
         _,
     ):
         w_Q, w_x, opt_state_Q, opt_state_x = carry
@@ -50,13 +47,9 @@ def main(env: GridEnv, lr_Q=0.5, lr_x=1, n_iters=50, f_name="chisq"):
 
     w_Q, w_x = jnp.zeros((2, env.D))
     opt_state_Q, opt_state_x = optim_Q.init(w_Q), optim_x.init(w_x)
-    (w_Q_fit, _, _, _), (losses, w_Qs) = lax.scan(
-        step, (w_Q, w_x, opt_state_Q, opt_state_x), length=n_iters
-    )
+    (w_Q_fit, _, _, _), (losses, w_Qs) = lax.scan(step, (w_Q, w_x, opt_state_Q, opt_state_x), length=n_iters)
 
-    returns = vmap(lambda w: env.π_to_return(Categorical(logits=env.features @ w)))(
-        w_Qs
-    )
+    returns = vmap(lambda w: env.π_to_return(Categorical(logits=env.features @ w)))(w_Qs)
     regrets = env.π_to_return(π_expert) - returns
     plt.plot(regrets, label="regret")
     plt.plot(losses, label="IQ-Learn loss")
