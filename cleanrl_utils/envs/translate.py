@@ -10,7 +10,7 @@ from envs.base import Environment
 from envs.dummy_env import make_dummy_env
 from envs.housemaze_env import housemaze_wrapper, new_housemaze
 from envs.multi_catch import make_multi_catch
-from experiments.config import EnvConfig
+from cleanrl_utils.config import EnvConfig
 from utils.structures import (
     StepType,
     TimeStep,

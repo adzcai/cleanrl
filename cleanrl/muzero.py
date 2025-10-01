@@ -22,7 +22,7 @@ from jaxtyping import Array, Bool, Float, Integer, Key, PyTree
 
 from envs.housemaze_env import HouseMazeObs
 from envs.translate import make_env
-from experiments.config import (
+from cleanrl_utils.config import (
     ArchConfig,
     LossConfig,
     TrainConfig,
@@ -30,7 +30,7 @@ from experiments.config import (
     main,
 )
 from utils import specs
-from utils.jax_utils import (
+from cleanrl_utils.jax_utils import (
     BootstrapConfig,
     bootstrap,
     get_network_size,
@@ -39,7 +39,7 @@ from utils.jax_utils import (
     scale_gradient,
     tree_slice,
 )
-from utils.log_utils import (
+from cleanrl_utils.log_utils import (
     exec_loop,
     get_norm_data,
     log_values,

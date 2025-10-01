@@ -9,8 +9,8 @@ import jax.numpy as jnp
 import jax.random as jr
 from jaxtyping import Array, Float, Integer, Key, UInt
 
-from utils.jax_utils import tree_slice
-from utils.log_utils import exec_callback
+from cleanrl_utils.jax_utils import tree_slice
+from cleanrl_utils.log_utils import exec_callback
 from utils.structures import TArrayTree as TExperience
 from utils.structures import dataclass
 

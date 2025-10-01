@@ -10,8 +10,8 @@ from jaxtyping import Array, Integer
 
 from envs.dummy_env import make_dummy_env, simple_rollout
 from envs.multi_catch import BaseObs, make_multi_catch
-from utils.jax_utils import BootstrapConfig, bootstrap, roll_into_matrix, tree_slice
-from utils.log_utils import exec_loop
+from cleanrl_utils.jax_utils import BootstrapConfig, bootstrap, roll_into_matrix, tree_slice
+from cleanrl_utils.log_utils import exec_loop
 from utils.prioritized_buffer import PrioritizedBuffer
 from utils.structures import GoalObs, Prediction, Transition
 from wrappers.auto_reset import auto_reset_wrapper

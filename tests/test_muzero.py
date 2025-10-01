@@ -4,8 +4,8 @@ import jax.random as jr
 import numpy.testing as npt
 import pytest
 
-from experiments import muzero
-from experiments.config import (
+from cleanrl import muzero
+from cleanrl_utils.config import (
     TrainConfig,
     dict_to_dataclass,
     get_args,

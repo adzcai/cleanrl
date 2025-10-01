@@ -24,7 +24,7 @@ from typing import (
 import jax.numpy as jnp
 from jaxtyping import Array, Float, Integer, Key
 
-from utils.log_utils import typecheck
+from cleanrl_utils.log_utils import typecheck
 
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance

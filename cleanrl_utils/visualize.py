@@ -13,7 +13,7 @@ from matplotlib.figure import Figure
 
 from envs.housemaze_env import visualize_housemaze
 from envs.multi_catch import visualize_catch
-from experiments.config import ValueConfig
+from cleanrl_utils.config import ValueConfig
 from utils.structures import StepType, Transition
 
 
