@@ -1,0 +1,61 @@
+arch:
+  rnn_size: 1
+  mlp_size: 1
+  mlp_depth: 0
+  goal_dim: 1
+  activation: relu
+  projection_kind: mlp
+
+env:
+  name: dummy
+  source: custom
+  kwargs:
+    max_horizon: 1
+
+collection:
+  total_transitions:
+    values: [1, 10, 50, 100]
+  num_time_steps: 2
+  num_buffer_fills: 5  # all transitions are the same
+  num_envs: 1
+  mcts_depth: 1
+  num_mcts_simulations: 1
+
+value:
+  num_value_bins: 3
+  min_value: 0
+  max_value: 1
+
+bootstrap:
+  discount: 0.99
+  lambda_gae: 0.95
+
+optim:
+  num_minibatches: 5
+  batch_size:
+    values: [1, 4, 10]
+  num_time_steps: 4
+  max_grad_norm: 2.0
+  target_update_freq:
+    values: [1, 4, 10]
+  target_update_size: 1
+  world_model_gradient_scale: 0.5
+  priority_exponent: 0.8
+  importance_exponent: 0.0
+
+loss:
+  value_coef: 1
+  reward_coef: 0
+
+lr:
+  lr_init:
+    values: [0.01, 0.1, 0.2]
+  warmup_frac: 0.1
+  decay_rate: 0.8
+  num_stairs: 4
+
+eval:
+  warnings: False
+  num_evals: 1
+  num_eval_envs: 1
+  num_time_steps: 2

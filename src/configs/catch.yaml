@@ -1,0 +1,58 @@
+arch:
+  projection_kind: mlp
+  dyn_size: 128
+  mlp_size: 64
+  mlp_depth: 1
+  goal_dim: 1
+  activation: relu
+  world_model_gradient_scale: 0.5
+
+env:
+  name: MultiCatch
+  source: custom
+  kwargs:
+    num_goals: 1
+
+mcts:
+  num_simulations: 4
+  max_depth: 10
+
+value:
+  num_value_bins: 7
+  min_value: -1.0
+  max_value: 1.0
+
+bootstrap:
+  discount: 0.99
+  lambda_gae: 0.95
+
+buffer:
+  batch_size: 64
+  max_length: 3_125
+  sample_length: 10
+
+replay:
+  priority_exponent: 0.9
+  importance_exponent: 0.6
+
+lr:
+  name: cosine_decay_schedule
+  init_value: 0.01
+  decay_steps: ${optim.total_updates}
+
+optim:
+  total_updates: 2_500
+  num_updates_per_iter: 8
+  batch_size: 32
+  target_update_freq: 20
+
+loss:
+  policy_coef: 1.0
+  value_coef: 0.6
+  # model_policy_coef: 10.0
+  # model_value_coef: 2.5
+  reward_coef: 0.8
+
+eval:
+  warnings: False
+  eval_freq: 300

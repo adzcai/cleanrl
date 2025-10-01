@@ -1,0 +1,67 @@
+arch:
+  projection_kind: mlp
+  dyn_size:
+    values: [32, 64, 128]
+  mlp_size:
+    values: [32, 64]
+  mlp_depth: 1
+  goal_dim: 1
+  activation: relu
+  world_model_gradient_scale: 0.5
+
+env:
+  name: MultiCatch
+  source: custom
+  kwargs:
+    num_goals: 1
+
+mcts:
+  num_simulations: 5
+  max_depth: null
+
+value:
+  num_value_bins:
+    values: [9, 15, 51]
+  min_value: -1.0
+  max_value: 1.0
+
+bootstrap:
+  discount: 0.988
+  lambda_gae: 0.95
+
+buffer:
+  batch_size: 32
+  max_length: 10_000
+  sample_length: 20
+
+replay:
+  priority_exponent: 0.9
+  importance_exponent: 0.6
+
+lr:
+  init_value: 0.0
+  peak_value: 0.01
+  warmup_steps: 1_000
+  transition_steps:
+    values: [20, 100, 200]
+  decay_rate: 0.5
+  staircase: True
+
+optim:
+  total_updates: 50_000
+  num_updates_per_iter:
+    values: [2, 8]
+  batch_size: 64
+  target_update_freq:
+    values: [20, 50, 100]
+
+loss:
+  policy_coef: 1.0
+  value_coef: 0.25
+  # model_policy_coef: 10.0
+  # model_value_coef: 2.5
+  reward_coef: 1.0
+
+eval:
+  warnings: False
+  eval_freq: 100

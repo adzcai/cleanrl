@@ -6,6 +6,7 @@ import pytest
 
 from cleanrl_utils.envs.grid_env import LARGER_MAP, SIMPLE_MAP, CellType, GridEnv
 
+
 @pytest.fixture(autouse=True)
 def disable_jit():
     jax.config.update("jax_disable_jit", True)

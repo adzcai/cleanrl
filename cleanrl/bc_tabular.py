@@ -1,16 +1,17 @@
-from dataclasses import dataclass
 import os
 import random
 import time
+from dataclasses import dataclass
+
 import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
+import tyro
 from jaxtyping import Array, Float
 from torch.utils.tensorboard import SummaryWriter
 
 from cleanrl_utils.envs import grid_env
-import tyro
 
 
 @dataclass
@@ -93,7 +94,7 @@ if __name__ == "__main__":
     def update(w: optax.Params, opt_state: optax.OptState):
         def loss(w: Float[Array, " D"]):
             π = env.softmax_π(w)
-            return - π.logits[expert_states, expert_actions].mean(), env.π_to_return(π)
+            return -π.logits[expert_states, expert_actions].mean(), env.π_to_return(π)
 
         (l, value), grads = jax.value_and_grad(loss, has_aux=True)(w)
         updates, opt_state = optim.update(grads, opt_state, w)
