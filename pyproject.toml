@@ -32,7 +32,7 @@ atari = [
     "shimmy",
 ]
 envpool = ["envpool", "opencv-python",]
-procgen = ["procgen; platform_machine != 'arm64'"]
+# procgen = ["procgen; platform_machine != 'arm64'"]
 control = [
     "mujoco",
     "mujoco-mjx",

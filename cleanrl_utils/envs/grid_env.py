@@ -104,11 +104,6 @@ class TabularMDP:
         return Categorical(logits=self.features @ w)
 
 
-def Q_to_greedy(Q: Float[Array, "S A"]):
-    index = jnp.arange(Q.shape[0]), Q.argmax(axis=1)
-    return Categorical(probs=jnp.zeros_like(Q).at[index].set(1))
-
-
 class GridEnv(TabularMDP):
     action_map: ClassVar[Integer[Array, "A 2"]] = jnp.asarray(
         [
@@ -124,7 +119,11 @@ class GridEnv(TabularMDP):
     goal_pos: UInt8[Array, " 2"]
     features: Float[Array, "S A D"]
 
-    def __init__(self, map_text: str, γ: float) -> None:
+    def __init__(self, env_id: str, γ: float) -> None:
+        map_text = {
+            "simple": SIMPLE_MAP,
+            "larger": LARGER_MAP,
+        }[env_id]
         self.grid = jnp.asarray([[letter_to_cell[char] for char in line] for line in map_text.strip().splitlines()])
         wall_mask = self.grid != CellType.WALL.index
         self.state_to_pos = jnp.argwhere(wall_mask)
@@ -153,6 +152,11 @@ class GridEnv(TabularMDP):
     @property
     def bounds(self):
         return jnp.asarray(self.grid.shape)
+
+    @staticmethod
+    def Q_to_greedy(Q: Float[Array, "S A"]):
+        index = jnp.arange(Q.shape[0]), Q.argmax(axis=1)
+        return Categorical(probs=jnp.zeros_like(Q).at[index].set(1))
 
     def blocked(self, s: int, a: int):
         row, col = self.state_to_pos[s]

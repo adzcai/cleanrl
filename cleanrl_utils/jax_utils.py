@@ -8,7 +8,7 @@ import jax.numpy as jnp
 import rlax
 from jaxtyping import Array, Float, Integer
 
-from utils.structures import (
+from cleanrl_utils.structures import (
     TArrayTree,
     TEnvState,
     TObs,
@@ -67,6 +67,16 @@ def bootstrap(
 
     # ensure terminal states get zero value
     return jnp.where(last_sh[:-1, :-1], 0.0, bootstrapped_return), aux
+
+
+def f_divergence(f_name: str, c: Float[Array, ""], dual: bool):
+    if f_name == "chisq":
+        if dual:
+            return c * c / 4 + c
+    if f_name == "kl_rev":
+        if dual:
+            return jnp.exp(c - 1)
+    raise NotImplementedError(f"f {f_name} not recognized")
 
 
 def roll_into_matrix(ary: Float[Array, " n *size"]) -> Float[Array, " n n *size"]:

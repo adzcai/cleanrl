@@ -140,14 +140,16 @@ class StepFn(Protocol[TObs, TEnvState, TAction, TEnvParams]):
         )
 
 
-class GoalObs(NamedTuple, Generic[TObs]):
+@dataclass
+class GoalObs(Generic[TObs]):
     obs: TObs
     """The original observation."""
     goal: Integer[Array, ""]
     """The goal (for multitask environments)."""
 
 
-class Transition(NamedTuple, Generic[TObs, TEnvState]):
+@dataclass
+class Transition(Generic[TObs, TEnvState]):
     """A single transition. May be batched into a trajectory."""
 
     time_step: TimeStep[TObs, TEnvState]

@@ -1,54 +1,122 @@
+import os
+import random
+import time
+from dataclasses import dataclass
+
+import jax
 import jax.numpy as jnp
+import numpy as np
 import optax
-from distrax import Categorical
-from jax import lax, value_and_grad, vmap
+import tyro
+from jax import lax, value_and_grad
 from jax.scipy.special import logsumexp
-from jaxtyping import Array, Float
-from matplotlib import pyplot as plt
+from torch.utils.tensorboard import SummaryWriter
 
-from cleanrl_utils.envs.grid_env import SIMPLE_MAP, GridEnv, Q_to_greedy
+from cleanrl_utils.envs.grid_env import GridEnv
+from cleanrl_utils.jax_utils import f_divergence
 
 
-def main(env: GridEnv, lr=0.5, n_iters=50, f_name="chisq"):
-    π_expert = Q_to_greedy(env.value_iteration())
-    μ_expert = env.π_to_μ(π_expert)
-    optim = optax.adamw(optax.exponential_decay(lr, 50, 0.01))
+@dataclass
+class Args:
+    exp_name: str = os.path.basename(__file__)[: -len(".py")]
+    """the name of this experiment"""
+    seed: int = 1
+    """seed of the experiment"""
+    track: bool = False
+    """if toggled, this experiment will be tracked with Weights and Biases"""
+    wandb_project_name: str = "cleanRL"
+    """the wandb's project name"""
+    wandb_entity: str = None
+    """the entity (team) of wandb's project"""
+    capture_video: bool = False
+    """whether to capture videos of the agent performances (check out `videos` folder)"""
+    save_model: bool = False
+    """whether to save model into the `runs/{run_name}` folder"""
+    upload_model: bool = False
+    """whether to upload the saved model to huggingface"""
+    hf_entity: str = ""
+    """the user or org name of the model repository from the Hugging Face Hub"""
 
-    def f_dual(c):
-        if f_name == "chisq":
-            return c * c / 4 + c
-        elif f_name == "kl_rev":
-            return jnp.exp(c - 1)
-        else:
-            raise NotImplementedError(f"f {f_name} not recognized")
-
-    @value_and_grad
-    def loss(w):
-        Q = env.features @ w
-        V = logsumexp(Q, axis=1)
-        loss_expert = f_dual(env.γ * env.P.probs @ V - Q)
-        return (1 - env.γ) * env.d0.probs @ V + μ_expert.probs @ loss_expert.ravel()
-
-    def step(carry: tuple[Float[Array, " D"], optax.OptState], _):
-        w, opt_state = carry
-        r, grads = loss(w)
-        updates, opt_state = optim.update(grads, opt_state, w)
-        w = optax.apply_updates(w, updates)
-        return (w, opt_state), (w, r)
-
-    w = jnp.zeros(env.D)
-    opt_state = optim.init(w)
-    (w_fit, _), (ws, losses) = lax.scan(step, (w, opt_state), length=n_iters)
-
-    returns = vmap(lambda w: env.π_to_return(Categorical(logits=env.features @ w)))(ws)
-    regret = env.π_to_return(π_expert) - returns
-    plt.plot(regret, label="regret")
-    plt.plot(losses, label="IQ-Learn loss")
-    plt.legend()
-    plt.savefig("artifacts/iq-learn-losses.png")
-
-    env.draw(env.softmax_π(w_fit), "artifacts/iq-learn-learner.png", "learner")
+    # Algorithm specific arguments
+    env_id: str = "simple"
+    """the id of the environment"""
+    total_timesteps: int = 100
+    """total timesteps of the experiments"""
+    learning_rate: float = 0.5
+    """the learning rate of the optimizer"""
+    num_envs: int = 1
+    """the number of parallel game environments"""
+    gamma: float = 0.99
+    """the discount factor gamma"""
+    f_divergence: str = "chisq"
+    """the f divergence to use"""
+    proximal: bool = False
+    """whether to minimize KL divergence to current policy"""
 
 
 if __name__ == "__main__":
-    main(GridEnv(SIMPLE_MAP, 0.99))
+    args = tyro.cli(Args)
+    assert args.num_envs == 1, "vectorized envs are not supported at the moment"
+    run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
+    if args.track:
+        import wandb
+
+        wandb.init(
+            project=args.wandb_project_name,
+            entity=args.wandb_entity,
+            sync_tensorboard=True,
+            config=vars(args),
+            name=run_name,
+            monitor_gym=True,
+            save_code=True,
+        )
+    writer = SummaryWriter(f"runs/{run_name}")
+    writer.add_text(
+        "hyperparameters",
+        "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
+    )
+
+    # TRY NOT TO MODIFY: seeding
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    key = jax.random.PRNGKey(args.seed)
+    key, q_key = jax.random.split(key, 2)
+
+    # env setup
+    env = GridEnv(args.env_id, args.gamma)
+
+    # expert data
+    π_expert = env.Q_to_greedy(env.value_iteration())
+    μ_expert = env.π_to_μ(π_expert)
+    optim = optax.adamw(optax.exponential_decay(args.learning_rate, 50, 0.1))
+
+    # networks
+    w = jnp.zeros(env.D)
+    opt_state = optim.init(w)
+
+    def update(w: optax.Params, opt_state: optax.OptState):
+        π = env.softmax_π(w)
+        value = env.π_to_return(π)
+
+        def loss(w):
+            Q = env.features @ w
+            V = jnp.log(jnp.sum(jnp.exp(Q) * (π.probs if args.proximal else 1), axis=1))
+            loss_expert = f_divergence(args.f_divergence, env.γ * env.P.probs @ V - Q, dual=True)
+            return (1 - env.γ) * env.d0.probs @ V + μ_expert.probs @ loss_expert.ravel()
+
+        loss_val, grads = value_and_grad(loss)(w)
+        updates, opt_state = optim.update(grads, opt_state, w)
+        w = optax.apply_updates(w, updates)
+        return (w, opt_state), (value, loss_val)
+
+    (w_fit, _), (values, losses) = lax.scan(lambda carry, _: update(*carry), (w, opt_state), length=args.total_timesteps)
+
+    regrets = env.π_to_return(π_expert) - values
+    for i, (regret, loss_val) in enumerate(zip(regrets.tolist(), losses.tolist())):
+        writer.add_scalar("losses/irl_loss", loss_val, i)
+        writer.add_scalar("charts/episodic_regret", regret, i)
+
+    fig = env.draw(env.softmax_π(w_fit), "learner")
+    writer.add_figure("eval/final", fig)
+
+    writer.close()
