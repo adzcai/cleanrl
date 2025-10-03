@@ -4,7 +4,7 @@ from jax import lax, vmap
 from jax.scipy.optimize import minimize
 from jaxtyping import Array, Float, UInt
 
-from cleanrl_utils.envs.grid_env import LARGER_MAP, GridEnv, Q_to_greedy
+from cleanrl_utils.envs.env_tabular import LARGER_MAP, GridEnv, Q_to_greedy
 
 
 def main(env: GridEnv, n_iters=4):

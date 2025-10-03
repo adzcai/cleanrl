@@ -5,7 +5,7 @@ from jax.nn import sigmoid
 from jaxtyping import Array, Float
 from matplotlib import pyplot as plt
 
-from cleanrl_utils.envs.grid_env import SIMPLE_MAP, GridEnv, Q_to_greedy
+from cleanrl_utils.envs.env_tabular import SIMPLE_MAP, GridEnv, Q_to_greedy
 
 
 def main(env: GridEnv, lr_d=0.005, lr_π=0.5, n_iters=50):

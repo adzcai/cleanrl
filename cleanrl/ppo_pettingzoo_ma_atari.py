@@ -124,8 +124,6 @@ if __name__ == "__main__":
         import wandb
 
         wandb.init(
-            project=args.wandb_project_name,
-            entity=args.wandb_entity,
             sync_tensorboard=True,
             config=vars(args),
             name=run_name,

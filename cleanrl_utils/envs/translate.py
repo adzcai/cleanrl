@@ -4,21 +4,21 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 import jax.random as jr
+from envs.base import Environment
+from envs.housemaze_env import housemaze_wrapper, new_housemaze
+from cleanrl_utils.envs.env_multi_catch import make_multi_catch
 from jaxtyping import Array, Key
 
-from envs.base import Environment
-from envs.dummy_env import make_dummy_env
-from envs.housemaze_env import housemaze_wrapper, new_housemaze
-from envs.multi_catch import make_multi_catch
 from cleanrl_utils.config import EnvConfig
-from utils.structures import (
+from cleanrl_utils.envs.env_dummy import make_dummy_env
+from cleanrl_utils.envs.metrics import metrics_wrapper
+from cleanrl_utils.envs.utils import (
     StepType,
     TimeStep,
 )
-from wrappers.auto_reset import auto_reset_wrapper
-from wrappers.flatten_observation import flatten_observation_wrapper
-from wrappers.goal_wrapper import goal_wrapper
-from wrappers.metrics import metrics_wrapper
+from cleanrl_utils.envs.wrap_auto_reset import auto_reset_wrapper
+from cleanrl_utils.envs.wrap_flatten_observation import flatten_observation_wrapper
+from cleanrl_utils.envs.wrap_goal import goal_wrapper
 
 if importlib.util.find_spec("gymnax") is not None:
     import gymnax.environments.environment as ge

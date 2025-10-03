@@ -33,8 +33,8 @@ from jaxtyping import Array, Bool, Float, Integer, Key, jaxtyped
 from envs.multi_catch import visualize_catch
 from envs.translate import make_env
 from cleanrl_utils.config import ArchConfig, TrainConfig, main
-from cleanrl_utils.jax_utils import tree_slice
-from cleanrl_utils.log_utils import exec_loop, get_norm_data, log_values
+from cleanrl_utils.jax_utils import get_norm_data, log_values, tree_slice
+from cleanrl_utils.jax_utils import exec_loop
 from utils.prioritized_buffer import BufferState, PrioritizedBuffer
 
 matplotlib.use("agg")  # enable plotting inside jax callback

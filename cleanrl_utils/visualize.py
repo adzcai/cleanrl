@@ -8,13 +8,13 @@ import matplotlib.pyplot as plt
 import mctx
 import numpy as np
 import wandb
+from envs.housemaze_env import visualize_housemaze
 from jaxtyping import Array, Bool, Float, PyTree
 from matplotlib.figure import Figure
+from cleanrl_utils.envs.utils import StepType, Transition
 
-from envs.housemaze_env import visualize_housemaze
-from envs.multi_catch import visualize_catch
 from cleanrl_utils.config import ValueConfig
-from utils.structures import StepType, Transition
+from cleanrl_utils.envs.env_multi_catch import visualize_catch
 
 
 def visualize_trajectory(

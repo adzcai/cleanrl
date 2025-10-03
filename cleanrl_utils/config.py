@@ -72,7 +72,7 @@ from omegaconf import DictConfig, ListConfig, OmegaConf
 from wandb.sdk.wandb_run import Run
 
 from cleanrl_utils.jax_utils import BootstrapConfig
-from cleanrl_utils.log_utils import typecheck
+from cleanrl_utils.jax_utils import typecheck
 from utils.prioritized_buffer import BufferConfig
 from utils.structures import TDataclass, dataclass
 

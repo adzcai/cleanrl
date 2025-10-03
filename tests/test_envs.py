@@ -6,7 +6,7 @@ import numpy as np
 import numpy.testing as npt
 import pytest
 
-from cleanrl_utils.envs.grid_env import LARGER_MAP, SIMPLE_MAP, CellType, GridEnv
+from cleanrl_utils.envs.env_tabular import LARGER_MAP, SIMPLE_MAP, CellType, GridEnv
 from envs.dummy_env import make_dummy_env, simple_rollout
 from envs.pytree_env import Observation, make_pytree_env
 from utils.structures import SENTINEL, GoalObs, StepType

@@ -33,17 +33,17 @@ from utils import specs
 from cleanrl_utils.jax_utils import (
     BootstrapConfig,
     bootstrap,
+    exec_loop,
     get_network_size,
+    get_norm_data,
     get_weight_mask,
+    log_values,
+    print_bytes,
     roll_into_matrix,
     scale_gradient,
     tree_slice,
 )
-from cleanrl_utils.log_utils import (
-    exec_loop,
-    get_norm_data,
-    log_values,
-    print_bytes,
+from cleanrl_utils.jax_utils import (
     typecheck,
 )
 from utils.prioritized_buffer import BufferState, PrioritizedBuffer

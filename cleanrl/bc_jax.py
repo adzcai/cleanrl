@@ -12,7 +12,7 @@ import tyro
 from jaxtyping import Array, Float
 from torch.utils.tensorboard import SummaryWriter
 
-from cleanrl_utils.envs import grid_env
+from cleanrl_utils.envs import env_tabular
 
 
 @dataclass
@@ -23,10 +23,6 @@ class Args:
     """seed of the experiment"""
     track: bool = False
     """if toggled, this experiment will be tracked with Weights and Biases"""
-    wandb_project_name: str = "cleanRL"
-    """the wandb's project name"""
-    wandb_entity: str = None
-    """the entity (team) of wandb's project"""
     capture_video: bool = False
     """whether to capture videos of the agent performances (check out `videos` folder)"""
     save_model: bool = False
@@ -60,8 +56,6 @@ if __name__ == "__main__":
         import wandb
 
         wandb.init(
-            project=args.wandb_project_name,
-            entity=args.wandb_entity,
             sync_tensorboard=True,
             config=vars(args),
             name=run_name,
